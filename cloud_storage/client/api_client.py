@@ -54,10 +54,12 @@ class ClientApi:
         server_url: str,
         token: str | None = None,
         certificate_fingerprint: str = "",
+        remote_session: str | None = None,
     ) -> None:
         self.server_url = validate_server_url(server_url)
         self.token = token
         self.certificate_fingerprint = certificate_fingerprint.replace(":", "").casefold()
+        self.remote_session = remote_session
         if self.certificate_fingerprint and (
             len(self.certificate_fingerprint) != 64
             or any(
@@ -91,6 +93,14 @@ class ClientApi:
 
     def pairing_status(self) -> dict[str, Any]:
         return self._json_request("/v1/pairing/status")
+
+    def create_remote_session(self, username: str, password: str) -> dict[str, Any]:
+        return self._json_request(
+            "/v1/remote/session",
+            method="POST",
+            payload={"username": username, "password": password},
+            timeout=10.0,
+        )
 
     def list_spaces(self) -> list[dict[str, Any]]:
         return self._json_request("/v1/spaces")
@@ -305,6 +315,8 @@ class ClientApi:
         headers = {"Accept": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        if self.remote_session:
+            headers["X-Cloud-Remote-Session"] = self.remote_session
         return headers
 
     def _connection(self, timeout: float) -> http.client.HTTPConnection:

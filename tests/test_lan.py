@@ -13,6 +13,7 @@ from cloud_storage.core.api import create_app
 from cloud_storage.core.config import CoreConfig
 from cloud_storage.core.main import CoreServerGroup
 from cloud_storage.core.tls import load_or_create_tls_identity
+from cloud_storage.core.tunnels import ZrokTunnelService
 from cloud_storage.pairing import build_pairing_uri, parse_pairing_uri
 from cloud_storage.services.core_client import CoreClient
 
@@ -150,6 +151,85 @@ def test_remote_pairing_works_when_administrator_enables_it(tmp_path) -> None:
     assert paired.json()["device"]["status"] == "pending"
 
 
+def test_zrok_gateway_requires_account_login_and_hides_manager_api(tmp_path) -> None:
+    config = CoreConfig(
+        data_directory=tmp_path,
+        zrok_enabled=True,
+        zrok_port=18768,
+        zrok_executable="missing-zrok-for-test",
+        remote_pairing_enabled=True,
+    )
+    app = create_app(config)
+    manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
+
+    with TestClient(app) as manager, TestClient(
+        app, base_url="http://127.0.0.1:18768"
+    ) as internet:
+        user = manager.post(
+            "/v1/admin/users",
+            headers=manager_headers,
+            json={"username": "internetqa", "display_name": "Internet QA", "quota_gib": 1},
+        ).json()["user"]
+        invitation = manager.post(
+            "/v1/admin/invitations",
+            headers=manager_headers,
+            json={"user_id": user["id"]},
+        ).json()
+        paired = internet.post(
+            "/v1/pairing/redeem",
+            json={
+                "code": invitation["code"],
+                "password": "internet qa secure password",
+                "device_name": "Internet laptop",
+                "platform": "Windows",
+            },
+        ).json()
+        manager.post(
+            f"/v1/admin/devices/{paired['device']['id']}/approve",
+            headers=manager_headers,
+        ).raise_for_status()
+        device_headers = {"Authorization": f"Bearer {paired['device_token']}"}
+
+        assert internet.get("/v1/admin/summary", headers=manager_headers).status_code == 404
+        assert internet.get("/v1/spaces", headers=device_headers).status_code == 403
+        wrong = internet.post(
+            "/v1/remote/session",
+            headers=device_headers,
+            json={"username": "internetqa", "password": "wrong password value"},
+        )
+        assert wrong.status_code == 403
+        login = internet.post(
+            "/v1/remote/session",
+            headers=device_headers,
+            json={
+                "username": "internetqa",
+                "password": "internet qa secure password",
+            },
+        )
+        assert login.status_code == 200
+        spaces = internet.get(
+            "/v1/spaces",
+            headers={
+                **device_headers,
+                "X-Cloud-Remote-Session": login.json()["session_token"],
+            },
+        )
+
+    assert spaces.status_code == 200
+    assert spaces.json()[0]["name"] == "Мои файлы"
+    assert app.state.runtime.zrok_tunnel.status()["installed"] is False
+
+
+def test_zrok_process_environment_does_not_inherit_unrelated_secrets(monkeypatch) -> None:
+    monkeypatch.setenv("UNRELATED_API_SECRET", "must-not-leak")
+    monkeypatch.setenv("ZROK_API_ENDPOINT", "https://zrok.example")
+
+    environment = ZrokTunnelService._subprocess_environment()
+
+    assert "UNRELATED_API_SECRET" not in environment
+    assert environment["ZROK_API_ENDPOINT"] == "https://zrok.example"
+
+
 def test_live_https_listener_pinning_discovery_and_local_admin_boundary(tmp_path) -> None:
     local_port = _free_tcp_port()
     lan_port = _free_tcp_port()
@@ -212,6 +292,47 @@ def test_live_https_listener_pinning_discovery_and_local_admin_boundary(tmp_path
 
         local_client = CoreClient(config)
         assert local_client.summary()["users"] == 0
+    finally:
+        servers.request_shutdown(delay=False)
+        thread.join(timeout=8)
+    assert not thread.is_alive()
+
+
+def test_live_zrok_backend_stays_loopback_and_core_survives_missing_binary(tmp_path) -> None:
+    local_port = _free_tcp_port()
+    zrok_port = _free_tcp_port()
+    config = CoreConfig(
+        data_directory=tmp_path,
+        port=local_port,
+        zrok_enabled=True,
+        zrok_port=zrok_port,
+        zrok_executable="missing-zrok-for-live-test",
+    )
+    servers = CoreServerGroup(config)
+    thread = threading.Thread(target=servers.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 8
+    while not servers.local_server.started and thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert servers.local_server.started
+    assert servers.zrok_server is not None and servers.zrok_server.started
+
+    try:
+        gateway = ClientApi(
+            f"http://127.0.0.1:{zrok_port}",
+            token=servers.application.state.runtime.secrets.manager_token,
+        )
+        assert gateway.health()["zrok"]["manager_api_exposed"] is False
+        with pytest.raises(ClientApiError) as denied:
+            gateway._json_request("/v1/admin/summary")
+        assert denied.value.status_code == 404
+        deadline = time.monotonic() + 3
+        while (
+            servers.application.state.runtime.zrok_tunnel.status()["state"] == "starting"
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        assert servers.application.state.runtime.zrok_tunnel.status()["state"] == "not_installed"
     finally:
         servers.request_shutdown(delay=False)
         thread.join(timeout=8)

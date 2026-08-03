@@ -17,6 +17,7 @@ from cloud_storage.client.settings import (
     ClientProfile,
     ClientSettingsStore,
     DeviceTokenVault,
+    RemoteSessionVault,
     validate_server_url,
 )
 from cloud_storage.client.window import ClientWindow
@@ -48,6 +49,14 @@ def test_client_profile_and_device_token_are_persisted(tmp_path) -> None:
     assert token.encode() not in vault.path.read_bytes() if os.name == "nt" else True
     vault.clear()
     assert vault.load() is None
+
+    session_vault = RemoteSessionVault(tmp_path)
+    session = "css_" + "x" * 120
+    session_vault.store(session)
+    assert session_vault.load() == session
+    assert session.encode() not in session_vault.path.read_bytes() if os.name == "nt" else True
+    session_vault.clear()
+    assert session_vault.load() is None
 
 
 def test_multiple_server_profiles_have_independent_tokens(tmp_path) -> None:
@@ -114,6 +123,7 @@ def test_desktop_client_window_smoke(tmp_path) -> None:
     assert window.stack.count() == 5
     assert window.help_page.article_list.count() > 0
     assert window.discover_button.text() == "Найти в сети"
+    assert window.remote_login_button.text() == "Войти через интернет"
     assert window.server_selector.count() == 1
     assert window.nav_buttons[1].isEnabled() is False
     window.add_server()

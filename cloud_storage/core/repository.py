@@ -169,6 +169,26 @@ class CoreRepository:
             raise NotFoundError("user not found")
         return self._user(row)
 
+    def authenticate_user_password(self, username: str, password: str) -> UserRecord:
+        username = self.credentials.validate_username(username)
+        with self.database.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT id, username, display_name, password_hash, role,
+                       quota_bytes, enabled, created_at
+                FROM users WHERE username = ? COLLATE NOCASE
+                """,
+                (username,),
+            ).fetchone()
+        if (
+            row is None
+            or not row["enabled"]
+            or not row["password_hash"]
+            or not self.credentials.verify_password(row["password_hash"], password)
+        ):
+            raise PermissionDeniedError("invalid username or password")
+        return self._user(row)
+
     def create_invitation(self, user_id: str, ttl_seconds: int) -> tuple[str, str, str]:
         self.get_user(user_id)
         invitation_id = str(uuid.uuid4())

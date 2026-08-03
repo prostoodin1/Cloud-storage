@@ -53,6 +53,9 @@ class CoreClient:
     def diagnostics(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/diagnostics")
 
+    def tunnels(self) -> dict[str, Any]:
+        return self._manager_request("/v1/admin/tunnels")
+
     def server_mode(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/server-mode")
 
@@ -340,6 +343,13 @@ class CoreSupervisor:
         environment["CLOUD_STORAGE_REMOTE_PAIRING_ENABLED"] = (
             "1" if self.config.remote_pairing_enabled else "0"
         )
+        environment["CLOUD_STORAGE_ZROK_ENABLED"] = (
+            "1" if self.config.zrok_enabled else "0"
+        )
+        environment["CLOUD_STORAGE_ZROK_HOST"] = self.config.zrok_host
+        environment["CLOUD_STORAGE_ZROK_PORT"] = str(self.config.zrok_port)
+        environment["CLOUD_STORAGE_ZROK_EXECUTABLE"] = self.config.zrok_executable
+        environment["CLOUD_STORAGE_ZROK_SHARE_NAME"] = self.config.zrok_share_name
         environment["CLOUD_STORAGE_SERVER_NAME"] = self.config.server_name
         log_handle = self.config.log_path.open("ab")
         try:

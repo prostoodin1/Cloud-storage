@@ -69,11 +69,14 @@ class CoreServerGroup:
         self.local_server = uvicorn.Server(self._uvicorn_config(config.host, config.port))
         self.lan_server: uvicorn.Server | None = None
         self.remote_server: uvicorn.Server | None = None
+        self.zrok_server: uvicorn.Server | None = None
         self.discovery: DiscoveryResponder | None = None
         self._lan_thread: threading.Thread | None = None
         self._remote_thread: threading.Thread | None = None
+        self._zrok_thread: threading.Thread | None = None
         self._lan_error: BaseException | None = None
         self._remote_error: BaseException | None = None
+        self._zrok_error: BaseException | None = None
         identity = self.application.state.runtime.tls_identity
         if config.lan_enabled:
             if identity is None:
@@ -98,6 +101,10 @@ class CoreServerGroup:
                     private_key=identity.private_key_path,
                 )
             )
+        if config.zrok_enabled:
+            self.zrok_server = uvicorn.Server(
+                self._uvicorn_config(config.zrok_host, config.zrok_port, secondary=True)
+            )
         self.application.state.shutdown_callback = self.request_shutdown
 
     def _uvicorn_config(
@@ -107,6 +114,7 @@ class CoreServerGroup:
         *,
         certificate: str | None = None,
         private_key: str | None = None,
+        secondary: bool = False,
     ) -> uvicorn.Config:
         return uvicorn.Config(
             self.application,
@@ -118,13 +126,14 @@ class CoreServerGroup:
             date_header=False,
             ssl_certfile=certificate,
             ssl_keyfile=private_key,
-            lifespan="off" if certificate else "auto",
+            lifespan="off" if certificate or secondary else "auto",
         )
 
     def run(self) -> None:
         listeners = [
             (self.lan_server, "LAN HTTPS", "_lan_thread", self._run_lan),
             (self.remote_server, "remote HTTPS", "_remote_thread", self._run_remote),
+            (self.zrok_server, "zrok backend", "_zrok_thread", self._run_zrok),
         ]
         for server, label, thread_attribute, runner in listeners:
             if server is None:
@@ -142,13 +151,19 @@ class CoreServerGroup:
                     self.request_shutdown()
                     raise RuntimeError(f"{label} listener did not become ready")
                 time.sleep(0.02)
-            error = self._lan_error if server is self.lan_server else self._remote_error
+            error = {
+                self.lan_server: self._lan_error,
+                self.remote_server: self._remote_error,
+                self.zrok_server: self._zrok_error,
+            }.get(server)
             if error is not None or not server.started:
                 self.request_shutdown()
                 raise RuntimeError(f"{label} listener could not start") from error
         if self.lan_server is not None:
             if self.discovery is not None:
                 self.discovery.start()
+        if self.zrok_server is not None:
+            self.application.state.runtime.zrok_tunnel.start()
         try:
             self.local_server.run()
         finally:
@@ -159,6 +174,8 @@ class CoreServerGroup:
                 self._lan_thread.join(timeout=5)
             if self._remote_thread is not None:
                 self._remote_thread.join(timeout=5)
+            if self._zrok_thread is not None:
+                self._zrok_thread.join(timeout=5)
 
     def request_shutdown(self, *, delay: bool = True) -> None:
         if delay:
@@ -168,6 +185,9 @@ class CoreServerGroup:
             self.lan_server.should_exit = True
         if self.remote_server is not None:
             self.remote_server.should_exit = True
+        if self.zrok_server is not None:
+            self.zrok_server.should_exit = True
+            self.application.state.runtime.zrok_tunnel.stop()
 
     def _run_lan(self) -> None:
         assert self.lan_server is not None
@@ -182,6 +202,13 @@ class CoreServerGroup:
             self.remote_server.run()
         except BaseException as exc:  # server thread boundary
             self._remote_error = exc
+
+    def _run_zrok(self) -> None:
+        assert self.zrok_server is not None
+        try:
+            self.zrok_server.run()
+        except BaseException as exc:  # server thread boundary
+            self._zrok_error = exc
 
 
 def run_server(config: CoreConfig) -> int:
@@ -221,6 +248,11 @@ def main() -> int:
             remote_port=args.remote_port or base.remote_port,
             remote_public_url=base.remote_public_url,
             remote_pairing_enabled=base.remote_pairing_enabled,
+            zrok_enabled=base.zrok_enabled,
+            zrok_host=base.zrok_host,
+            zrok_port=base.zrok_port,
+            zrok_executable=base.zrok_executable,
+            zrok_share_name=base.zrok_share_name,
             server_name=base.server_name,
             max_upload_bytes=base.max_upload_bytes,
             pairing_ttl_seconds=base.pairing_ttl_seconds,

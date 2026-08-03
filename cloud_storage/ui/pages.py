@@ -461,6 +461,19 @@ class SettingsPage(QWidget):
         self.remote_status_label: QLabel | None = None
         self.remote_details_label: QLabel | None = None
         self.remote_audit_rows: QVBoxLayout | None = None
+        self.zrok_enabled = QCheckBox(
+            "Подключать сервер к интернету через zrok без открытия порта роутера"
+        )
+        self.zrok_port = QSpinBox()
+        self.zrok_port.setRange(1024, 65535)
+        self.zrok_port.setValue(8768)
+        self.zrok_executable = QLineEdit("zrok")
+        self.zrok_executable.setPlaceholderText("zrok или полный путь к zrok.exe")
+        self.zrok_share_name = QLineEdit()
+        self.zrok_share_name.setMaxLength(63)
+        self.zrok_share_name.setPlaceholderText("Необязательно: имя заранее созданного reserved share")
+        self.zrok_status_label: QLabel | None = None
+        self.zrok_details_label: QLabel | None = None
         self.users_rows: QVBoxLayout | None = None
         self.trusted_device_rows: QVBoxLayout | None = None
         self.pending_device_rows: QVBoxLayout | None = None
@@ -509,6 +522,7 @@ class SettingsPage(QWidget):
         restore_jobs: list[dict] | None = None,
         backup_automation: dict | None = None,
         audit_events: list[dict] | None = None,
+        tunnels: dict | None = None,
     ) -> None:
         online = health is not None
         if self.core_status_label is not None:
@@ -615,6 +629,32 @@ class SettingsPage(QWidget):
                 label.setWordWrap(True)
                 label.setProperty("muted", True)
                 self.remote_audit_rows.addWidget(label)
+
+        zrok = (tunnels or {}).get("zrok", {})
+        if self.zrok_status_label is not None:
+            state = str(zrok.get("state", "disabled"))
+            labels = {
+                "online": "Подключён к интернету",
+                "starting": "Запускается",
+                "not_installed": "zrok не установлен",
+                "error": "Ошибка — будет повтор",
+                "stopped": "Остановлен",
+                "disabled": "Выключен",
+            }
+            self.zrok_status_label.setText(labels.get(state, state))
+            color = "#43c778" if state == "online" else "#e2383f" if state in {"error", "not_installed"} else "#f5bd4f" if state == "starting" else "#949ca8"
+            self.zrok_status_label.setStyleSheet(f"color: {color}; font-weight: 700;")
+        if self.zrok_details_label is not None:
+            public_url = str(zrok.get("public_url") or "будет показан после запуска")
+            error = str(zrok.get("last_error") or "")
+            detail = (
+                f"Публичный адрес: {public_url}\n"
+                f"Локальный шлюз: {zrok.get('listener', f'http://127.0.0.1:{self._current_settings.zrok_port}')}\n"
+                "Защита: логин + пароль + токен подтверждённого устройства · Manager API скрыт"
+            )
+            if error:
+                detail += f"\nДиагностика: {error}"
+            self.zrok_details_label.setText(detail)
 
         if self.users_rows is not None:
             clear_layout(self.users_rows)
@@ -1232,6 +1272,10 @@ class SettingsPage(QWidget):
         self.remote_port.setValue(settings.remote_port)
         self.remote_public_url.setText(settings.remote_public_url)
         self.remote_pairing_enabled.setChecked(settings.remote_pairing_enabled)
+        self.zrok_enabled.setChecked(settings.zrok_enabled)
+        self.zrok_port.setValue(settings.zrok_port)
+        self.zrok_executable.setText(settings.zrok_executable)
+        self.zrok_share_name.setText(settings.zrok_share_name)
         self.config_path.setText(config_path)
         if self.server_state_label is not None:
             self.server_state_label.setText(
@@ -1438,6 +1482,30 @@ class SettingsPage(QWidget):
             layout.addWidget(audit_title)
             self.remote_audit_rows = QVBoxLayout()
             layout.addLayout(self.remote_audit_rows)
+            zrok_title = QLabel("zrok · доступ без настройки роутера")
+            zrok_title.setStyleSheet("font-weight: 700; font-size: 16px; margin-top: 12px;")
+            layout.addWidget(zrok_title)
+            zrok_text = QLabel(
+                "Core запускает внешний zrok-клиент и публикует только отдельный loopback-шлюз. "
+                "Перед включением установите zrok и один раз выполните его штатную команду enable. "
+                "Пароль Cloud Storage не передаётся zrok и никогда не попадает в командную строку."
+            )
+            zrok_text.setWordWrap(True)
+            zrok_text.setProperty("muted", True)
+            layout.addWidget(zrok_text)
+            self.zrok_status_label = QLabel("Выключен")
+            self.zrok_details_label = QLabel()
+            self.zrok_details_label.setWordWrap(True)
+            self.zrok_details_label.setProperty("muted", True)
+            zrok_form = QFormLayout()
+            zrok_form.setVerticalSpacing(12)
+            zrok_form.addRow("Состояние", self.zrok_status_label)
+            zrok_form.addRow("Локальный порт шлюза", self.zrok_port)
+            zrok_form.addRow("Программа zrok", self.zrok_executable)
+            zrok_form.addRow("Reserved share", self.zrok_share_name)
+            layout.addWidget(self.zrok_enabled)
+            layout.addLayout(zrok_form)
+            layout.addWidget(self.zrok_details_label)
         elif name == "Диагностика":
             description = QLabel(
                 "Core автоматически проверяет SQLite, доступность дисков, безопасный запас места "
@@ -1803,5 +1871,9 @@ class SettingsPage(QWidget):
                 "remote_port": self.remote_port.value(),
                 "remote_public_url": self.remote_public_url.text().strip().rstrip("/"),
                 "remote_pairing_enabled": self.remote_pairing_enabled.isChecked(),
+                "zrok_enabled": self.zrok_enabled.isChecked(),
+                "zrok_port": self.zrok_port.value(),
+                "zrok_executable": self.zrok_executable.text().strip() or "zrok",
+                "zrok_share_name": self.zrok_share_name.text().strip(),
             }
         )

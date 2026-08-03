@@ -15,6 +15,10 @@ def test_atomic_settings_save_and_load(tmp_path) -> None:
         remote_port=9877,
         remote_public_url="https://cloud.example.net:9877",
         remote_pairing_enabled=True,
+        zrok_enabled=True,
+        zrok_port=9878,
+        zrok_executable="C:/tools/zrok.exe",
+        zrok_share_name="home-cloud",
     )
 
     store.save(settings)
@@ -28,7 +32,11 @@ def test_atomic_settings_save_and_load(tmp_path) -> None:
     assert restored.remote_port == 9877
     assert restored.remote_public_url == "https://cloud.example.net:9877"
     assert restored.remote_pairing_enabled is True
-    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 3
+    assert restored.zrok_enabled is True
+    assert restored.zrok_port == 9878
+    assert restored.zrok_executable == "C:/tools/zrok.exe"
+    assert restored.zrok_share_name == "home-cloud"
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 4
     assert not list(tmp_path.glob("*.tmp"))
 
 

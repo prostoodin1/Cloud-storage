@@ -105,7 +105,7 @@ class DiskConfiguration:
 
 @dataclass(slots=True)
 class AppSettings:
-    schema_version: int = 3
+    schema_version: int = 4
     server_name: str = "Домашнее облако"
     setup_complete: bool = False
     setup_reminded_later: bool = False
@@ -118,6 +118,10 @@ class AppSettings:
     remote_port: int = 8767
     remote_public_url: str = ""
     remote_pairing_enabled: bool = False
+    zrok_enabled: bool = False
+    zrok_port: int = 8768
+    zrok_executable: str = "zrok"
+    zrok_share_name: str = ""
     known_disk_ids: list[str] = field(default_factory=list)
     ignored_disk_ids: list[str] = field(default_factory=list)
     disk_configurations: dict[str, DiskConfiguration] = field(default_factory=dict)
@@ -126,7 +130,7 @@ class AppSettings:
     def from_dict(cls, value: dict[str, Any] | None) -> AppSettings:
         value = value or {}
         result = cls()
-        result.schema_version = 3
+        result.schema_version = 4
         result.server_name = str(value.get("server_name", result.server_name))[:80]
         result.setup_complete = bool(value.get("setup_complete", False))
         result.setup_reminded_later = bool(value.get("setup_reminded_later", False))
@@ -147,6 +151,20 @@ class AppSettings:
         )
         result.remote_public_url = str(value.get("remote_public_url", "")).strip()[:2048]
         result.remote_pairing_enabled = bool(value.get("remote_pairing_enabled", False))
+        result.zrok_enabled = bool(value.get("zrok_enabled", False))
+        zrok_port = int(value.get("zrok_port", 8768))
+        used_ports = {8765}
+        if result.lan_enabled:
+            used_ports.add(result.lan_port)
+        if result.remote_enabled:
+            used_ports.add(result.remote_port)
+        result.zrok_port = (
+            zrok_port if 1024 <= zrok_port <= 65535 and zrok_port not in used_ports else 8768
+        )
+        result.zrok_executable = str(value.get("zrok_executable", "zrok")).strip()[:2048]
+        if not result.zrok_executable:
+            result.zrok_executable = "zrok"
+        result.zrok_share_name = str(value.get("zrok_share_name", "")).strip()[:63]
         result.known_disk_ids = [str(item) for item in value.get("known_disk_ids", [])]
         result.ignored_disk_ids = [str(item) for item in value.get("ignored_disk_ids", [])]
         configs = value.get("disk_configurations", {})
@@ -178,6 +196,10 @@ class AppSettings:
             "remote_port": self.remote_port,
             "remote_public_url": self.remote_public_url,
             "remote_pairing_enabled": self.remote_pairing_enabled,
+            "zrok_enabled": self.zrok_enabled,
+            "zrok_port": self.zrok_port,
+            "zrok_executable": self.zrok_executable,
+            "zrok_share_name": self.zrok_share_name,
             "known_disk_ids": self.known_disk_ids,
             "ignored_disk_ids": self.ignored_disk_ids,
             "disk_configurations": {

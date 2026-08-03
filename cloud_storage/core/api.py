@@ -51,6 +51,7 @@ from cloud_storage.core.storage import (
     StorageService,
 )
 from cloud_storage.core.tls import TlsIdentity, lan_endpoints, load_or_create_tls_identity
+from cloud_storage.core.tunnels import ZrokTunnelService
 
 
 class CreateUserRequest(BaseModel):
@@ -70,6 +71,11 @@ class RedeemInvitationRequest(BaseModel):
     password: SecretStr
     device_name: str = Field(min_length=1, max_length=100)
     platform: str = Field(min_length=1, max_length=50)
+
+
+class RemoteSessionRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    password: SecretStr
 
 
 class StorageRootRequest(BaseModel):
@@ -139,6 +145,7 @@ class CoreRuntime:
     diagnostics: DiagnosticsService
     recovery: RecoveryService
     tls_identity: TlsIdentity | None
+    zrok_tunnel: ZrokTunnelService
     started_monotonic: float
 
 
@@ -184,6 +191,7 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         if config.lan_enabled or config.remote_enabled
         else None
     )
+    zrok_tunnel = ZrokTunnelService(config)
     return CoreRuntime(
         config=config,
         secrets=secrets_store,
@@ -194,6 +202,7 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         diagnostics=diagnostics,
         recovery=recovery,
         tls_identity=tls_identity,
+        zrok_tunnel=zrok_tunnel,
         started_monotonic=time.monotonic(),
     )
 
@@ -222,13 +231,16 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     bearer = HTTPBearer(auto_error=False)
     pairing_limiter = SlidingWindowLimiter(limit=10, window_seconds=300)
     remote_pairing_limiter = SlidingWindowLimiter(limit=5, window_seconds=900)
+    remote_login_limiter = SlidingWindowLimiter(limit=5, window_seconds=300)
     remote_request_limiter = SlidingWindowLimiter(limit=600, window_seconds=60)
     remote_audit_limiter = SlidingWindowLimiter(limit=30, window_seconds=3600)
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=(
             ["*"]
-            if runtime.config.lan_enabled or runtime.config.remote_enabled
+            if runtime.config.lan_enabled
+            or runtime.config.remote_enabled
+            or runtime.config.zrok_enabled
             else ["127.0.0.1", "localhost", "[::1]", "testserver"]
         ),
     )
@@ -238,7 +250,13 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         return bool(enabled and server and len(server) > 1 and server[1] == port)
 
     def remote_client_path_allowed(path: str) -> bool:
-        if path in {"/v1/health", "/v1/pairing/redeem", "/v1/pairing/status", "/v1/spaces"}:
+        if path in {
+            "/v1/health",
+            "/v1/pairing/redeem",
+            "/v1/pairing/status",
+            "/v1/remote/session",
+            "/v1/spaces",
+        }:
             return True
         patterns = (
             r"/v1/spaces/[^/]+/entries",
@@ -257,10 +275,16 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         remote_request = is_listener_request(
             request, runtime.config.remote_port, runtime.config.remote_enabled
         )
+        zrok_request = is_listener_request(
+            request, runtime.config.zrok_port, runtime.config.zrok_enabled
+        )
+        external_request = remote_request or zrok_request
         request.state.remote_request = remote_request
+        request.state.zrok_request = zrok_request
+        request.state.external_request = external_request
         remote_address = request.client.host if request.client else "unknown"
         local_host = (request.url.hostname or "").casefold()
-        invalid_local_host = not lan_request and not remote_request and local_host not in {
+        invalid_local_host = not lan_request and not external_request and local_host not in {
             "127.0.0.1",
             "::1",
             "localhost",
@@ -274,16 +298,16 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         if invalid_local_host:
             response = JSONResponse(status_code=400, content={"detail": "invalid host header"})
         elif (lan_request and restricted_path) or (
-            remote_request and not remote_client_path_allowed(request.url.path)
+            external_request and not remote_client_path_allowed(request.url.path)
         ):
             response = JSONResponse(status_code=404, content={"detail": "not found"})
-        elif remote_request and not remote_request_limiter.allow(remote_address):
+        elif external_request and not remote_request_limiter.allow(remote_address):
             response = JSONResponse(
                 status_code=429,
                 content={"detail": "too many remote requests"},
             )
         elif (
-            remote_request
+            external_request
             and request.url.path == "/v1/pairing/redeem"
             and not runtime.config.remote_pairing_enabled
         ):
@@ -314,12 +338,12 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
-        if remote_request:
+        if external_request:
             important = request.method != "GET" or response.status_code >= 400
             if important or remote_audit_limiter.allow(remote_address):
                 try:
                     runtime.repository.record_audit(
-                        actor_type="remote_client",
+                        actor_type="zrok_client" if zrok_request else "remote_client",
                         actor_id=None,
                         action=(
                             "remote.access.allowed"
@@ -328,7 +352,10 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                         ),
                         target_type="api_route",
                         target_id=request.url.path[:1024],
-                        detail=f"{request.method} {request.url.path} -> {response.status_code}",
+                        detail=(
+                            f"{'zrok' if zrok_request else 'direct'} "
+                            f"{request.method} {request.url.path} -> {response.status_code}"
+                        ),
                         remote_address=remote_address,
                     )
                 except sqlite3.Error:
@@ -346,12 +373,23 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="invalid manager credential")
 
     def require_device(
+        request: Request,
+        remote_session: Annotated[
+            str | None, Header(alias="X-Cloud-Remote-Session")
+        ] = None,
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),  # noqa: B008
     ) -> DeviceRecord:
         if credentials is None or credentials.scheme.casefold() != "bearer":
             raise HTTPException(status_code=401, detail="device authorization required")
         try:
-            return runtime.repository.authenticate_device(credentials.credentials)
+            device = runtime.repository.authenticate_device(credentials.credentials)
+            if request.state.external_request:
+                runtime.repository.credentials.verify_remote_session(
+                    remote_session or "",
+                    user_id=device.user_id,
+                    device_id=device.id,
+                )
+            return device
         except (InvalidCredential, PermissionDeniedError) as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -418,7 +456,22 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                 "display_fingerprint": runtime.tls_identity.display_fingerprint,
                 "manager_api_exposed": False,
                 "automatic_router_changes": False,
+                "login_required": True,
             }
+        zrok_status = runtime.zrok_tunnel.status()
+        zrok = {
+            "enabled": zrok_status["enabled"],
+            "provider": "zrok",
+            "state": zrok_status["state"],
+            "installed": zrok_status["installed"],
+            "process_running": zrok_status["process_running"],
+            "listener_port": runtime.config.zrok_port,
+            "public_url": zrok_status["public_url"],
+            "share_type": zrok_status["share_type"],
+            "login_required": True,
+            "manager_api_exposed": False,
+            "automatic_router_changes": False,
+        }
         return {
             "status": "ok" if database_status == "ok" else "degraded",
             "version": __version__,
@@ -430,11 +483,16 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "bind": f"{runtime.config.host}:{runtime.config.port}",
             "lan": lan,
             "remote": remote,
+            "zrok": zrok,
         }
 
     @app.get("/v1/admin/summary", tags=["manager"], dependencies=[Depends(require_manager)])
     def admin_summary() -> dict[str, Any]:
         return runtime.repository.summary()
+
+    @app.get("/v1/admin/tunnels", tags=["manager"], dependencies=[Depends(require_manager)])
+    def tunnel_status() -> dict[str, Any]:
+        return {"zrok": runtime.zrok_tunnel.status()}
 
     @app.get(
         "/v1/admin/server-mode",
@@ -977,6 +1035,41 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         device: DeviceRecord = Depends(require_pairing_device),  # noqa: B008
     ):
         return {"device_id": device.id, "status": device.status}
+
+    @app.post("/v1/remote/session", tags=["pairing"])
+    def create_remote_session(
+        body: RemoteSessionRequest,
+        request: Request,
+        device: DeviceRecord = Depends(require_pairing_device),  # noqa: B008
+    ) -> dict[str, Any]:
+        remote_address = request.client.host if request.client else "unknown"
+        limiter_key = f"{remote_address}:{body.username.strip().casefold()}"
+        if not remote_login_limiter.allow(limiter_key):
+            raise HTTPException(status_code=429, detail="too many internet login attempts")
+        user = runtime.repository.authenticate_user_password(
+            body.username,
+            body.password.get_secret_value(),
+        )
+        if user.id != device.user_id:
+            raise PermissionDeniedError("invalid username or password")
+        token, expires_at = runtime.repository.credentials.issue_remote_session(
+            user.id,
+            device.id,
+        )
+        runtime.repository.record_audit(
+            actor_type="device",
+            actor_id=device.id,
+            action="remote.session.created",
+            target_type="user",
+            target_id=user.id,
+            detail="Создана интернет-сессия после проверки логина, пароля и устройства",
+            remote_address=remote_address,
+        )
+        return {
+            "session_token": token,
+            "expires_at": expires_at,
+            "username": user.username,
+        }
 
     @app.get("/v1/spaces", tags=["files"])
     def list_spaces(device: DeviceRecord = Depends(require_device)):  # noqa: B008

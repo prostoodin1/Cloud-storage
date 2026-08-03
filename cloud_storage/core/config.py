@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,11 @@ class CoreConfig:
     remote_port: int = 8767
     remote_public_url: str = ""
     remote_pairing_enabled: bool = False
+    zrok_enabled: bool = False
+    zrok_host: str = "127.0.0.1"
+    zrok_port: int = 8768
+    zrok_executable: str = "zrok"
+    zrok_share_name: str = ""
     server_name: str = "Домашнее облако"
     max_upload_bytes: int = 20 * 1024**3
     pairing_ttl_seconds: int = 15 * 60
@@ -61,6 +67,23 @@ class CoreConfig:
                 or parsed.path not in {"", "/"}
             ):
                 raise ValueError("remote public URL must be an HTTPS origin without a path")
+        if self.zrok_host not in {"127.0.0.1", "::1", "localhost"}:
+            raise ValueError("zrok backend must bind to loopback")
+        occupied_ports = {self.port}
+        if self.lan_enabled:
+            occupied_ports.add(self.lan_port)
+        if self.remote_enabled:
+            occupied_ports.add(self.remote_port)
+        if not 1024 <= self.zrok_port <= 65535 or (
+            self.zrok_enabled and self.zrok_port in occupied_ports
+        ):
+            raise ValueError("zrok backend port must be unique and between 1024 and 65535")
+        if not self.zrok_executable.strip() or len(self.zrok_executable) > 2048:
+            raise ValueError("zrok executable cannot be empty")
+        if self.zrok_share_name and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}", self.zrok_share_name
+        ):
+            raise ValueError("zrok share name contains unsupported characters")
         if not self.server_name.strip():
             raise ValueError("server name cannot be empty")
 
@@ -80,6 +103,11 @@ class CoreConfig:
         remote_pairing_enabled = _environment_bool(
             "CLOUD_STORAGE_REMOTE_PAIRING_ENABLED", False
         )
+        zrok_enabled = _environment_bool("CLOUD_STORAGE_ZROK_ENABLED", False)
+        zrok_host = os.environ.get("CLOUD_STORAGE_ZROK_HOST", "127.0.0.1")
+        zrok_port = int(os.environ.get("CLOUD_STORAGE_ZROK_PORT", "8768"))
+        zrok_executable = os.environ.get("CLOUD_STORAGE_ZROK_EXECUTABLE", "zrok").strip()
+        zrok_share_name = os.environ.get("CLOUD_STORAGE_ZROK_SHARE_NAME", "").strip()
         server_name = os.environ.get("CLOUD_STORAGE_SERVER_NAME", "Домашнее облако").strip()
         max_upload_gib = int(os.environ.get("CLOUD_STORAGE_MAX_UPLOAD_GIB", "20"))
         if not server_name:
@@ -97,6 +125,11 @@ class CoreConfig:
             remote_port=remote_port,
             remote_public_url=remote_public_url,
             remote_pairing_enabled=remote_pairing_enabled,
+            zrok_enabled=zrok_enabled,
+            zrok_host=zrok_host,
+            zrok_port=zrok_port,
+            zrok_executable=zrok_executable,
+            zrok_share_name=zrok_share_name,
             server_name=server_name[:80],
             max_upload_bytes=max(1, max_upload_gib) * 1024**3,
         )

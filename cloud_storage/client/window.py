@@ -54,6 +54,7 @@ from cloud_storage.client.settings import (
     ClientProfile,
     ClientSettingsStore,
     DeviceTokenVault,
+    RemoteSessionVault,
     validate_server_url,
 )
 from cloud_storage.client.transfers import TransferRecord, TransferStore
@@ -105,11 +106,15 @@ class ClientWindow(QMainWindow):
         self.store = store or ClientSettingsStore()
         self.profile: ClientProfile = self.store.load()
         self.vault = DeviceTokenVault(self.store.data_directory, self.profile.profile_id)
+        self.session_vault = RemoteSessionVault(
+            self.store.data_directory, self.profile.profile_id
+        )
         self.knowledge = KnowledgeBase(self.store.data_directory / "knowledge.db")
         self.transfer_store = TransferStore(self.store.data_directory / "transfers.db")
         self.offline_store = OfflineStore(self.store.data_directory / "offline.db")
         self.transfer_store.recover_interrupted()
         self.token = self.vault.load()
+        self.remote_session = self.session_vault.load()
         self.api: ClientApi | None = None
         self.spaces: list[dict[str, Any]] = []
         self.entries: list[dict[str, Any]] = []
@@ -279,10 +284,13 @@ class ClientWindow(QMainWindow):
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         self.password.setPlaceholderText("Минимум 10 символов")
         self.device_name = QLineEdit(platform.node() or "Мой компьютер")
+        self.username = QLineEdit()
+        self.username.setPlaceholderText("Логин, созданный администратором")
         form.addRow("Сохранённые серверы", profile_row)
         form.addRow("Адрес сервера", address_row)
         form.addRow("Отпечаток TLS", self.fingerprint)
         form.addRow("Код или приглашение", self.pairing_code)
+        form.addRow("Логин", self.username)
         form.addRow("Пароль", self.password)
         form.addRow("Название устройства", self.device_name)
         card_layout.addLayout(form)
@@ -292,10 +300,13 @@ class ClientWindow(QMainWindow):
         self.connect_button.clicked.connect(self.connect_device)
         self.status_button = QPushButton("Проверить подтверждение")
         self.status_button.clicked.connect(self.refresh_connection)
+        self.remote_login_button = QPushButton("Войти через интернет")
+        self.remote_login_button.clicked.connect(self.login_remote)
         self.forget_button = QPushButton("Забыть подключение")
         self.forget_button.clicked.connect(self.forget_connection)
         controls.addWidget(self.connect_button)
         controls.addWidget(self.status_button)
+        controls.addWidget(self.remote_login_button)
         controls.addWidget(self.forget_button)
         controls.addStretch()
         card_layout.addLayout(controls)
@@ -483,6 +494,7 @@ class ClientWindow(QMainWindow):
         self.server_url.setText(self.profile.server_url)
         self.fingerprint.setText(self.profile.certificate_fingerprint)
         self.device_name.setText(self.profile.device_name or platform.node() or "Мой компьютер")
+        self.username.setText(self.profile.username)
         self.cache_path.setText(self.profile.download_directory)
         self.close_to_tray_checkbox.blockSignals(True)
         self.close_to_tray_checkbox.setChecked(self.profile.close_to_tray)
@@ -496,6 +508,7 @@ class ClientWindow(QMainWindow):
         self._set_connection_state(self.profile.device_status)
         self.status_button.setEnabled(bool(self.token))
         self.forget_button.setEnabled(bool(self.token))
+        self.remote_login_button.setEnabled(bool(self.token))
 
     def _refresh_server_selector(self) -> None:
         profiles = self.store.list_profiles()
@@ -515,7 +528,11 @@ class ClientWindow(QMainWindow):
         self._connection_check_running = False
         self.profile = profile
         self.vault = DeviceTokenVault(self.store.data_directory, profile.profile_id)
+        self.session_vault = RemoteSessionVault(
+            self.store.data_directory, profile.profile_id
+        )
         self.token = self.vault.load()
+        self.remote_session = self.session_vault.load()
         self.api = None
         self.current_directory = ""
         self.password.clear()
@@ -565,6 +582,7 @@ class ClientWindow(QMainWindow):
                     "Профиль сервера удалён — передача приостановлена",
                 )
         self.vault.clear()
+        self.session_vault.clear()
         profile = self.store.remove_profile(self.profile.profile_id)
         self._activate_profile(profile)
         self._refresh_transfer_cards()
@@ -634,6 +652,7 @@ class ClientWindow(QMainWindow):
         self.profile.device_id = str(device.get("id", ""))
         self.profile.device_name = self.device_name.text().strip()
         self.profile.device_status = str(device.get("status", "pending"))
+        self.profile.username = str(device.get("username", ""))
         self.store.save(self.profile)
         self._refresh_server_selector()
         self.password.clear()
@@ -641,6 +660,7 @@ class ClientWindow(QMainWindow):
         self.connect_button.setEnabled(True)
         self.status_button.setEnabled(True)
         self.forget_button.setEnabled(True)
+        self.remote_login_button.setEnabled(True)
         self._set_connection_state("pending")
         QMessageBox.information(
             self,
@@ -704,6 +724,7 @@ class ClientWindow(QMainWindow):
                 self.profile.server_url,
                 token=self.token,
                 certificate_fingerprint=self.profile.certificate_fingerprint,
+                remote_session=self.remote_session,
             )
             self.api = api
         except ValueError:
@@ -721,6 +742,72 @@ class ClientWindow(QMainWindow):
             self._connection_refreshed,
             lambda message: self._connection_refresh_failed_for(profile_id, message),
         )
+
+    def login_remote(self) -> None:
+        if not self.token:
+            QMessageBox.warning(
+                self,
+                "Сначала подключите устройство",
+                "Для интернет-входа сначала нужен одноразовый код и подтверждение администратора.",
+            )
+            return
+        username = self.username.text().strip().casefold()
+        password = self.password.text()
+        if len(username) < 3 or len(password) < 10:
+            QMessageBox.warning(
+                self,
+                "Проверьте данные",
+                "Введите логин из Server Manager и пароль минимум из 10 символов.",
+            )
+            return
+        try:
+            api = ClientApi(
+                validate_server_url(self.server_url.text()),
+                token=self.token,
+                certificate_fingerprint=self.fingerprint.text(),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Неверные параметры подключения", str(exc))
+            return
+        self.remote_login_button.setEnabled(False)
+        profile_id = self.profile.profile_id
+
+        def login() -> dict[str, Any]:
+            result = api.create_remote_session(username, password)
+            return {"session": result, "profile_id": profile_id}
+
+        self._start_task(
+            login,
+            self._remote_login_complete,
+            lambda message: self._remote_login_failed(profile_id, message),
+        )
+
+    def _remote_login_complete(self, result: object) -> None:
+        payload = result if isinstance(result, dict) else {}
+        if payload.get("profile_id") != self.profile.profile_id:
+            return
+        session = payload.get("session", {})
+        token = str(session.get("session_token", ""))
+        try:
+            self.session_vault.store(token)
+        except (OSError, ValueError) as exc:
+            self.remote_login_button.setEnabled(True)
+            QMessageBox.critical(self, "Сессия не сохранена", str(exc))
+            return
+        self.remote_session = token
+        self.profile.username = str(session.get("username") or self.username.text()).casefold()
+        self.profile.server_url = self.server_url.text().strip().rstrip("/")
+        self.profile.certificate_fingerprint = self.fingerprint.text().strip()
+        self.store.save(self.profile)
+        self.password.clear()
+        self.remote_login_button.setEnabled(True)
+        self.refresh_connection()
+
+    def _remote_login_failed(self, profile_id: str, message: str) -> None:
+        if profile_id != self.profile.profile_id:
+            return
+        self.remote_login_button.setEnabled(True)
+        QMessageBox.warning(self, "Интернет-вход не выполнен", message)
 
     def _connection_refreshed(self, result: object) -> None:
         payload = result if isinstance(result, dict) else {}
@@ -807,7 +894,9 @@ class ClientWindow(QMainWindow):
                     "Подключение удалено — продолжение приостановлено",
                 )
         self.vault.clear()
+        self.session_vault.clear()
         self.token = None
+        self.remote_session = None
         self.api = None
         self.profile.device_id = ""
         self.profile.device_status = "disconnected"
@@ -1006,6 +1095,7 @@ class ClientWindow(QMainWindow):
             transfer.server_url,
             token=token,
             certificate_fingerprint=self.profile.certificate_fingerprint,
+            remote_session=self.remote_session,
         )
         try:
             if transfer.kind == "upload":
@@ -1231,6 +1321,9 @@ class ClientWindow(QMainWindow):
                     transfer.server_url,
                     token=token,
                     certificate_fingerprint=profile.certificate_fingerprint,
+                    remote_session=RemoteSessionVault(
+                        self.store.data_directory, profile.profile_id
+                    ).load(),
                 )
                 self._start_task(
                     self._cleanup_cancelled_transfer,
@@ -1493,6 +1586,7 @@ class ClientWindow(QMainWindow):
             current_server,
             token=self.token,
             certificate_fingerprint=self.profile.certificate_fingerprint,
+            remote_session=self.remote_session,
         )
         groups: dict[tuple[str, str], list[OfflineRecord]] = {}
         for record in relevant:

@@ -2,6 +2,7 @@ import stat
 
 import pytest
 
+from cloud_storage.core.security import CredentialService, InvalidCredential
 from cloud_storage.services.security import UnsafeStoragePath, make_managed_file_inert
 
 
@@ -27,3 +28,24 @@ def test_security_policy_rejects_files_outside_storage(tmp_path) -> None:
 
     with pytest.raises(UnsafeStoragePath):
         make_managed_file_inert(outside, storage)
+
+
+def test_remote_session_is_signed_bound_and_expires(monkeypatch) -> None:
+    credentials = CredentialService.from_secret("11" * 48)
+    token, expires_at = credentials.issue_remote_session(
+        "user-1", "device-1", ttl_seconds=300
+    )
+
+    credentials.verify_remote_session(token, user_id="user-1", device_id="device-1")
+    with pytest.raises(InvalidCredential):
+        credentials.verify_remote_session(token, user_id="user-1", device_id="device-2")
+    with pytest.raises(InvalidCredential):
+        credentials.verify_remote_session(
+            token[:-1] + ("0" if token[-1] != "0" else "1"),
+            user_id="user-1",
+            device_id="device-1",
+        )
+
+    monkeypatch.setattr("cloud_storage.core.security.time.time", lambda: expires_at + 1)
+    with pytest.raises(InvalidCredential):
+        credentials.verify_remote_session(token, user_id="user-1", device_id="device-1")

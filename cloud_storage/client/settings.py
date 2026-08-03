@@ -19,6 +19,7 @@ class ClientProfile:
     device_id: str = ""
     device_name: str = ""
     device_status: str = "disconnected"
+    username: str = ""
     download_directory: str = ""
     last_space_id: str = ""
     close_to_tray: bool = True
@@ -256,6 +257,55 @@ class DeviceTokenVault:
         self.path.unlink(missing_ok=True)
         if self.profile_id == "default":
             self.legacy_path.unlink(missing_ok=True)
+
+
+class RemoteSessionVault:
+    def __init__(self, data_directory: Path, profile_id: str = "default") -> None:
+        safe_profile_id = re.sub(r"[^a-zA-Z0-9_-]", "", profile_id)[:64]
+        if not safe_profile_id:
+            raise ValueError("invalid client profile id")
+        self.path = data_directory / "sessions" / f"{safe_profile_id}.bin"
+
+    def store(self, token: str) -> None:
+        if not token.startswith("css_") or len(token) < 80:
+            raise ValueError("invalid internet session token")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = token.encode("utf-8")
+        if os.name == "nt":
+            import win32crypt
+
+            protected = win32crypt.CryptProtectData(
+                payload,
+                "Cloud Storage internet session",
+                None,
+                None,
+                None,
+                0,
+            )
+            payload = protected[1] if isinstance(protected, tuple) else protected
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_bytes(payload)
+        if os.name != "nt":
+            temporary.chmod(0o600)
+        os.replace(temporary, self.path)
+
+    def load(self) -> str | None:
+        if not self.path.exists():
+            return None
+        try:
+            payload = self.path.read_bytes()
+            if os.name == "nt":
+                import win32crypt
+
+                unprotected = win32crypt.CryptUnprotectData(payload, None, None, None, 0)
+                payload = unprotected[1] if isinstance(unprotected, tuple) else unprotected
+            token = payload.decode("utf-8")
+            return token if token.startswith("css_") and len(token) >= 80 else None
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def clear(self) -> None:
+        self.path.unlink(missing_ok=True)
 
 
 def validate_server_url(value: str) -> str:

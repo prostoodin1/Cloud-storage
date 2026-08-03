@@ -76,6 +76,11 @@ class MainWindow(QMainWindow):
             remote_port=self.settings.remote_port,
             remote_public_url=self.settings.remote_public_url,
             remote_pairing_enabled=self.settings.remote_pairing_enabled,
+            zrok_enabled=self.settings.zrok_enabled,
+            zrok_host=environment_config.zrok_host,
+            zrok_port=self.settings.zrok_port,
+            zrok_executable=self.settings.zrok_executable,
+            zrok_share_name=self.settings.zrok_share_name,
             server_name=self.settings.server_name,
             max_upload_bytes=environment_config.max_upload_bytes,
             pairing_ttl_seconds=environment_config.pairing_ttl_seconds,
@@ -94,6 +99,7 @@ class MainWindow(QMainWindow):
         self.core_backup_automation: dict = {"policies": [], "verifications": []}
         self.core_mirror_state: dict = {"roots": [], "jobs": []}
         self.core_diagnostics: dict = {}
+        self.core_tunnels: dict = {"zrok": {"enabled": False, "state": "disabled"}}
         self.core_server_mode: dict = {
             "mode": "normal",
             "reason": "",
@@ -295,6 +301,7 @@ class MainWindow(QMainWindow):
             self.core_restore_jobs,
             self.core_backup_automation,
             self.core_audit,
+            self.core_tunnels,
         )
         unconfigured = sum(
             item.available
@@ -318,6 +325,7 @@ class MainWindow(QMainWindow):
         self.core_backup_automation = {"policies": [], "verifications": []}
         self.core_mirror_state = {"roots": [], "jobs": []}
         self.core_diagnostics = {}
+        self.core_tunnels = {"zrok": {"enabled": False, "state": "disabled"}}
         self.core_server_mode = {"mode": "normal", "reason": "", "changed_at": ""}
         if not self.core_health:
             return
@@ -333,6 +341,7 @@ class MainWindow(QMainWindow):
             self.core_backup_automation = self.core_client.backup_automation()
             self.core_mirror_state = self.core_client.mirror_status()
             self.core_diagnostics = self.core_client.diagnostics()
+            self.core_tunnels = self.core_client.tunnels()
             self.core_server_mode = self.core_client.server_mode()
         except (CoreApiError, CoreUnavailable) as exc:
             self.audit.record(
@@ -992,19 +1001,22 @@ class MainWindow(QMainWindow):
                 self.core_client.config.port,
                 values["lan_port"],
                 values["remote_port"],
+                values["zrok_port"],
             }
-        ) != 3:
+        ) != 4:
             QMessageBox.warning(
                 self,
                 "Неверные сетевые порты",
-                "Локальный API, LAN HTTPS и удалённый HTTPS должны использовать разные порты.",
+                "Локальный API, LAN HTTPS, удалённый HTTPS и zrok-шлюз должны использовать разные порты.",
             )
             return
-        if values["remote_pairing_enabled"] and not values["remote_enabled"]:
+        if values["remote_pairing_enabled"] and not (
+            values["remote_enabled"] or values["zrok_enabled"]
+        ):
             QMessageBox.warning(
                 self,
                 "Удалённый доступ выключен",
-                "Сначала включите удалённый HTTPS-вход, затем разрешайте подключение по коду.",
+                "Сначала включите удалённый HTTPS-вход или zrok, затем разрешайте подключение по коду.",
             )
             return
         try:
@@ -1014,6 +1026,10 @@ class MainWindow(QMainWindow):
                 remote_port=values["remote_port"],
                 remote_public_url=values["remote_public_url"],
                 remote_pairing_enabled=values["remote_pairing_enabled"],
+                zrok_enabled=values["zrok_enabled"],
+                zrok_port=values["zrok_port"],
+                zrok_executable=values["zrok_executable"],
+                zrok_share_name=values["zrok_share_name"],
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Неверный удалённый адрес", str(exc))
@@ -1025,6 +1041,16 @@ class MainWindow(QMainWindow):
                 "Будет открыт отдельный порт только для клиентских файловых функций. "
                 "Административный API останется локальным. Cloud Storage не меняет роутер и firewall "
                 "автоматически: используйте VPN либо вручную настройте перенаправление порта. Продолжить?",
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return
+        if values["zrok_enabled"] and not self.settings.zrok_enabled:
+            response = QMessageBox.question(
+                self,
+                "Включить интернет-доступ через zrok?",
+                "Core запустит установленный zrok и опубликует только клиентский шлюз на 127.0.0.1. "
+                "Доступ к файлам потребует логин, пароль и токен подтверждённого устройства. "
+                "Аккаунт zrok должен быть заранее включён штатной командой zrok enable. Продолжить?",
             )
             if response != QMessageBox.StandardButton.Yes:
                 return
@@ -1043,6 +1069,10 @@ class MainWindow(QMainWindow):
             or self.settings.remote_port != values["remote_port"]
             or self.settings.remote_public_url != values["remote_public_url"]
             or self.settings.remote_pairing_enabled != values["remote_pairing_enabled"]
+            or self.settings.zrok_enabled != values["zrok_enabled"]
+            or self.settings.zrok_port != values["zrok_port"]
+            or self.settings.zrok_executable != values["zrok_executable"]
+            or self.settings.zrok_share_name != values["zrok_share_name"]
         )
         core_was_running = self.core_health is not None
         if network_changed and core_was_running:
@@ -1072,6 +1102,10 @@ class MainWindow(QMainWindow):
         self.settings.remote_port = values["remote_port"]
         self.settings.remote_public_url = values["remote_public_url"]
         self.settings.remote_pairing_enabled = values["remote_pairing_enabled"]
+        self.settings.zrok_enabled = values["zrok_enabled"]
+        self.settings.zrok_port = values["zrok_port"]
+        self.settings.zrok_executable = values["zrok_executable"]
+        self.settings.zrok_share_name = values["zrok_share_name"]
         self.store.save(self.settings)
         if network_changed:
             self.core_client = CoreClient(
@@ -1083,6 +1117,10 @@ class MainWindow(QMainWindow):
                     remote_port=self.settings.remote_port,
                     remote_public_url=self.settings.remote_public_url,
                     remote_pairing_enabled=self.settings.remote_pairing_enabled,
+                    zrok_enabled=self.settings.zrok_enabled,
+                    zrok_port=self.settings.zrok_port,
+                    zrok_executable=self.settings.zrok_executable,
+                    zrok_share_name=self.settings.zrok_share_name,
                     server_name=self.settings.server_name,
                 )
             )

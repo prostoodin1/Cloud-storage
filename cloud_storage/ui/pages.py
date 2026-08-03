@@ -357,6 +357,8 @@ class SettingsPage(QWidget):
     mirror_reconcile_requested = Signal(str)
     mirror_resume_requested = Signal(str)
     mirror_cancel_requested = Signal(str)
+    diagnostics_quick_requested = Signal()
+    diagnostics_full_requested = Signal()
 
     _SECTIONS = [
         ("Сервер", False),
@@ -445,6 +447,11 @@ class SettingsPage(QWidget):
         self.mirror_start_button: QPushButton | None = None
         self.mirror_rows: QVBoxLayout | None = None
         self.mirror_job_rows: QVBoxLayout | None = None
+        self.diagnostics_status_label: QLabel | None = None
+        self.diagnostics_detail_label: QLabel | None = None
+        self.diagnostics_rows: QVBoxLayout | None = None
+        self.diagnostics_quick_button: QPushButton | None = None
+        self.diagnostics_full_button: QPushButton | None = None
         self._current_settings = AppSettings()
         self._pages_by_name = {name: self._make_section(name) for name, _ in self._SECTIONS}
         self._rebuild_sections()
@@ -459,6 +466,7 @@ class SettingsPage(QWidget):
         maintenance_jobs: list[dict] | None = None,
         backup_jobs: list[dict] | None = None,
         mirror_state: dict | None = None,
+        diagnostics: dict | None = None,
     ) -> None:
         online = health is not None
         if self.core_status_label is not None:
@@ -551,6 +559,7 @@ class SettingsPage(QWidget):
         self._update_maintenance(storage_roots or [], maintenance_jobs or [], online)
         self._update_backups(storage_roots or [], backup_jobs or [], online)
         self._update_mirrors(mirror_state or {"roots": [], "jobs": []}, online)
+        self._update_diagnostics(diagnostics or {}, online)
 
     def _update_backups(self, roots: list[dict], jobs: list[dict], online: bool) -> None:
         if self.backup_target is not None:
@@ -739,6 +748,92 @@ class SettingsPage(QWidget):
             controls.addStretch()
             box.addLayout(controls)
             self.mirror_job_rows.addWidget(card)
+
+    def _update_diagnostics(self, diagnostics: dict, online: bool) -> None:
+        latest = diagnostics.get("latest_scan") or {}
+        scan_running = latest.get("status") in {"queued", "running"}
+        if self.diagnostics_quick_button is not None:
+            self.diagnostics_quick_button.setEnabled(online and not scan_running)
+        if self.diagnostics_full_button is not None:
+            self.diagnostics_full_button.setEnabled(online and not scan_running)
+        if self.diagnostics_status_label is not None:
+            status_value = diagnostics.get("status") if online else "offline"
+            labels = {
+                "healthy": "Проблем не обнаружено",
+                "warning": "Требуется внимание",
+                "critical": "Критическая проблема",
+                "offline": "Core выключен",
+            }
+            colors = {
+                "healthy": "#43c778",
+                "warning": "#f5bd4f",
+                "critical": "#e2383f",
+                "offline": "#949ca8",
+            }
+            self.diagnostics_status_label.setText(labels.get(status_value, "Ожидает проверки"))
+            self.diagnostics_status_label.setStyleSheet(
+                f"color: {colors.get(status_value, '#949ca8')}; font-weight: 700;"
+            )
+        if self.diagnostics_detail_label is not None:
+            if not online:
+                detail = "Автоматический мониторинг работает внутри Server Core."
+            elif latest:
+                scan_names = {"quick": "Быстрая", "full": "Полная"}
+                status_names = {
+                    "queued": "в очереди",
+                    "running": "выполняется",
+                    "completed": "завершена",
+                    "failed": "ошибка",
+                }
+                detail = (
+                    f"{scan_names.get(latest.get('kind'), latest.get('kind'))} проверка · "
+                    f"{status_names.get(latest.get('status'), latest.get('status'))} · "
+                    f"объектов {latest.get('checked_objects', 0)} · "
+                    f"{format_bytes(int(latest.get('checked_bytes', 0)))}"
+                )
+                if latest.get("error"):
+                    detail += f"\n{latest['error']}"
+            else:
+                detail = "Core выполнит быструю проверку после запуска."
+            self.diagnostics_detail_label.setText(detail)
+        if self.diagnostics_rows is None:
+            return
+        clear_layout(self.diagnostics_rows)
+        incidents = list(diagnostics.get("incidents") or [])
+        if not online:
+            self._add_muted(self.diagnostics_rows, "Запустите Core для просмотра инцидентов.")
+            return
+        if not incidents:
+            self._add_muted(
+                self.diagnostics_rows,
+                "Активных инцидентов нет. Результаты основаны только на выполненных проверках.",
+            )
+            return
+        for incident in incidents:
+            card = QFrame()
+            card.setProperty("card", True)
+            box = QVBoxLayout(card)
+            title = QLabel(str(incident.get("summary", "Инцидент")))
+            title.setStyleSheet(
+                "font-weight: 700; color: "
+                + ("#e2383f;" if incident.get("severity") == "critical" else "#f5bd4f;")
+            )
+            component = QLabel(
+                f"{incident.get('component', 'Core')} · обнаружено "
+                f"{incident.get('last_seen_at', '—')} · повторов {incident.get('occurrences', 1)}"
+            )
+            component.setProperty("muted", True)
+            detail = QLabel(str(incident.get("detail", "")))
+            detail.setWordWrap(True)
+            detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            remediation = QLabel(f"Что делать: {incident.get('remediation', 'Проверьте журнал Core.')}")
+            remediation.setWordWrap(True)
+            remediation.setStyleSheet("color: #7ab7ff;")
+            box.addWidget(title)
+            box.addWidget(component)
+            box.addWidget(detail)
+            box.addWidget(remediation)
+            self.diagnostics_rows.addWidget(card)
 
     def _update_maintenance(
         self,
@@ -984,13 +1079,49 @@ class SettingsPage(QWidget):
             boundary_layout.addWidget(boundary_text)
             layout.addWidget(boundary)
         elif name == "Диагностика":
-            info = QLabel("Файл конфигурации")
+            description = QLabel(
+                "Core автоматически проверяет SQLite, доступность дисков, безопасный запас места "
+                "и ошибки постоянных заданий. Полная проверка дополнительно читает каждый "
+                "управляемый объект и пересчитывает SHA-256."
+            )
+            description.setWordWrap(True)
+            description.setProperty("muted", True)
+            layout.addWidget(description)
+            status_card = QFrame()
+            status_card.setProperty("accent", "blue")
+            status_box = QVBoxLayout(status_card)
+            self.diagnostics_status_label = QLabel("Ожидает проверки")
+            self.diagnostics_status_label.setStyleSheet("font-weight: 700; font-size: 17px;")
+            self.diagnostics_detail_label = QLabel(
+                "Автоматический мониторинг работает внутри Server Core."
+            )
+            self.diagnostics_detail_label.setWordWrap(True)
+            self.diagnostics_detail_label.setProperty("muted", True)
+            status_box.addWidget(self.diagnostics_status_label)
+            status_box.addWidget(self.diagnostics_detail_label)
+            layout.addWidget(status_card)
+            controls = QHBoxLayout()
+            self.diagnostics_quick_button = QPushButton("Быстрая проверка")
+            self.diagnostics_quick_button.setProperty("primary", True)
+            self.diagnostics_quick_button.clicked.connect(self.diagnostics_quick_requested)
+            self.diagnostics_full_button = QPushButton("Полная проверка SHA-256")
+            self.diagnostics_full_button.clicked.connect(self.diagnostics_full_requested)
+            refresh = QPushButton("Обновить")
+            refresh.clicked.connect(self.core_refresh_requested)
+            controls.addWidget(self.diagnostics_quick_button)
+            controls.addWidget(self.diagnostics_full_button)
+            controls.addWidget(refresh)
+            controls.addStretch()
+            layout.addLayout(controls)
+            incidents_title = QLabel("Активные инциденты")
+            incidents_title.setStyleSheet("font-weight: 700; margin-top: 8px;")
+            layout.addWidget(incidents_title)
+            self.diagnostics_rows = QVBoxLayout()
+            layout.addLayout(self.diagnostics_rows)
+            info = QLabel("Файл настроек Manager")
             info.setProperty("muted", True)
             layout.addWidget(info)
             layout.addWidget(self.config_path)
-            refresh = QPushButton("Повторить обнаружение дисков")
-            refresh.clicked.connect(self.refresh_requested)
-            layout.addWidget(refresh, alignment=Qt.AlignmentFlag.AlignLeft)
         elif name == "Безопасность":
             card = QFrame()
             card.setProperty("accent", "blue")

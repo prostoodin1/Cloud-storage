@@ -501,6 +501,83 @@ def test_mirror_failure_does_not_reject_primary_upload(tmp_path) -> None:
     assert replica["status"] == "error"
     assert "free space" in replica["error"]
 
+
+def test_full_diagnostics_detects_deduplicates_and_resolves_missing_object(tmp_path) -> None:
+    app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(tmp_path)
+    payload = b"diagnostic integrity payload"
+    route = f"/v1/spaces/{space['id']}/files/diagnostics.bin"
+    assert client.put(route, headers=device_headers, content=payload).status_code == 201
+    record = app.state.runtime.storage.find_file(space["id"], "diagnostics.bin")
+    assert record is not None
+    object_path = app.state.runtime.config.default_storage_root / record.object_path
+    os.chmod(object_path, stat.S_IREAD | stat.S_IWRITE)
+    object_path.unlink()
+
+    first = client.post(
+        "/v1/admin/diagnostics/scans",
+        headers=manager_headers,
+        json={"kind": "full"},
+    )
+    assert first.status_code == 202
+    first_result = client.get(
+        f"/v1/admin/diagnostics/scans/{first.json()['id']}", headers=manager_headers
+    ).json()
+    assert first_result["status"] == "completed"
+    assert first_result["critical_count"] == 1
+    overview = client.get("/v1/admin/diagnostics", headers=manager_headers).json()
+    assert overview["status"] == "critical"
+    assert overview["incidents"][0]["check_key"] == "object.available"
+
+    second = client.post(
+        "/v1/admin/diagnostics/scans",
+        headers=manager_headers,
+        json={"kind": "full"},
+    )
+    assert second.status_code == 202
+    repeated = client.get("/v1/admin/diagnostics", headers=manager_headers).json()
+    assert len(repeated["incidents"]) == 1
+    assert repeated["incidents"][0]["occurrences"] == 2
+
+    object_path.write_bytes(payload)
+    resolved = client.post(
+        "/v1/admin/diagnostics/scans",
+        headers=manager_headers,
+        json={"kind": "full"},
+    )
+    assert resolved.status_code == 202
+    healthy = client.get("/v1/admin/diagnostics", headers=manager_headers).json()
+    assert healthy["status"] == "healthy"
+    assert healthy["incidents"] == []
+    history = client.get(
+        "/v1/admin/diagnostics/incidents",
+        headers=manager_headers,
+        params={"include_resolved": True},
+    ).json()
+    assert history[0]["status"] == "resolved"
+    assert history[0]["resolved_at"] is not None
+
+
+def test_diagnostics_recover_scan_interrupted_by_restart(tmp_path) -> None:
+    app, _, _ = build_client(tmp_path)
+    now = "2026-08-03T10:00:00.000Z"
+    with app.state.runtime.database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO diagnostic_scans(
+                id, kind, source, status, checks, checked_objects, checked_bytes,
+                warning_count, critical_count, error, created_at, completed_at, updated_at
+            ) VALUES('interrupted-scan', 'full', 'manager', 'running', 0, 0, 0, 0, 0,
+                     '', ?, NULL, ?)
+            """,
+            (now, now),
+        )
+
+    restarted = create_app(CoreConfig(data_directory=tmp_path))
+    scan = restarted.state.runtime.diagnostics.get_scan("interrupted-scan")
+    assert scan.status == "failed"
+    assert "перезапуском Core" in scan.error
+    assert scan.completed_at is not None
+
 def test_personal_file_upload_update_download_and_soft_delete(tmp_path) -> None:
     app, client, _, device_headers, _, space, _ = provision_trusted_device(tmp_path)
     url = f"/v1/spaces/{space['id']}/files/Документы/hello.txt"

@@ -185,6 +185,39 @@ CREATE TABLE IF NOT EXISTS mirror_jobs (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS diagnostic_scans (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('quick', 'full')),
+    source TEXT NOT NULL CHECK(source IN ('monitor', 'manager', 'startup')),
+    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'failed')),
+    checks INTEGER NOT NULL DEFAULT 0 CHECK(checks >= 0),
+    checked_objects INTEGER NOT NULL DEFAULT 0 CHECK(checked_objects >= 0),
+    checked_bytes INTEGER NOT NULL DEFAULT 0 CHECK(checked_bytes >= 0),
+    warning_count INTEGER NOT NULL DEFAULT 0 CHECK(warning_count >= 0),
+    critical_count INTEGER NOT NULL DEFAULT 0 CHECK(critical_count >= 0),
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS diagnostic_incidents (
+    id TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL UNIQUE,
+    check_key TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK(severity IN ('warning', 'critical')),
+    status TEXT NOT NULL CHECK(status IN ('active', 'resolved')),
+    component TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    remediation TEXT NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 1 CHECK(occurrences >= 1),
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    resolved_at TEXT,
+    last_scan_id TEXT REFERENCES diagnostic_scans(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
@@ -207,6 +240,10 @@ CREATE INDEX IF NOT EXISTS idx_backup_jobs_status ON backup_jobs(status, created
 CREATE INDEX IF NOT EXISTS idx_mirror_replicas_status
     ON mirror_replicas(storage_root_id, status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_mirror_jobs_status ON mirror_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_diagnostic_scans_created
+    ON diagnostic_scans(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_diagnostic_incidents_status
+    ON diagnostic_incidents(status, severity, last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp DESC);
 """
 
@@ -251,6 +288,10 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
             connection.commit()
 

@@ -84,6 +84,7 @@ class MainWindow(QMainWindow):
         self.core_maintenance_jobs: list[dict] = []
         self.core_backup_jobs: list[dict] = []
         self.core_mirror_state: dict = {"roots": [], "jobs": []}
+        self.core_diagnostics: dict = {}
         self.disks: list[DiskSnapshot] = []
         self._disk_reminder_hidden = False
         self._setup_banner_hidden = False
@@ -200,6 +201,12 @@ class MainWindow(QMainWindow):
         self.settings_page.mirror_reconcile_requested.connect(self.reconcile_mirror)
         self.settings_page.mirror_resume_requested.connect(self.resume_mirror_job)
         self.settings_page.mirror_cancel_requested.connect(self.cancel_mirror_job)
+        self.settings_page.diagnostics_quick_requested.connect(
+            lambda: self.start_diagnostic_scan("quick")
+        )
+        self.settings_page.diagnostics_full_requested.connect(
+            lambda: self.start_diagnostic_scan("full")
+        )
 
     def _show_page(self, page: QWidget) -> None:
         self.stack.setCurrentWidget(page)
@@ -258,6 +265,7 @@ class MainWindow(QMainWindow):
             self.core_maintenance_jobs,
             self.core_backup_jobs,
             self.core_mirror_state,
+            self.core_diagnostics,
         )
         unconfigured = sum(
             item.available
@@ -277,6 +285,7 @@ class MainWindow(QMainWindow):
         self.core_maintenance_jobs = []
         self.core_backup_jobs = []
         self.core_mirror_state = {"roots": [], "jobs": []}
+        self.core_diagnostics = {}
         if not self.core_health:
             return
         try:
@@ -287,6 +296,7 @@ class MainWindow(QMainWindow):
             self.core_maintenance_jobs = self.core_client.list_maintenance_jobs()
             self.core_backup_jobs = self.core_client.list_backups()
             self.core_mirror_state = self.core_client.mirror_status()
+            self.core_diagnostics = self.core_client.diagnostics()
         except (CoreApiError, CoreUnavailable) as exc:
             self.audit.record(
                 "core.read.failed", f"Не удалось прочитать состояние ядра: {exc}", "warning"
@@ -551,6 +561,27 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Проверка не остановлена", self._core_error_text(exc))
             return
         self.refresh_core()
+
+    def start_diagnostic_scan(self, kind: str) -> None:
+        if kind == "full":
+            response = QMessageBox.question(
+                self,
+                "Запустить полную проверку?",
+                "Core прочитает все управляемые объекты и пересчитает SHA-256. Это безопасно, "
+                "но на большом хранилище создаст заметную нагрузку на диски.",
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            scan = self.core_client.start_diagnostic_scan(kind)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Проверка не запущена", self._core_error_text(exc))
+            return
+        self.audit.record(
+            "core.diagnostics.started",
+            f"Запущена {'полная' if kind == 'full' else 'быстрая'} проверка; {scan['id']}",
+        )
+        QTimer.singleShot(800, self.refresh_core)
 
     @staticmethod
     def _core_error_text(error: Exception) -> str:

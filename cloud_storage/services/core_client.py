@@ -50,6 +50,17 @@ class CoreClient:
     def summary(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/summary")
 
+    def diagnostics(self) -> dict[str, Any]:
+        return self._manager_request("/v1/admin/diagnostics")
+
+    def start_diagnostic_scan(self, kind: str) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/diagnostics/scans",
+            method="POST",
+            payload={"kind": kind},
+            timeout=10.0,
+        )
+
     def sync_storage_roots(self, roots: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return self._manager_request(
             "/v1/admin/storage-roots",

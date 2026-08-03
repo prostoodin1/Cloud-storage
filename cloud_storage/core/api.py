@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path as FileSystemPath
 from pathlib import PurePosixPath
@@ -30,6 +31,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from cloud_storage import __version__
 from cloud_storage.core.config import CoreConfig, CoreSecrets
 from cloud_storage.core.database import Database
+from cloud_storage.core.diagnostics import DiagnosticsService
 from cloud_storage.core.repository import (
     ConflictError,
     CoreRepository,
@@ -86,6 +88,10 @@ class CreateBackupRequest(BaseModel):
     target_root_id: str = Field(min_length=1, max_length=100)
 
 
+class CreateDiagnosticScanRequest(BaseModel):
+    kind: str = Field(default="quick", pattern="^(quick|full)$")
+
+
 class CreateResumableUploadRequest(BaseModel):
     logical_path: str = Field(min_length=1, max_length=1024)
     size_bytes: int = Field(ge=0)
@@ -104,6 +110,7 @@ class CoreRuntime:
     database: Database
     repository: CoreRepository
     storage: StorageService
+    diagnostics: DiagnosticsService
     tls_identity: TlsIdentity | None
     started_monotonic: float
 
@@ -139,6 +146,8 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
     storage = StorageService(config, database, repository)
     storage.cleanup_expired_uploads()
     storage.recover_interrupted_maintenance()
+    diagnostics = DiagnosticsService(config, database, repository)
+    diagnostics.recover_interrupted_scans()
     tls_identity = load_or_create_tls_identity(config) if config.lan_enabled else None
     return CoreRuntime(
         config=config,
@@ -146,6 +155,7 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         database=database,
         repository=repository,
         storage=storage,
+        diagnostics=diagnostics,
         tls_identity=tls_identity,
         started_monotonic=time.monotonic(),
     )
@@ -153,10 +163,20 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
 
 def create_app(config: CoreConfig | None = None) -> FastAPI:
     runtime = build_runtime(config)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        runtime.diagnostics.start_monitor()
+        try:
+            yield
+        finally:
+            runtime.diagnostics.stop_monitor()
+
     app = FastAPI(
         title="Cloud Storage Server Core",
         version=__version__,
         description="Local API for the Cloud Storage Server Manager and trusted devices.",
+        lifespan=lifespan,
     )
     app.state.runtime = runtime
     app.state.shutdown_callback = None
@@ -281,6 +301,62 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     @app.get("/v1/admin/summary", tags=["manager"], dependencies=[Depends(require_manager)])
     def admin_summary() -> dict[str, Any]:
         return runtime.repository.summary()
+
+    @app.get(
+        "/v1/admin/diagnostics",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def diagnostics_overview() -> dict[str, Any]:
+        return runtime.diagnostics.overview()
+
+    @app.get(
+        "/v1/admin/diagnostics/scans",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def list_diagnostic_scans() -> list[dict[str, Any]]:
+        return [
+            runtime.diagnostics.scan_to_dict(item)
+            for item in runtime.diagnostics.list_scans()
+        ]
+
+    @app.post(
+        "/v1/admin/diagnostics/scans",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def create_diagnostic_scan(
+        body: CreateDiagnosticScanRequest,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        scan = runtime.diagnostics.create_scan(body.kind, source="manager")
+        background_tasks.add_task(runtime.diagnostics.run_scan_safely, scan.id)
+        return runtime.diagnostics.scan_to_dict(scan)
+
+    @app.get(
+        "/v1/admin/diagnostics/scans/{scan_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def diagnostic_scan_status(scan_id: str) -> dict[str, Any]:
+        return runtime.diagnostics.scan_to_dict(runtime.diagnostics.get_scan(scan_id))
+
+    @app.get(
+        "/v1/admin/diagnostics/incidents",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def list_diagnostic_incidents(
+        include_resolved: bool = Query(default=False),
+    ) -> list[dict[str, Any]]:
+        return [
+            runtime.diagnostics.incident_to_dict(item)
+            for item in runtime.diagnostics.list_incidents(
+                include_resolved=include_resolved
+            )
+        ]
 
     @app.put(
         "/v1/admin/storage-roots",

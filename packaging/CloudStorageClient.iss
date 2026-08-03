@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Client"
-#define AppVersion "0.4.0-alpha.2"
+#define AppVersion "0.5.0-alpha.1"
 #define AppPublisher "Cloud Storage"
 #define AppExeName "CloudStorageClient.exe"
 
@@ -15,7 +15,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\outputs
-OutputBaseFilename=CloudStorageClient-0.4.0a2-windows-x64-setup
+OutputBaseFilename=CloudStorageClient-0.5.0a1-windows-x64-setup
 SetupIconFile=..\assets\cloud-storage.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 Compression=lzma2

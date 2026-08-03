@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
         self.core_maintenance_jobs: list[dict] = []
         self.core_backup_jobs: list[dict] = []
         self.core_restore_jobs: list[dict] = []
+        self.core_backup_automation: dict = {"policies": [], "verifications": []}
         self.core_mirror_state: dict = {"roots": [], "jobs": []}
         self.core_diagnostics: dict = {}
         self.core_server_mode: dict = {
@@ -205,6 +206,12 @@ class MainWindow(QMainWindow):
         self.settings_page.backup_requested.connect(self.start_backup)
         self.settings_page.backup_resume_requested.connect(self.resume_backup)
         self.settings_page.backup_cancel_requested.connect(self.cancel_backup)
+        self.settings_page.backup_policy_requested.connect(self.save_backup_policy)
+        self.settings_page.backup_policy_run_requested.connect(self.run_backup_policy)
+        self.settings_page.backup_verify_requested.connect(self.verify_backup)
+        self.settings_page.backup_verification_cancel_requested.connect(
+            self.cancel_backup_verification
+        )
         self.settings_page.restore_requested.connect(self.start_restore)
         self.settings_page.restore_resume_requested.connect(self.resume_restore)
         self.settings_page.restore_cancel_requested.connect(self.cancel_restore)
@@ -280,6 +287,7 @@ class MainWindow(QMainWindow):
             self.core_diagnostics,
             self.core_server_mode,
             self.core_restore_jobs,
+            self.core_backup_automation,
         )
         unconfigured = sum(
             item.available
@@ -299,6 +307,7 @@ class MainWindow(QMainWindow):
         self.core_maintenance_jobs = []
         self.core_backup_jobs = []
         self.core_restore_jobs = []
+        self.core_backup_automation = {"policies": [], "verifications": []}
         self.core_mirror_state = {"roots": [], "jobs": []}
         self.core_diagnostics = {}
         self.core_server_mode = {"mode": "normal", "reason": "", "changed_at": ""}
@@ -312,6 +321,7 @@ class MainWindow(QMainWindow):
             self.core_maintenance_jobs = self.core_client.list_maintenance_jobs()
             self.core_backup_jobs = self.core_client.list_backups()
             self.core_restore_jobs = self.core_client.list_restores()
+            self.core_backup_automation = self.core_client.backup_automation()
             self.core_mirror_state = self.core_client.mirror_status()
             self.core_diagnostics = self.core_client.diagnostics()
             self.core_server_mode = self.core_client.server_mode()
@@ -533,6 +543,89 @@ class MainWindow(QMainWindow):
             self.core_client.cancel_backup(job_id)
         except (CoreApiError, CoreUnavailable) as exc:
             QMessageBox.warning(self, "Снимок не отменён", self._core_error_text(exc))
+            return
+        self.refresh_core()
+
+    def save_backup_policy(self, values: dict) -> None:
+        enabled = bool(values.get("enabled"))
+        if enabled:
+            response = QMessageBox.warning(
+                self,
+                "Включить автоматические снимки?",
+                f"Core будет создавать снимок каждые {values['interval_hours']} ч, выполнять "
+                f"пробное восстановление и хранить последние {values['keep_last']}. Более "
+                "старые снимки удаляются только после успешной проверки и записываются в аудит.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            policy = self.core_client.set_backup_policy(
+                str(values["target_root_id"]),
+                enabled=enabled,
+                interval_hours=int(values["interval_hours"]),
+                keep_last=int(values["keep_last"]),
+                verification_root_id=values.get("verification_root_id"),
+            )
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(
+                self, "Автоматизация не сохранена", self._core_error_text(exc)
+            )
+            return
+        self.audit.record(
+            "core.backup.policy.updated",
+            f"Политика {policy['target_root_id']}: "
+            f"{'включена' if policy['enabled'] else 'выключена'}",
+        )
+        self.refresh_core()
+
+    def run_backup_policy(self, target_root_id: str) -> None:
+        response = QMessageBox.question(
+            self,
+            "Запустить полный цикл сейчас?",
+            "Core создаст снимок, выполнит пробное восстановление на выбранном основном "
+            "диске и только после успеха применит политику хранения.",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            job = self.core_client.run_backup_policy(target_root_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Цикл не запущен", self._core_error_text(exc))
+            return
+        self.audit.record(
+            "core.backup.policy.run",
+            f"Вручную запущен автоматический цикл {job['id']}",
+        )
+        self.refresh_core()
+
+    def verify_backup(self, job_id: str, target_root_id: str) -> None:
+        response = QMessageBox.question(
+            self,
+            "Проверить снимок восстановлением?",
+            "Core прочитает базу и каждый объект снимка, временно скопирует данные на "
+            "выбранный основной диск, проверит SHA-256 и удалит только тестовые файлы. "
+            "Рабочие метаданные и пользовательские файлы не изменяются.",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            verification = self.core_client.verify_backup(job_id, target_root_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Проверка не запущена", self._core_error_text(exc))
+            return
+        self.audit.record(
+            "core.backup.verification.started",
+            f"Запущено пробное восстановление {verification['id']}",
+        )
+        self.refresh_core()
+
+    def cancel_backup_verification(self, verification_id: str) -> None:
+        try:
+            self.core_client.cancel_backup_verification(verification_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Проверка не остановлена", self._core_error_text(exc))
             return
         self.refresh_core()
 

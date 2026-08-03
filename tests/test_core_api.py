@@ -546,6 +546,235 @@ def test_emergency_read_only_mode_blocks_mutations_but_keeps_reads_and_diagnosti
     assert client.get(route, headers=device_headers).content == b"working"
 
 
+def test_backup_policy_runs_verification_and_safely_rotates_verified_snapshots(
+    tmp_path,
+) -> None:
+    app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(
+        tmp_path
+    )
+    primary = tmp_path / "policy-primary" / "CloudStorageData"
+    backup = tmp_path / "policy-backup" / "CloudStorageData"
+    primary.parent.mkdir()
+    backup.parent.mkdir()
+    roots = client.put(
+        "/v1/admin/storage-roots",
+        headers=manager_headers,
+        json={
+            "roots": [
+                {
+                    "disk_id": "policy-primary",
+                    "path": str(primary),
+                    "priority": 100,
+                    "max_fill_percent": 99,
+                    "min_free_gib": 0,
+                    "purpose": "primary",
+                },
+                {
+                    "disk_id": "policy-backup",
+                    "path": str(backup),
+                    "priority": 100,
+                    "max_fill_percent": 99,
+                    "min_free_gib": 0,
+                    "purpose": "backup",
+                },
+            ]
+        },
+    ).json()
+    primary_id = next(item["id"] for item in roots if item["purpose"] == "primary")
+    backup_id = next(item["id"] for item in roots if item["purpose"] == "backup")
+    route = f"/v1/spaces/{space['id']}/files/policy.txt"
+    assert client.put(route, headers=device_headers, content=b"first").status_code == 201
+
+    policy = client.put(
+        f"/v1/admin/backup-policies/{backup_id}",
+        headers=manager_headers,
+        json={
+            "enabled": True,
+            "interval_hours": 12,
+            "keep_last": 1,
+            "verification_root_id": primary_id,
+        },
+    )
+    assert policy.status_code == 200
+    assert policy.json()["enabled"] is True
+    assert policy.json()["next_run_at"] is not None
+
+    first = client.post(
+        f"/v1/admin/backup-policies/{backup_id}/run", headers=manager_headers
+    )
+    assert first.status_code == 202
+    first_job = client.get(
+        f"/v1/admin/backups/{first.json()['id']}", headers=manager_headers
+    ).json()
+    assert first_job["status"] == "completed"
+    first_snapshot = backup / first_job["snapshot_path"]
+    assert first_snapshot.is_dir()
+    state = client.get("/v1/admin/backup-automation", headers=manager_headers).json()
+    assert state["verifications"][0]["status"] == "completed"
+    assert state["verifications"][0]["checked_objects"] == 1
+    assert not any((primary / ".staging").glob("verify-*"))
+
+    assert client.put(route, headers=device_headers, content=b"second").status_code == 201
+    second = client.post(
+        f"/v1/admin/backup-policies/{backup_id}/run", headers=manager_headers
+    )
+    assert second.status_code == 202
+    jobs = client.get("/v1/admin/backups", headers=manager_headers).json()
+    current = next(item for item in jobs if item["id"] == second.json()["id"])
+    retired = next(item for item in jobs if item["id"] == first.json()["id"])
+    assert current["status"] == "completed"
+    assert current["pruned_at"] is None
+    assert retired["pruned_at"] is not None
+    assert retired["snapshot_path"] == ""
+    assert not first_snapshot.exists()
+    assert client.get(route, headers=device_headers).content == b"second"
+    state = client.get("/v1/admin/backup-automation", headers=manager_headers).json()
+    assert state["policies"][0]["last_job_id"] == second.json()["id"]
+    assert len(state["verifications"]) == 2
+
+
+def test_due_backup_policy_waits_in_read_only_mode_and_survives_restart(tmp_path) -> None:
+    app, client, manager_headers = build_client(tmp_path / "core")
+    primary = tmp_path / "due-primary" / "CloudStorageData"
+    backup = tmp_path / "due-backup" / "CloudStorageData"
+    primary.parent.mkdir()
+    backup.parent.mkdir()
+    roots = client.put(
+        "/v1/admin/storage-roots",
+        headers=manager_headers,
+        json={
+            "roots": [
+                {
+                    "disk_id": "due-primary",
+                    "path": str(primary),
+                    "priority": 100,
+                    "max_fill_percent": 99,
+                    "min_free_gib": 0,
+                    "purpose": "primary",
+                },
+                {
+                    "disk_id": "due-backup",
+                    "path": str(backup),
+                    "priority": 100,
+                    "max_fill_percent": 99,
+                    "min_free_gib": 0,
+                    "purpose": "backup",
+                },
+            ]
+        },
+    ).json()
+    primary_id = next(item["id"] for item in roots if item["purpose"] == "primary")
+    backup_id = next(item["id"] for item in roots if item["purpose"] == "backup")
+    assert (
+        client.put(
+            f"/v1/admin/backup-policies/{backup_id}",
+            headers=manager_headers,
+            json={
+                "enabled": True,
+                "interval_hours": 24,
+                "keep_last": 3,
+                "verification_root_id": primary_id,
+            },
+        ).status_code
+        == 200
+    )
+    with app.state.runtime.database.transaction() as connection:
+        connection.execute(
+            "UPDATE backup_policies SET next_run_at = '2020-01-01T00:00:00+00:00'"
+        )
+    assert (
+        client.put(
+            "/v1/admin/server-mode",
+            headers=manager_headers,
+            json={"mode": "read_only", "reason": "maintenance", "confirmed": True},
+        ).status_code
+        == 200
+    )
+    assert app.state.runtime.backup_automation.run_due_policies() == []
+    assert client.get("/v1/admin/backups", headers=manager_headers).json() == []
+    assert (
+        client.put(
+            "/v1/admin/server-mode",
+            headers=manager_headers,
+            json={"mode": "normal", "reason": "ready"},
+        ).status_code
+        == 200
+    )
+    due_jobs = app.state.runtime.backup_automation.run_due_policies()
+    assert len(due_jobs) == 1
+    assert app.state.runtime.storage.get_backup_job(due_jobs[0]).status == "completed"
+
+    restarted = create_app(CoreConfig(data_directory=tmp_path / "core"))
+    restored_policy = restarted.state.runtime.backup_automation.get_policy(backup_id)
+    assert restored_policy.enabled is True
+    assert restored_policy.keep_last == 3
+    assert restored_policy.last_job_id == due_jobs[0]
+
+
+def test_trial_restore_rejects_corrupted_snapshot_without_touching_live_file(tmp_path) -> None:
+    app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(
+        tmp_path
+    )
+    primary = tmp_path / "verify-primary" / "CloudStorageData"
+    backup = tmp_path / "verify-backup" / "CloudStorageData"
+    primary.parent.mkdir()
+    backup.parent.mkdir()
+    roots = client.put(
+        "/v1/admin/storage-roots",
+        headers=manager_headers,
+        json={
+            "roots": [
+                {
+                    "disk_id": "verify-primary",
+                    "path": str(primary),
+                    "priority": 100,
+                    "max_fill_percent": 99,
+                    "min_free_gib": 0,
+                    "purpose": "primary",
+                },
+                {
+                    "disk_id": "verify-backup",
+                    "path": str(backup),
+                    "priority": 100,
+                    "max_fill_percent": 99,
+                    "min_free_gib": 0,
+                    "purpose": "backup",
+                },
+            ]
+        },
+    ).json()
+    primary_id = next(item["id"] for item in roots if item["purpose"] == "primary")
+    backup_id = next(item["id"] for item in roots if item["purpose"] == "backup")
+    route = f"/v1/spaces/{space['id']}/files/live.bin"
+    live = b"live data remains safe"
+    assert client.put(route, headers=device_headers, content=live).status_code == 201
+    backup_job = client.post(
+        "/v1/admin/backups",
+        headers=manager_headers,
+        json={"target_root_id": backup_id},
+    ).json()
+    completed = app.state.runtime.storage.get_backup_job(backup_job["id"])
+    snapshot = backup / completed.snapshot_path
+    manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
+    damaged = snapshot / manifest["objects"][0]["backup_object_path"]
+    damaged.write_bytes(b"corrupted backup")
+
+    started = client.post(
+        f"/v1/admin/backups/{backup_job['id']}/verify",
+        headers=manager_headers,
+        json={"target_root_id": primary_id},
+    )
+    assert started.status_code == 202
+    result = client.get(
+        f"/v1/admin/backup-verifications/{started.json()['id']}",
+        headers=manager_headers,
+    ).json()
+    assert result["status"] == "failed"
+    assert "SHA-256" in result["error"] or "size" in result["error"]
+    assert client.get(route, headers=device_headers).content == live
+    assert not any((primary / ".staging").glob("verify-*"))
+
+
 def test_mirror_replication_repair_and_download_failover(tmp_path) -> None:
     app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(tmp_path)
     primary = tmp_path / "primary-mirror-test" / "CloudStorageData"

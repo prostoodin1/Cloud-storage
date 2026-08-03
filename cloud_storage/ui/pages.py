@@ -354,6 +354,10 @@ class SettingsPage(QWidget):
     backup_requested = Signal(str)
     backup_resume_requested = Signal(str)
     backup_cancel_requested = Signal(str)
+    backup_policy_requested = Signal(dict)
+    backup_policy_run_requested = Signal(str)
+    backup_verify_requested = Signal(str, str)
+    backup_verification_cancel_requested = Signal(str)
     mirror_reconcile_requested = Signal(str)
     mirror_resume_requested = Signal(str)
     mirror_cancel_requested = Signal(str)
@@ -454,6 +458,14 @@ class SettingsPage(QWidget):
         self.backup_rows: QVBoxLayout | None = None
         self.restore_target: QComboBox | None = None
         self.restore_rows: QVBoxLayout | None = None
+        self.backup_policy_enabled: QCheckBox | None = None
+        self.backup_policy_interval: QSpinBox | None = None
+        self.backup_policy_keep: QSpinBox | None = None
+        self.backup_policy_save_button: QPushButton | None = None
+        self.backup_policy_run_button: QPushButton | None = None
+        self.backup_verification_rows: QVBoxLayout | None = None
+        self._backup_policies: list[dict] = []
+        self._backup_online = False
         self.mirror_target: QComboBox | None = None
         self.mirror_start_button: QPushButton | None = None
         self.mirror_rows: QVBoxLayout | None = None
@@ -480,6 +492,7 @@ class SettingsPage(QWidget):
         diagnostics: dict | None = None,
         server_mode: dict | None = None,
         restore_jobs: list[dict] | None = None,
+        backup_automation: dict | None = None,
     ) -> None:
         online = health is not None
         if self.core_status_label is not None:
@@ -595,7 +608,11 @@ class SettingsPage(QWidget):
                 self._add_device_card(self.pending_device_rows, device, pending=True)
         self._update_maintenance(storage_roots or [], maintenance_jobs or [], online)
         self._update_backups(
-            storage_roots or [], backup_jobs or [], restore_jobs or [], online
+            storage_roots or [],
+            backup_jobs or [],
+            restore_jobs or [],
+            backup_automation or {"policies": [], "verifications": []},
+            online,
         )
         self._update_mirrors(mirror_state or {"roots": [], "jobs": []}, online)
         self._update_diagnostics(diagnostics or {}, online)
@@ -605,8 +622,11 @@ class SettingsPage(QWidget):
         roots: list[dict],
         jobs: list[dict],
         restore_jobs: list[dict],
+        automation: dict,
         online: bool,
     ) -> None:
+        self._backup_online = online
+        self._backup_policies = list(automation.get("policies") or [])
         if self.backup_target is not None:
             previous = self.backup_target.currentData()
             self.backup_target.clear()
@@ -620,6 +640,11 @@ class SettingsPage(QWidget):
                 self.backup_target.setCurrentIndex(previous_index)
             if self.backup_start_button is not None:
                 self.backup_start_button.setEnabled(online and self.backup_target.count() > 0)
+            if self.backup_policy_save_button is not None:
+                self.backup_policy_save_button.setEnabled(
+                    online and self.backup_target.count() > 0
+                )
+            self._load_selected_backup_policy()
         if self.restore_target is not None:
             previous = self.restore_target.currentData()
             self.restore_target.clear()
@@ -632,6 +657,9 @@ class SettingsPage(QWidget):
             if previous_index >= 0:
                 self.restore_target.setCurrentIndex(previous_index)
         self._render_restore_jobs(restore_jobs, online)
+        self._render_backup_verifications(
+            list(automation.get("verifications") or []), online
+        )
         if self.backup_rows is None:
             return
         clear_layout(self.backup_rows)
@@ -676,6 +704,10 @@ class SettingsPage(QWidget):
                 path = QLabel(str(job["snapshot_path"]))
                 path.setProperty("muted", True)
                 card_layout.addWidget(path)
+            if job.get("pruned_at"):
+                pruned = QLabel(f"Удалён политикой хранения · {job['pruned_at']}")
+                pruned.setStyleSheet("color: #949ca8;")
+                card_layout.addWidget(pruned)
             if job.get("error"):
                 error = QLabel(str(job["error"]))
                 error.setWordWrap(True)
@@ -698,7 +730,19 @@ class SettingsPage(QWidget):
                     )
                 )
                 controls.addWidget(cancel)
-            if job["status"] == "completed" and self.restore_target is not None:
+            if (
+                job["status"] == "completed"
+                and not job.get("pruned_at")
+                and self.restore_target is not None
+            ):
+                verify = QPushButton("Проверить пробным восстановлением")
+                verify.setEnabled(self.restore_target.count() > 0)
+                verify.clicked.connect(
+                    lambda _checked=False, backup_id=job["id"]: (
+                        self._emit_backup_verification(backup_id)
+                    )
+                )
+                controls.addWidget(verify)
                 restore = QPushButton("Восстановить повреждённые объекты")
                 restore.setEnabled(self.restore_target.count() > 0)
                 restore.clicked.connect(
@@ -710,6 +754,60 @@ class SettingsPage(QWidget):
             controls.addStretch()
             card_layout.addLayout(controls)
             self.backup_rows.addWidget(card)
+
+    def _render_backup_verifications(self, jobs: list[dict], online: bool) -> None:
+        if self.backup_verification_rows is None:
+            return
+        clear_layout(self.backup_verification_rows)
+        if not online:
+            self._add_muted(
+                self.backup_verification_rows, "Запустите Core для проверки снимков."
+            )
+            return
+        if not jobs:
+            self._add_muted(
+                self.backup_verification_rows,
+                "Пробных восстановлений пока не запускали.",
+            )
+            return
+        status_labels = {
+            "queued": "В очереди",
+            "running": "Пробное восстановление",
+            "completed": "Снимок пригоден",
+            "failed": "Снимок не прошёл проверку",
+            "cancelled": "Остановлено",
+        }
+        for job in jobs:
+            card = QFrame()
+            card.setProperty("card", True)
+            box = QVBoxLayout(card)
+            title = QLabel(f"Проверка снимка · {job['backup_job_id']}")
+            title.setStyleSheet("font-weight: 700;")
+            detail = QLabel(
+                f"{status_labels.get(job['status'], job['status'])} · "
+                f"объектов {job.get('checked_objects', 0)}/{job.get('total_objects', 0)} · "
+                f"прочитано и записано {format_bytes(int(job.get('checked_bytes', 0)))}"
+            )
+            detail.setProperty("muted", True)
+            box.addWidget(title)
+            box.addWidget(detail)
+            if job.get("error"):
+                error = QLabel(str(job["error"]))
+                error.setWordWrap(True)
+                error.setStyleSheet("color: #e2383f;")
+                box.addWidget(error)
+            if job["status"] in {"queued", "running"}:
+                controls = QHBoxLayout()
+                cancel = QPushButton("Остановить проверку")
+                cancel.clicked.connect(
+                    lambda _checked=False, verification_id=job["id"]: (
+                        self.backup_verification_cancel_requested.emit(verification_id)
+                    )
+                )
+                controls.addWidget(cancel)
+                controls.addStretch()
+                box.addLayout(controls)
+            self.backup_verification_rows.addWidget(card)
     def _render_restore_jobs(self, jobs: list[dict], online: bool) -> None:
         if self.restore_rows is None:
             return
@@ -1352,9 +1450,26 @@ class SettingsPage(QWidget):
             layout.addWidget(description)
             form = QFormLayout()
             self.backup_target = QComboBox()
+            self.backup_target.currentIndexChanged.connect(
+                self._load_selected_backup_policy
+            )
             form.addRow("Диск с ролью «Резервные копии»", self.backup_target)
             self.restore_target = QComboBox()
             form.addRow("Основной диск для восстановления", self.restore_target)
+            self.backup_policy_enabled = QCheckBox(
+                "Автоматически создавать и проверять снимки"
+            )
+            form.addRow("Расписание", self.backup_policy_enabled)
+            self.backup_policy_interval = QSpinBox()
+            self.backup_policy_interval.setRange(1, 8760)
+            self.backup_policy_interval.setValue(24)
+            self.backup_policy_interval.setSuffix(" ч")
+            form.addRow("Интервал", self.backup_policy_interval)
+            self.backup_policy_keep = QSpinBox()
+            self.backup_policy_keep.setRange(1, 365)
+            self.backup_policy_keep.setValue(7)
+            self.backup_policy_keep.setSuffix(" снимков")
+            form.addRow("Хранить последние", self.backup_policy_keep)
             layout.addLayout(form)
             controls = QHBoxLayout()
             self.backup_start_button = QPushButton("Создать проверенный снимок")
@@ -1367,8 +1482,22 @@ class SettingsPage(QWidget):
             controls.addWidget(refresh)
             controls.addStretch()
             layout.addLayout(controls)
+            policy_controls = QHBoxLayout()
+            self.backup_policy_save_button = QPushButton("Сохранить автоматизацию")
+            self.backup_policy_save_button.clicked.connect(self._emit_backup_policy)
+            self.backup_policy_run_button = QPushButton("Запустить цикл сейчас")
+            self.backup_policy_run_button.clicked.connect(self._emit_backup_policy_run)
+            policy_controls.addWidget(self.backup_policy_save_button)
+            policy_controls.addWidget(self.backup_policy_run_button)
+            policy_controls.addStretch()
+            layout.addLayout(policy_controls)
             self.backup_rows = QVBoxLayout()
             layout.addLayout(self.backup_rows)
+            verification_title = QLabel("Проверки восстановления")
+            verification_title.setStyleSheet("font-weight: 700; margin-top: 8px;")
+            layout.addWidget(verification_title)
+            self.backup_verification_rows = QVBoxLayout()
+            layout.addLayout(self.backup_verification_rows)
             restore_title = QLabel("Последние восстановления")
             restore_title.setStyleSheet("font-weight: 700; margin-top: 8px;")
             layout.addWidget(restore_title)
@@ -1430,6 +1559,77 @@ class SettingsPage(QWidget):
         if self.restore_target is not None and self.restore_target.currentData():
             self.restore_requested.emit(
                 backup_job_id, str(self.restore_target.currentData())
+            )
+
+    def _emit_backup_verification(self, backup_job_id: str) -> None:
+        if self.restore_target is not None and self.restore_target.currentData():
+            self.backup_verify_requested.emit(
+                backup_job_id, str(self.restore_target.currentData())
+            )
+
+    def _emit_backup_policy(self) -> None:
+        if (
+            self.backup_target is None
+            or not self.backup_target.currentData()
+            or self.backup_policy_enabled is None
+            or self.backup_policy_interval is None
+            or self.backup_policy_keep is None
+        ):
+            return
+        verification_root_id = (
+            str(self.restore_target.currentData())
+            if self.restore_target is not None and self.restore_target.currentData()
+            else None
+        )
+        self.backup_policy_requested.emit(
+            {
+                "target_root_id": str(self.backup_target.currentData()),
+                "enabled": self.backup_policy_enabled.isChecked(),
+                "interval_hours": self.backup_policy_interval.value(),
+                "keep_last": self.backup_policy_keep.value(),
+                "verification_root_id": verification_root_id,
+            }
+        )
+
+    def _emit_backup_policy_run(self) -> None:
+        if self.backup_target is not None and self.backup_target.currentData():
+            self.backup_policy_run_requested.emit(
+                str(self.backup_target.currentData())
+            )
+
+    def _load_selected_backup_policy(self) -> None:
+        target_root_id = (
+            str(self.backup_target.currentData())
+            if self.backup_target is not None and self.backup_target.currentData()
+            else ""
+        )
+        policy = next(
+            (
+                item
+                for item in self._backup_policies
+                if item.get("target_root_id") == target_root_id
+            ),
+            None,
+        )
+        if self.backup_policy_enabled is not None:
+            self.backup_policy_enabled.setChecked(bool(policy and policy.get("enabled")))
+        if self.backup_policy_interval is not None:
+            self.backup_policy_interval.setValue(
+                int(policy.get("interval_hours", 24)) if policy else 24
+            )
+        if self.backup_policy_keep is not None:
+            self.backup_policy_keep.setValue(
+                int(policy.get("keep_last", 7)) if policy else 7
+            )
+        if policy and self.restore_target is not None:
+            verification_index = self.restore_target.findData(
+                policy.get("verification_root_id")
+            )
+            if verification_index >= 0:
+                self.restore_target.setCurrentIndex(verification_index)
+        if self.backup_policy_run_button is not None:
+            self.backup_policy_run_button.setEnabled(
+                self._backup_online and policy is not None
             )
 
     def _emit_mirror_reconcile(self) -> None:

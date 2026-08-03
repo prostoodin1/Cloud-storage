@@ -88,6 +88,7 @@ class RecoveryService:
                 for table in (
                     "maintenance_jobs",
                     "backup_jobs",
+                    "backup_verifications",
                     "mirror_jobs",
                     "restore_jobs",
                 ):
@@ -447,7 +448,7 @@ class RecoveryService:
         with self.database.connection() as connection:
             row = connection.execute(
                 """
-                SELECT b.status, b.snapshot_path, r.path AS root_path
+                SELECT b.status, b.snapshot_path, b.pruned_at, r.path AS root_path
                 FROM backup_jobs b
                 JOIN storage_roots r ON r.id = b.target_root_id
                 WHERE b.id = ?
@@ -456,7 +457,11 @@ class RecoveryService:
             ).fetchone()
         if row is None:
             raise NotFoundError("backup snapshot not found")
-        if row["status"] != "completed" or not row["snapshot_path"]:
+        if (
+            row["status"] != "completed"
+            or row["pruned_at"] is not None
+            or not row["snapshot_path"]
+        ):
             raise ConflictError("only a completed backup snapshot can be restored")
         root = Path(row["root_path"])
         snapshot = self._safe_directory(root, str(row["snapshot_path"]))

@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from cloud_storage import __version__
+from cloud_storage.core.backup_automation import BackupAutomationService
 from cloud_storage.core.config import CoreConfig, CoreSecrets
 from cloud_storage.core.database import Database
 from cloud_storage.core.diagnostics import DiagnosticsService
@@ -89,6 +90,17 @@ class CreateBackupRequest(BaseModel):
     target_root_id: str = Field(min_length=1, max_length=100)
 
 
+class SetBackupPolicyRequest(BaseModel):
+    enabled: bool = False
+    interval_hours: int = Field(default=24, ge=1, le=8760)
+    keep_last: int = Field(default=7, ge=1, le=365)
+    verification_root_id: str | None = Field(default=None, max_length=100)
+
+
+class CreateBackupVerificationRequest(BaseModel):
+    target_root_id: str = Field(min_length=1, max_length=100)
+
+
 class CreateDiagnosticScanRequest(BaseModel):
     kind: str = Field(default="quick", pattern="^(quick|full)$")
 
@@ -122,6 +134,7 @@ class CoreRuntime:
     database: Database
     repository: CoreRepository
     storage: StorageService
+    backup_automation: BackupAutomationService
     diagnostics: DiagnosticsService
     recovery: RecoveryService
     tls_identity: TlsIdentity | None
@@ -159,6 +172,8 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
     storage = StorageService(config, database, repository)
     storage.cleanup_expired_uploads()
     storage.recover_interrupted_maintenance()
+    backup_automation = BackupAutomationService(database, repository, storage)
+    backup_automation.recover_interrupted_verifications()
     diagnostics = DiagnosticsService(config, database, repository)
     diagnostics.recover_interrupted_scans()
     recovery = RecoveryService(database, repository, storage)
@@ -170,6 +185,7 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         database=database,
         repository=repository,
         storage=storage,
+        backup_automation=backup_automation,
         diagnostics=diagnostics,
         recovery=recovery,
         tls_identity=tls_identity,
@@ -183,9 +199,11 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         runtime.diagnostics.start_monitor()
+        runtime.backup_automation.start_scheduler()
         try:
             yield
         finally:
+            runtime.backup_automation.stop_scheduler()
             runtime.diagnostics.stop_monitor()
 
     app = FastAPI(
@@ -230,6 +248,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                     "/v1/admin/server-mode",
                     "/v1/admin/diagnostics",
                     "/v1/admin/restores",
+                    "/v1/admin/backup-verifications",
                 )
             )
             and request.url.path != "/v1/admin/shutdown"
@@ -531,6 +550,55 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     def list_backups() -> list[dict[str, Any]]:
         return [runtime.storage.backup_to_dict(item) for item in runtime.storage.list_backup_jobs()]
 
+    @app.get(
+        "/v1/admin/backup-automation",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def backup_automation() -> dict[str, Any]:
+        return {
+            "policies": [
+                runtime.backup_automation.policy_to_dict(item)
+                for item in runtime.backup_automation.list_policies()
+            ],
+            "verifications": [
+                runtime.backup_automation.verification_to_dict(item)
+                for item in runtime.backup_automation.list_verifications()
+            ],
+        }
+
+    @app.put(
+        "/v1/admin/backup-policies/{target_root_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def set_backup_policy(
+        target_root_id: str,
+        body: SetBackupPolicyRequest,
+    ) -> dict[str, Any]:
+        policy = runtime.backup_automation.set_policy(
+            target_root_id,
+            enabled=body.enabled,
+            interval_hours=body.interval_hours,
+            keep_last=body.keep_last,
+            verification_root_id=body.verification_root_id,
+        )
+        return runtime.backup_automation.policy_to_dict(policy)
+
+    @app.post(
+        "/v1/admin/backup-policies/{target_root_id}/run",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def run_backup_policy(
+        target_root_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        job = runtime.backup_automation.queue_policy_run(target_root_id)
+        background_tasks.add_task(runtime.backup_automation.run_backup_pipeline, job.id)
+        return runtime.storage.backup_to_dict(job)
+
     @app.post(
         "/v1/admin/backups",
         tags=["manager"],
@@ -542,7 +610,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         background_tasks: BackgroundTasks,
     ) -> dict[str, Any]:
         job = runtime.storage.create_backup_job(body.target_root_id)
-        background_tasks.add_task(runtime.storage.run_backup_job, job.id)
+        background_tasks.add_task(runtime.backup_automation.run_backup_pipeline, job.id)
         return runtime.storage.backup_to_dict(job)
 
     @app.get(
@@ -563,7 +631,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         background_tasks: BackgroundTasks,
     ) -> dict[str, Any]:
         job = runtime.storage.resume_backup_job(job_id)
-        background_tasks.add_task(runtime.storage.run_backup_job, job.id)
+        background_tasks.add_task(runtime.backup_automation.run_backup_pipeline, job.id)
         return runtime.storage.backup_to_dict(job)
 
     @app.delete(
@@ -573,6 +641,45 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     )
     def cancel_backup(job_id: str) -> dict[str, Any]:
         return runtime.storage.backup_to_dict(runtime.storage.cancel_backup_job(job_id))
+
+    @app.post(
+        "/v1/admin/backups/{job_id}/verify",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def verify_backup(
+        job_id: str,
+        body: CreateBackupVerificationRequest,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        verification = runtime.backup_automation.create_verification(
+            job_id, body.target_root_id
+        )
+        background_tasks.add_task(
+            runtime.backup_automation.run_verification, verification.id
+        )
+        return runtime.backup_automation.verification_to_dict(verification)
+
+    @app.get(
+        "/v1/admin/backup-verifications/{verification_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def backup_verification(verification_id: str) -> dict[str, Any]:
+        return runtime.backup_automation.verification_to_dict(
+            runtime.backup_automation.get_verification(verification_id)
+        )
+
+    @app.delete(
+        "/v1/admin/backup-verifications/{verification_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def cancel_backup_verification(verification_id: str) -> dict[str, Any]:
+        return runtime.backup_automation.verification_to_dict(
+            runtime.backup_automation.cancel_verification(verification_id)
+        )
 
     @app.get(
         "/v1/admin/restores",

@@ -150,6 +150,35 @@ CREATE TABLE IF NOT EXISTS backup_jobs (
     created_at TEXT NOT NULL,
     started_at TEXT,
     completed_at TEXT,
+    pruned_at TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backup_policies (
+    target_root_id TEXT PRIMARY KEY REFERENCES storage_roots(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
+    interval_hours INTEGER NOT NULL DEFAULT 24 CHECK(interval_hours BETWEEN 1 AND 8760),
+    keep_last INTEGER NOT NULL DEFAULT 7 CHECK(keep_last BETWEEN 1 AND 365),
+    verification_root_id TEXT REFERENCES storage_roots(id) ON DELETE SET NULL,
+    next_run_at TEXT,
+    last_run_at TEXT,
+    last_job_id TEXT REFERENCES backup_jobs(id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backup_verifications (
+    id TEXT PRIMARY KEY,
+    backup_job_id TEXT NOT NULL REFERENCES backup_jobs(id) ON DELETE RESTRICT,
+    target_root_id TEXT NOT NULL REFERENCES storage_roots(id) ON DELETE RESTRICT,
+    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+    total_objects INTEGER NOT NULL DEFAULT 0 CHECK(total_objects >= 0),
+    total_bytes INTEGER NOT NULL DEFAULT 0 CHECK(total_bytes >= 0),
+    checked_objects INTEGER NOT NULL DEFAULT 0 CHECK(checked_objects >= 0),
+    checked_bytes INTEGER NOT NULL DEFAULT 0 CHECK(checked_bytes >= 0),
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
     updated_at TEXT NOT NULL
 );
 
@@ -263,6 +292,8 @@ CREATE INDEX IF NOT EXISTS idx_upload_sessions_user ON upload_sessions(user_id, 
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_expiry ON upload_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_maintenance_jobs_status ON maintenance_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_backup_jobs_status ON backup_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_backup_verifications_created
+    ON backup_verifications(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_mirror_replicas_status
     ON mirror_replicas(storage_root_id, status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_mirror_jobs_status ON mirror_jobs(status, created_at);
@@ -296,6 +327,11 @@ class Database:
                     "ALTER TABLE storage_roots ADD COLUMN purpose TEXT NOT NULL DEFAULT 'primary' "
                     "CHECK(purpose IN ('primary', 'backup', 'mirror'))"
                 )
+            backup_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(backup_jobs)").fetchall()
+            }
+            if "pruned_at" not in backup_columns:
+                connection.execute("ALTER TABLE backup_jobs ADD COLUMN pruned_at TEXT")
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
@@ -327,6 +363,10 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(8, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
             connection.commit()
 

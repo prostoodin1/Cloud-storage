@@ -663,7 +663,8 @@ class DiagnosticsService:
             rows = connection.execute(
                 """
                 SELECT id, target_root_id, snapshot_path FROM backup_jobs
-                WHERE status = 'completed' ORDER BY completed_at DESC LIMIT 20
+                WHERE status = 'completed' AND pruned_at IS NULL
+                ORDER BY completed_at DESC LIMIT 20
                 """
             ).fetchall()
         findings: list[DiagnosticFinding] = []

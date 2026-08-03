@@ -124,11 +124,55 @@ class CoreClient:
             timeout=10.0,
         )
 
+    def backup_automation(self) -> dict[str, Any]:
+        return self._manager_request("/v1/admin/backup-automation")
+
+    def set_backup_policy(
+        self,
+        target_root_id: str,
+        *,
+        enabled: bool,
+        interval_hours: int,
+        keep_last: int,
+        verification_root_id: str | None,
+    ) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/backup-policies/{target_root_id}",
+            method="PUT",
+            payload={
+                "enabled": enabled,
+                "interval_hours": interval_hours,
+                "keep_last": keep_last,
+                "verification_root_id": verification_root_id,
+            },
+        )
+
+    def run_backup_policy(self, target_root_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/backup-policies/{target_root_id}/run",
+            method="POST",
+            timeout=10.0,
+        )
+
     def resume_backup(self, job_id: str) -> dict[str, Any]:
         return self._manager_request(f"/v1/admin/backups/{job_id}/resume", method="POST")
 
     def cancel_backup(self, job_id: str) -> dict[str, Any]:
         return self._manager_request(f"/v1/admin/backups/{job_id}", method="DELETE")
+
+    def verify_backup(self, job_id: str, target_root_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/backups/{job_id}/verify",
+            method="POST",
+            payload={"target_root_id": target_root_id},
+            timeout=10.0,
+        )
+
+    def cancel_backup_verification(self, verification_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/backup-verifications/{verification_id}",
+            method="DELETE",
+        )
 
     def list_restores(self) -> list[dict[str, Any]]:
         return self._manager_request("/v1/admin/restores")

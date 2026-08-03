@@ -131,6 +131,7 @@ class BackupJobRecord:
     created_at: str
     started_at: str | None
     completed_at: str | None
+    pruned_at: str | None
     updated_at: str
 
 
@@ -1089,6 +1090,7 @@ class StorageService:
             return updated.rowcount + backups.rowcount + mirrors.rowcount
 
     def create_backup_job(self, target_root_id: str) -> BackupJobRecord:
+        self._require_server_writable()
         target = self._root_by_id(target_root_id)
         if target.purpose != "backup":
             raise ConflictError("target storage is not assigned the backup role")
@@ -1110,6 +1112,11 @@ class StorageService:
         job_id = str(uuid.uuid4())
         now = utc_text()
         with self.database.transaction() as connection:
+            active = connection.execute(
+                "SELECT id FROM backup_jobs WHERE status IN ('queued', 'running') LIMIT 1"
+            ).fetchone()
+            if active is not None:
+                raise ConflictError("another backup snapshot is already queued or running")
             connection.execute(
                 """
                 INSERT INTO backup_jobs(

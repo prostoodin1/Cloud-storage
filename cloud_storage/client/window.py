@@ -104,7 +104,7 @@ class ClientWindow(QMainWindow):
         super().__init__()
         self.store = store or ClientSettingsStore()
         self.profile: ClientProfile = self.store.load()
-        self.vault = DeviceTokenVault(self.store.data_directory)
+        self.vault = DeviceTokenVault(self.store.data_directory, self.profile.profile_id)
         self.knowledge = KnowledgeBase(self.store.data_directory / "knowledge.db")
         self.transfer_store = TransferStore(self.store.data_directory / "transfers.db")
         self.offline_store = OfflineStore(self.store.data_directory / "offline.db")
@@ -120,13 +120,14 @@ class ClientWindow(QMainWindow):
         self._transfer_retry_after: dict[str, float] = {}
         self._open_after_transfer_ids: set[str] = set()
         self._connection_check_running = False
+        self._profile_generation = 0
         self._offline_scan_running = False
         self._quit_requested = False
         self._shutdown_prepared = False
         self._tray_notice_shown = False
         self.tray_icon: QSystemTrayIcon | None = None
 
-        self.setWindowTitle(f"Cloud Storage Client · Alpha {__version__}")
+        self.setWindowTitle(f"Cloud Storage Client · {__version__}")
         self.setMinimumSize(980, 640)
         self.resize(1240, 780)
         self._build_ui()
@@ -165,7 +166,7 @@ class ClientWindow(QMainWindow):
         brand_box = QVBoxLayout()
         brand = QLabel("CLOUD STORAGE")
         brand.setObjectName("Brand")
-        edition = QLabel(f"DESKTOP CLIENT · ALPHA {__version__}")
+        edition = QLabel(f"DESKTOP CLIENT · {__version__}")
         edition.setProperty("muted", True)
         edition.setStyleSheet("font-size: 10px;")
         brand_box.addWidget(brand)
@@ -251,6 +252,17 @@ class ClientWindow(QMainWindow):
         card_layout.setContentsMargins(18, 18, 18, 18)
         form = QFormLayout()
         form.setVerticalSpacing(12)
+        self.server_selector = QComboBox()
+        self.server_selector.setMinimumWidth(280)
+        self.server_selector.currentIndexChanged.connect(self.switch_server)
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(self.server_selector, 1)
+        self.add_server_button = QPushButton("Добавить сервер")
+        self.add_server_button.clicked.connect(self.add_server)
+        self.remove_server_button = QPushButton("Удалить сервер")
+        self.remove_server_button.clicked.connect(self.remove_server)
+        profile_row.addWidget(self.add_server_button)
+        profile_row.addWidget(self.remove_server_button)
         self.server_url = QLineEdit()
         self.server_url.setPlaceholderText("http://127.0.0.1:8765")
         address_row = QHBoxLayout()
@@ -267,6 +279,7 @@ class ClientWindow(QMainWindow):
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         self.password.setPlaceholderText("Минимум 10 символов")
         self.device_name = QLineEdit(platform.node() or "Мой компьютер")
+        form.addRow("Сохранённые серверы", profile_row)
         form.addRow("Адрес сервера", address_row)
         form.addRow("Отпечаток TLS", self.fingerprint)
         form.addRow("Код или приглашение", self.pairing_code)
@@ -466,6 +479,7 @@ class ClientWindow(QMainWindow):
         return page
 
     def _load_profile(self) -> None:
+        self._refresh_server_selector()
         self.server_url.setText(self.profile.server_url)
         self.fingerprint.setText(self.profile.certificate_fingerprint)
         self.device_name.setText(self.profile.device_name or platform.node() or "Мой компьютер")
@@ -482,6 +496,78 @@ class ClientWindow(QMainWindow):
         self._set_connection_state(self.profile.device_status)
         self.status_button.setEnabled(bool(self.token))
         self.forget_button.setEnabled(bool(self.token))
+
+    def _refresh_server_selector(self) -> None:
+        profiles = self.store.list_profiles()
+        self.server_selector.blockSignals(True)
+        self.server_selector.clear()
+        selected = 0
+        for index, profile in enumerate(profiles):
+            name = profile.server_name.strip() or "Сервер"
+            self.server_selector.addItem(f"{name} — {profile.server_url}", profile.profile_id)
+            if profile.profile_id == self.profile.profile_id:
+                selected = index
+        self.server_selector.setCurrentIndex(selected)
+        self.server_selector.blockSignals(False)
+
+    def _activate_profile(self, profile: ClientProfile) -> None:
+        self._profile_generation += 1
+        self._connection_check_running = False
+        self.profile = profile
+        self.vault = DeviceTokenVault(self.store.data_directory, profile.profile_id)
+        self.token = self.vault.load()
+        self.api = None
+        self.current_directory = ""
+        self.password.clear()
+        self.pairing_code.clear()
+        self.connect_button.setEnabled(True)
+        self._set_spaces([])
+        self._load_profile()
+        if self.token:
+            QTimer.singleShot(0, self.refresh_connection)
+
+    def switch_server(self, index: int) -> None:
+        if index < 0:
+            return
+        profile_id = str(self.server_selector.itemData(index) or "")
+        if not profile_id or profile_id == self.profile.profile_id:
+            return
+        try:
+            profile = self.store.set_active(profile_id)
+        except KeyError:
+            self._refresh_server_selector()
+            return
+        self._activate_profile(profile)
+
+    def add_server(self) -> None:
+        profile = self.store.add_profile()
+        self._activate_profile(profile)
+        self.server_url.setFocus()
+
+    def remove_server(self) -> None:
+        response = QMessageBox.question(
+            self,
+            "Удалить сохранённый сервер?",
+            "Будет удалён только локальный профиль и его токен. Файлы на сервере и локальные "
+            "офлайн-копии останутся на месте.",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        removed_url = self.profile.server_url.rstrip("/")
+        for transfer in self.transfer_store.list():
+            if transfer.server_url.rstrip("/") == removed_url and transfer.status in {
+                "queued",
+                "running",
+            }:
+                self.transfer_store.set_status(
+                    transfer.id,
+                    "paused",
+                    "Профиль сервера удалён — передача приостановлена",
+                )
+        self.vault.clear()
+        profile = self.store.remove_profile(self.profile.profile_id)
+        self._activate_profile(profile)
+        self._refresh_transfer_cards()
 
     def connect_device(self) -> None:
         raw_code = self.pairing_code.text().strip()
@@ -514,16 +600,23 @@ class ClientWindow(QMainWindow):
             return
         self.connect_button.setEnabled(False)
         self.connection_detail.setText("Проверяем сервер и отправляем запрос на подключение…")
+        profile_id = self.profile.profile_id
 
         def pair() -> dict[str, Any]:
             health = api.health()
             result = api.redeem_invitation(code, password, device_name, platform.system())
-            return {"health": health, "pairing": result}
+            return {"health": health, "pairing": result, "profile_id": profile_id}
 
-        self._start_task(pair, self._pairing_complete, self._connection_failed)
+        self._start_task(
+            pair,
+            self._pairing_complete,
+            lambda message: self._connection_failed_for(profile_id, message),
+        )
 
     def _pairing_complete(self, result: object) -> None:
         payload = result if isinstance(result, dict) else {}
+        if payload.get("profile_id") != self.profile.profile_id:
+            return
         pairing = payload.get("pairing", {})
         device = pairing.get("device", {})
         token = pairing.get("device_token", "")
@@ -542,6 +635,7 @@ class ClientWindow(QMainWindow):
         self.profile.device_name = self.device_name.text().strip()
         self.profile.device_status = str(device.get("status", "pending"))
         self.store.save(self.profile)
+        self._refresh_server_selector()
         self.password.clear()
         self.pairing_code.clear()
         self.connect_button.setEnabled(True)
@@ -604,28 +698,35 @@ class ClientWindow(QMainWindow):
         if self._connection_check_running or not self.token:
             return
         self._connection_check_running = True
+        profile_id = self.profile.profile_id
         try:
-            self.api = ClientApi(
+            api = ClientApi(
                 self.profile.server_url,
                 token=self.token,
                 certificate_fingerprint=self.profile.certificate_fingerprint,
             )
+            self.api = api
         except ValueError:
             self._connection_check_running = False
             return
 
         def check() -> dict[str, Any]:
-            assert self.api is not None
-            self.api.health()
-            status = self.api.pairing_status()
-            spaces = self.api.list_spaces() if status.get("status") == "trusted" else []
-            return {"status": status, "spaces": spaces}
+            api.health()
+            status = api.pairing_status()
+            spaces = api.list_spaces() if status.get("status") == "trusted" else []
+            return {"status": status, "spaces": spaces, "profile_id": profile_id}
 
-        self._start_task(check, self._connection_refreshed, self._connection_refresh_failed)
+        self._start_task(
+            check,
+            self._connection_refreshed,
+            lambda message: self._connection_refresh_failed_for(profile_id, message),
+        )
 
     def _connection_refreshed(self, result: object) -> None:
-        self._connection_check_running = False
         payload = result if isinstance(result, dict) else {}
+        if payload.get("profile_id") != self.profile.profile_id:
+            return
+        self._connection_check_running = False
         status = str(payload.get("status", {}).get("status", "disconnected"))
         self.profile.device_status = status
         self.store.save(self.profile)
@@ -638,10 +739,18 @@ class ClientWindow(QMainWindow):
         self._connection_check_running = False
         self._set_connection_state("offline", message)
 
+    def _connection_refresh_failed_for(self, profile_id: str, message: str) -> None:
+        if profile_id == self.profile.profile_id:
+            self._connection_refresh_failed(message)
+
     def _connection_failed(self, message: str) -> None:
         self.connect_button.setEnabled(True)
         self._set_connection_state("disconnected", message)
         QMessageBox.warning(self, "Подключение не выполнено", message)
+
+    def _connection_failed_for(self, profile_id: str, message: str) -> None:
+        if profile_id == self.profile.profile_id:
+            self._connection_failed(message)
 
     def _set_connection_state(self, state: str, detail: str = "") -> None:
         if state == "trusted":
@@ -1104,11 +1213,24 @@ class ClientWindow(QMainWindow):
         transfer = self.transfer_store.get(transfer_id)
         if transfer.status not in {"completed", "cancelled"}:
             self.transfer_store.set_status(transfer_id, "cancelled", "Отменено")
-            if transfer_id not in self._active_transfer_ids and self.token:
+            profile = next(
+                (
+                    item
+                    for item in self.store.list_profiles()
+                    if item.server_url.rstrip("/") == transfer.server_url.rstrip("/")
+                ),
+                None,
+            )
+            token = (
+                DeviceTokenVault(self.store.data_directory, profile.profile_id).load()
+                if profile is not None
+                else None
+            )
+            if transfer_id not in self._active_transfer_ids and token and profile is not None:
                 api = ClientApi(
                     transfer.server_url,
-                    token=self.token,
-                    certificate_fingerprint=self.profile.certificate_fingerprint,
+                    token=token,
+                    certificate_fingerprint=profile.certificate_fingerprint,
                 )
                 self._start_task(
                     self._cleanup_cancelled_transfer,

@@ -244,6 +244,10 @@ class CoreClient:
     def list_devices(self) -> list[dict[str, Any]]:
         return self._manager_request("/v1/admin/devices")
 
+    def list_audit(self, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(limit, 500))
+        return self._manager_request(f"/v1/admin/audit?limit={safe_limit}")
+
     def approve_device(self, device_id: str) -> dict[str, Any]:
         return self._manager_request(f"/v1/admin/devices/{device_id}/approve", method="POST")
 
@@ -327,6 +331,15 @@ class CoreSupervisor:
         environment["CLOUD_STORAGE_LAN_HOST"] = self.config.lan_host
         environment["CLOUD_STORAGE_LAN_PORT"] = str(self.config.lan_port)
         environment["CLOUD_STORAGE_DISCOVERY_PORT"] = str(self.config.discovery_port)
+        environment["CLOUD_STORAGE_REMOTE_ENABLED"] = (
+            "1" if self.config.remote_enabled else "0"
+        )
+        environment["CLOUD_STORAGE_REMOTE_HOST"] = self.config.remote_host
+        environment["CLOUD_STORAGE_REMOTE_PORT"] = str(self.config.remote_port)
+        environment["CLOUD_STORAGE_REMOTE_PUBLIC_URL"] = self.config.remote_public_url
+        environment["CLOUD_STORAGE_REMOTE_PAIRING_ENABLED"] = (
+            "1" if self.config.remote_pairing_enabled else "0"
+        )
         environment["CLOUD_STORAGE_SERVER_NAME"] = self.config.server_name
         log_handle = self.config.log_path.open("ab")
         try:

@@ -68,9 +68,12 @@ class CoreServerGroup:
         self.application = create_app(config)
         self.local_server = uvicorn.Server(self._uvicorn_config(config.host, config.port))
         self.lan_server: uvicorn.Server | None = None
+        self.remote_server: uvicorn.Server | None = None
         self.discovery: DiscoveryResponder | None = None
         self._lan_thread: threading.Thread | None = None
+        self._remote_thread: threading.Thread | None = None
         self._lan_error: BaseException | None = None
+        self._remote_error: BaseException | None = None
         identity = self.application.state.runtime.tls_identity
         if config.lan_enabled:
             if identity is None:
@@ -84,6 +87,17 @@ class CoreServerGroup:
                 )
             )
             self.discovery = DiscoveryResponder(config, identity)
+        if config.remote_enabled:
+            if identity is None:
+                raise RuntimeError("remote access requires a TLS identity")
+            self.remote_server = uvicorn.Server(
+                self._uvicorn_config(
+                    config.remote_host,
+                    config.remote_port,
+                    certificate=identity.certificate_path,
+                    private_key=identity.private_key_path,
+                )
+            )
         self.application.state.shutdown_callback = self.request_shutdown
 
     def _uvicorn_config(
@@ -104,25 +118,35 @@ class CoreServerGroup:
             date_header=False,
             ssl_certfile=certificate,
             ssl_keyfile=private_key,
+            lifespan="off" if certificate else "auto",
         )
 
     def run(self) -> None:
-        if self.lan_server is not None:
-            self._lan_thread = threading.Thread(
-                target=self._run_lan,
-                name="cloud-storage-lan-api",
+        listeners = [
+            (self.lan_server, "LAN HTTPS", "_lan_thread", self._run_lan),
+            (self.remote_server, "remote HTTPS", "_remote_thread", self._run_remote),
+        ]
+        for server, label, thread_attribute, runner in listeners:
+            if server is None:
+                continue
+            thread = threading.Thread(
+                target=runner,
+                name=f"cloud-storage-{label.casefold().replace(' ', '-')}-api",
                 daemon=True,
             )
-            self._lan_thread.start()
+            setattr(self, thread_attribute, thread)
+            thread.start()
             deadline = time.monotonic() + 5
-            while not self.lan_server.started and self._lan_thread.is_alive():
+            while not server.started and thread.is_alive():
                 if time.monotonic() >= deadline:
                     self.request_shutdown()
-                    raise RuntimeError("LAN HTTPS listener did not become ready")
+                    raise RuntimeError(f"{label} listener did not become ready")
                 time.sleep(0.02)
-            if self._lan_error is not None or not self.lan_server.started:
+            error = self._lan_error if server is self.lan_server else self._remote_error
+            if error is not None or not server.started:
                 self.request_shutdown()
-                raise RuntimeError("LAN HTTPS listener could not start") from self._lan_error
+                raise RuntimeError(f"{label} listener could not start") from error
+        if self.lan_server is not None:
             if self.discovery is not None:
                 self.discovery.start()
         try:
@@ -133,6 +157,8 @@ class CoreServerGroup:
                 self.discovery.stop()
             if self._lan_thread is not None:
                 self._lan_thread.join(timeout=5)
+            if self._remote_thread is not None:
+                self._remote_thread.join(timeout=5)
 
     def request_shutdown(self, *, delay: bool = True) -> None:
         if delay:
@@ -140,6 +166,8 @@ class CoreServerGroup:
         self.local_server.should_exit = True
         if self.lan_server is not None:
             self.lan_server.should_exit = True
+        if self.remote_server is not None:
+            self.remote_server.should_exit = True
 
     def _run_lan(self) -> None:
         assert self.lan_server is not None
@@ -147,6 +175,13 @@ class CoreServerGroup:
             self.lan_server.run()
         except BaseException as exc:  # server thread boundary
             self._lan_error = exc
+
+    def _run_remote(self) -> None:
+        assert self.remote_server is not None
+        try:
+            self.remote_server.run()
+        except BaseException as exc:  # server thread boundary
+            self._remote_error = exc
 
 
 def run_server(config: CoreConfig) -> int:
@@ -162,6 +197,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--lan", action="store_true")
     parser.add_argument("--lan-port", type=int, default=None)
+    parser.add_argument("--remote", action="store_true")
+    parser.add_argument("--remote-port", type=int, default=None)
     parser.add_argument("--initialize-only", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
     return parser
@@ -179,6 +216,11 @@ def main() -> int:
             lan_host=base.lan_host,
             lan_port=args.lan_port or base.lan_port,
             discovery_port=base.discovery_port,
+            remote_enabled=args.remote or base.remote_enabled,
+            remote_host=base.remote_host,
+            remote_port=args.remote_port or base.remote_port,
+            remote_public_url=base.remote_public_url,
+            remote_pairing_enabled=base.remote_pairing_enabled,
             server_name=base.server_name,
             max_upload_bytes=base.max_upload_bytes,
             pairing_ttl_seconds=base.pairing_ttl_seconds,

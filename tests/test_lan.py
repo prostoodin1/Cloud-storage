@@ -70,9 +70,90 @@ def test_lan_listener_hides_manager_routes_in_asgi_scope(tmp_path) -> None:
     assert documentation.status_code == 404
 
 
+def test_remote_listener_is_default_deny_and_pairing_requires_explicit_opt_in(
+    tmp_path,
+) -> None:
+    config = CoreConfig(
+        data_directory=tmp_path,
+        remote_enabled=True,
+        remote_port=18767,
+        remote_public_url="https://cloud.example.net:18767",
+    )
+    app = create_app(config)
+    manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
+
+    with TestClient(app) as manager, TestClient(
+        app, base_url="https://127.0.0.1:18767"
+    ) as remote:
+        health = remote.get("/v1/health")
+        hidden_admin = remote.get("/v1/admin/summary", headers=manager_headers)
+        hidden_unknown = remote.get("/v1/future-route")
+        pairing = remote.post(
+            "/v1/pairing/redeem",
+            json={
+                "code": "ABCD-2345",
+                "password": "a secure test password",
+                "device_name": "Remote test",
+                "platform": "Windows",
+            },
+        )
+        audit = manager.get("/v1/admin/audit", headers=manager_headers).json()
+
+    assert health.status_code == 200
+    assert health.json()["remote"]["public_url"] == "https://cloud.example.net:18767"
+    assert health.json()["remote"]["manager_api_exposed"] is False
+    assert hidden_admin.status_code == 404
+    assert hidden_unknown.status_code == 404
+    assert pairing.status_code == 403
+    assert any(
+        item["action"] == "remote.access.denied"
+        and item["remote_address"] == "testclient"
+        for item in audit
+    )
+
+
+def test_remote_pairing_works_when_administrator_enables_it(tmp_path) -> None:
+    config = CoreConfig(
+        data_directory=tmp_path,
+        remote_enabled=True,
+        remote_port=18767,
+        remote_public_url="https://cloud.example.net:18767",
+        remote_pairing_enabled=True,
+    )
+    app = create_app(config)
+    manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
+
+    with TestClient(app) as manager, TestClient(
+        app, base_url="https://127.0.0.1:18767"
+    ) as remote:
+        user = manager.post(
+            "/v1/admin/users",
+            headers=manager_headers,
+            json={"username": "remoteqa", "display_name": "Remote QA", "quota_gib": 1},
+        ).json()["user"]
+        invitation = manager.post(
+            "/v1/admin/invitations",
+            headers=manager_headers,
+            json={"user_id": user["id"]},
+        ).json()
+        paired = remote.post(
+            "/v1/pairing/redeem",
+            json={
+                "code": invitation["code"],
+                "password": "a secure test password",
+                "device_name": "Remote laptop",
+                "platform": "Windows",
+            },
+        )
+
+    assert paired.status_code == 201
+    assert paired.json()["device"]["status"] == "pending"
+
+
 def test_live_https_listener_pinning_discovery_and_local_admin_boundary(tmp_path) -> None:
     local_port = _free_tcp_port()
     lan_port = _free_tcp_port()
+    remote_port = _free_tcp_port()
     discovery_port = _free_udp_port()
     config = CoreConfig(
         data_directory=tmp_path,
@@ -80,6 +161,9 @@ def test_live_https_listener_pinning_discovery_and_local_admin_boundary(tmp_path
         lan_enabled=True,
         lan_port=lan_port,
         discovery_port=discovery_port,
+        remote_enabled=True,
+        remote_port=remote_port,
+        remote_public_url=f"https://127.0.0.1:{remote_port}",
         server_name="Test Home Cloud",
     )
     servers = CoreServerGroup(config)
@@ -90,6 +174,7 @@ def test_live_https_listener_pinning_discovery_and_local_admin_boundary(tmp_path
         time.sleep(0.02)
     assert servers.local_server.started
     assert servers.lan_server is not None and servers.lan_server.started
+    assert servers.remote_server is not None and servers.remote_server.started
     identity = servers.application.state.runtime.tls_identity
     assert identity is not None
 
@@ -109,6 +194,16 @@ def test_live_https_listener_pinning_discovery_and_local_admin_boundary(tmp_path
                 f"https://127.0.0.1:{lan_port}",
                 certificate_fingerprint="00" * 32,
             ).health()
+
+        remote_api = ClientApi(
+            f"https://127.0.0.1:{remote_port}",
+            token=servers.application.state.runtime.secrets.manager_token,
+            certificate_fingerprint=identity.fingerprint,
+        )
+        assert remote_api.health()["remote"]["manager_api_exposed"] is False
+        with pytest.raises(ClientApiError) as remote_denied:
+            remote_api._json_request("/v1/admin/summary")
+        assert remote_denied.value.status_code == 404
 
         discovered = discover_servers(port=discovery_port, timeout=1.0)
         assert len(discovered) == 1

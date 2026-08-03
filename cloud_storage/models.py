@@ -105,7 +105,7 @@ class DiskConfiguration:
 
 @dataclass(slots=True)
 class AppSettings:
-    schema_version: int = 2
+    schema_version: int = 3
     server_name: str = "Домашнее облако"
     setup_complete: bool = False
     setup_reminded_later: bool = False
@@ -114,6 +114,10 @@ class AppSettings:
     refresh_interval_seconds: int = 30
     lan_enabled: bool = False
     lan_port: int = 8766
+    remote_enabled: bool = False
+    remote_port: int = 8767
+    remote_public_url: str = ""
+    remote_pairing_enabled: bool = False
     known_disk_ids: list[str] = field(default_factory=list)
     ignored_disk_ids: list[str] = field(default_factory=list)
     disk_configurations: dict[str, DiskConfiguration] = field(default_factory=dict)
@@ -122,7 +126,7 @@ class AppSettings:
     def from_dict(cls, value: dict[str, Any] | None) -> AppSettings:
         value = value or {}
         result = cls()
-        result.schema_version = 2
+        result.schema_version = 3
         result.server_name = str(value.get("server_name", result.server_name))[:80]
         result.setup_complete = bool(value.get("setup_complete", False))
         result.setup_reminded_later = bool(value.get("setup_reminded_later", False))
@@ -133,6 +137,16 @@ class AppSettings:
         result.lan_enabled = bool(value.get("lan_enabled", False))
         lan_port = int(value.get("lan_port", 8766))
         result.lan_port = lan_port if 1024 <= lan_port <= 65535 and lan_port != 8765 else 8766
+        result.remote_enabled = bool(value.get("remote_enabled", False))
+        remote_port = int(value.get("remote_port", 8767))
+        fallback_remote_port = 8768 if result.lan_port == 8767 else 8767
+        result.remote_port = (
+            remote_port
+            if 1024 <= remote_port <= 65535 and remote_port not in {8765, result.lan_port}
+            else fallback_remote_port
+        )
+        result.remote_public_url = str(value.get("remote_public_url", "")).strip()[:2048]
+        result.remote_pairing_enabled = bool(value.get("remote_pairing_enabled", False))
         result.known_disk_ids = [str(item) for item in value.get("known_disk_ids", [])]
         result.ignored_disk_ids = [str(item) for item in value.get("ignored_disk_ids", [])]
         configs = value.get("disk_configurations", {})
@@ -160,6 +174,10 @@ class AppSettings:
             "refresh_interval_seconds": self.refresh_interval_seconds,
             "lan_enabled": self.lan_enabled,
             "lan_port": self.lan_port,
+            "remote_enabled": self.remote_enabled,
+            "remote_port": self.remote_port,
+            "remote_public_url": self.remote_public_url,
+            "remote_pairing_enabled": self.remote_pairing_enabled,
             "known_disk_ids": self.known_disk_ids,
             "ignored_disk_ids": self.ignored_disk_ids,
             "disk_configurations": {

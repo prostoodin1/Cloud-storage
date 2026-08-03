@@ -5,6 +5,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +17,11 @@ class CoreConfig:
     lan_host: str = "0.0.0.0"
     lan_port: int = 8766
     discovery_port: int = 47777
+    remote_enabled: bool = False
+    remote_host: str = "0.0.0.0"
+    remote_port: int = 8767
+    remote_public_url: str = ""
+    remote_pairing_enabled: bool = False
     server_name: str = "Домашнее облако"
     max_upload_bytes: int = 20 * 1024**3
     pairing_ttl_seconds: int = 15 * 60
@@ -31,6 +37,30 @@ class CoreConfig:
             raise ValueError("LAN port must be different and between 1024 and 65535")
         if not 1024 <= self.discovery_port <= 65535:
             raise ValueError("discovery port must be between 1024 and 65535")
+        if self.remote_host not in {"0.0.0.0", "::"}:
+            raise ValueError("remote host must bind all local interfaces")
+        if (
+            not 1024 <= self.remote_port <= 65535
+            or self.remote_port == self.port
+            or (
+                self.remote_enabled
+                and self.lan_enabled
+                and self.remote_port == self.lan_port
+            )
+        ):
+            raise ValueError("remote port must be unique and between 1024 and 65535")
+        if self.remote_enabled:
+            parsed = urlsplit(self.remote_public_url.strip())
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+                or parsed.path not in {"", "/"}
+            ):
+                raise ValueError("remote public URL must be an HTTPS origin without a path")
         if not self.server_name.strip():
             raise ValueError("server name cannot be empty")
 
@@ -43,6 +73,13 @@ class CoreConfig:
         lan_host = os.environ.get("CLOUD_STORAGE_LAN_HOST", "0.0.0.0")
         lan_port = int(os.environ.get("CLOUD_STORAGE_LAN_PORT", "8766"))
         discovery_port = int(os.environ.get("CLOUD_STORAGE_DISCOVERY_PORT", "47777"))
+        remote_enabled = _environment_bool("CLOUD_STORAGE_REMOTE_ENABLED", False)
+        remote_host = os.environ.get("CLOUD_STORAGE_REMOTE_HOST", "0.0.0.0")
+        remote_port = int(os.environ.get("CLOUD_STORAGE_REMOTE_PORT", "8767"))
+        remote_public_url = os.environ.get("CLOUD_STORAGE_REMOTE_PUBLIC_URL", "").strip()
+        remote_pairing_enabled = _environment_bool(
+            "CLOUD_STORAGE_REMOTE_PAIRING_ENABLED", False
+        )
         server_name = os.environ.get("CLOUD_STORAGE_SERVER_NAME", "Домашнее облако").strip()
         max_upload_gib = int(os.environ.get("CLOUD_STORAGE_MAX_UPLOAD_GIB", "20"))
         if not server_name:
@@ -55,6 +92,11 @@ class CoreConfig:
             lan_host=lan_host,
             lan_port=lan_port,
             discovery_port=discovery_port,
+            remote_enabled=remote_enabled,
+            remote_host=remote_host,
+            remote_port=remote_port,
+            remote_public_url=remote_public_url,
+            remote_pairing_enabled=remote_pairing_enabled,
             server_name=server_name[:80],
             max_upload_bytes=max(1, max_upload_gib) * 1024**3,
         )

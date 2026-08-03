@@ -441,6 +441,29 @@ class CoreRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def record_audit(
+        self,
+        *,
+        actor_type: str,
+        actor_id: str | None,
+        action: str,
+        target_type: str | None,
+        target_id: str | None,
+        detail: str,
+        remote_address: str | None = None,
+    ) -> None:
+        with self.database.connection() as connection:
+            self._audit_tx(
+                connection,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                detail=detail,
+                remote_address=remote_address,
+            )
+
     @staticmethod
     def _user(row: sqlite3.Row) -> UserRecord:
         return UserRecord(

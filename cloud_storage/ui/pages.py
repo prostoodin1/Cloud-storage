@@ -185,9 +185,10 @@ class DashboardPage(QWidget):
         if core_health:
             users = (core_summary or {}).get("users", 0)
             devices = (core_summary or {}).get("trusted_devices", 0)
-            self.connection_card.set_value(
-                "Только локально", f"Пользователи: {users} · Устройства: {devices}"
-            )
+            remote = core_health.get("remote")
+            lan = core_health.get("lan")
+            access = "Удалённо · HTTPS" if remote else "LAN · HTTPS" if lan else "Только локально"
+            self.connection_card.set_value(access, f"Пользователи: {users} · Устройства: {devices}")
         else:
             self.connection_card.set_value("Недоступно", "Серверное ядро выключено")
 
@@ -446,6 +447,20 @@ class SettingsPage(QWidget):
         self.lan_port.setValue(8766)
         self.lan_status_label: QLabel | None = None
         self.lan_details_label: QLabel | None = None
+        self.remote_enabled = QCheckBox(
+            "Включить отдельный защищённый HTTPS-вход для клиентов из интернета"
+        )
+        self.remote_port = QSpinBox()
+        self.remote_port.setRange(1024, 65535)
+        self.remote_port.setValue(8767)
+        self.remote_public_url = QLineEdit()
+        self.remote_public_url.setPlaceholderText("https://cloud.example.net:8767")
+        self.remote_pairing_enabled = QCheckBox(
+            "Разрешить погашение одноразовых кодов через удалённый вход"
+        )
+        self.remote_status_label: QLabel | None = None
+        self.remote_details_label: QLabel | None = None
+        self.remote_audit_rows: QVBoxLayout | None = None
         self.users_rows: QVBoxLayout | None = None
         self.trusted_device_rows: QVBoxLayout | None = None
         self.pending_device_rows: QVBoxLayout | None = None
@@ -493,6 +508,7 @@ class SettingsPage(QWidget):
         server_mode: dict | None = None,
         restore_jobs: list[dict] | None = None,
         backup_automation: dict | None = None,
+        audit_events: list[dict] | None = None,
     ) -> None:
         online = health is not None
         if self.core_status_label is not None:
@@ -556,6 +572,49 @@ class SettingsPage(QWidget):
                 self.lan_details_label.setText(
                     "После включения Core создаст постоянный сертификат и отдельный HTTPS-вход для клиентов."
                 )
+
+        remote = health.get("remote") if health else None
+        if self.remote_status_label is not None:
+            if remote:
+                pairing = " · подключение по коду разрешено" if remote.get("pairing_enabled") else ""
+                self.remote_status_label.setText(f"HTTPS включён{pairing}")
+                self.remote_status_label.setStyleSheet("color: #43c778; font-weight: 700;")
+            elif self._current_settings.remote_enabled and online:
+                self.remote_status_label.setText("Требуется перезапуск ядра")
+                self.remote_status_label.setStyleSheet("color: #f5bd4f; font-weight: 700;")
+            else:
+                self.remote_status_label.setText("Выключен")
+                self.remote_status_label.setStyleSheet("color: #949ca8;")
+        if self.remote_details_label is not None:
+            if remote:
+                self.remote_details_label.setText(
+                    f"Публичный адрес: {remote.get('public_url', '—')}\n"
+                    f"SHA-256: {remote.get('display_fingerprint', '')}\n"
+                    "Административный API: недоступен снаружи · автоматическая настройка роутера: выключена"
+                )
+            else:
+                self.remote_details_label.setText(
+                    "Рекомендуется VPN. Для прямого доступа вручную направьте внешний TCP-порт на указанный "
+                    "HTTPS-порт этого сервера и проверьте соединение из другой сети."
+                )
+        if self.remote_audit_rows is not None:
+            clear_layout(self.remote_audit_rows)
+            remote_events = [
+                event
+                for event in (audit_events or [])
+                if str(event.get("action", "")).startswith("remote.access.")
+            ][:8]
+            if not remote_events:
+                self._add_muted(self.remote_audit_rows, "Внешних обращений пока не зарегистрировано.")
+            for event in remote_events:
+                status = "разрешено" if event.get("action") == "remote.access.allowed" else "отклонено"
+                label = QLabel(
+                    f"{event.get('timestamp', '—')} · {event.get('remote_address') or '—'} · "
+                    f"{status} · {event.get('detail', '')}"
+                )
+                label.setWordWrap(True)
+                label.setProperty("muted", True)
+                self.remote_audit_rows.addWidget(label)
 
         if self.users_rows is not None:
             clear_layout(self.users_rows)
@@ -1169,6 +1228,10 @@ class SettingsPage(QWidget):
         self.refresh_interval.setValue(settings.refresh_interval_seconds)
         self.lan_enabled.setChecked(settings.lan_enabled)
         self.lan_port.setValue(settings.lan_port)
+        self.remote_enabled.setChecked(settings.remote_enabled)
+        self.remote_port.setValue(settings.remote_port)
+        self.remote_public_url.setText(settings.remote_public_url)
+        self.remote_pairing_enabled.setChecked(settings.remote_pairing_enabled)
         self.config_path.setText(config_path)
         if self.server_state_label is not None:
             self.server_state_label.setText(
@@ -1334,6 +1397,47 @@ class SettingsPage(QWidget):
             boundary_layout.addWidget(boundary_title)
             boundary_layout.addWidget(boundary_text)
             layout.addWidget(boundary)
+        elif name == "Удалённый доступ":
+            warning = QFrame()
+            warning.setProperty("accent", "orange")
+            warning_layout = QVBoxLayout(warning)
+            warning_title = QLabel("Внешний доступ включается только вручную")
+            warning_title.setStyleSheet("font-weight: 700; font-size: 16px;")
+            warning_text = QLabel(
+                "Cloud Storage не открывает порты роутера и не меняет firewall автоматически. "
+                "Самый безопасный вариант — VPN. При прямом подключении используйте только HTTPS, "
+                "сверяйте отпечаток сертификата и открывайте ровно один клиентский порт."
+            )
+            warning_text.setWordWrap(True)
+            warning_text.setProperty("muted", True)
+            warning_layout.addWidget(warning_title)
+            warning_layout.addWidget(warning_text)
+            layout.addWidget(warning)
+            self.remote_status_label = QLabel("Выключен")
+            self.remote_details_label = QLabel()
+            self.remote_details_label.setWordWrap(True)
+            self.remote_details_label.setProperty("muted", True)
+            form = QFormLayout()
+            form.setVerticalSpacing(14)
+            form.addRow("Состояние", self.remote_status_label)
+            form.addRow("Внутренний HTTPS-порт", self.remote_port)
+            form.addRow("Публичный HTTPS-адрес", self.remote_public_url)
+            layout.addWidget(self.remote_enabled)
+            layout.addLayout(form)
+            layout.addWidget(self.remote_pairing_enabled)
+            layout.addWidget(self.remote_details_label)
+            pairing_note = QLabel(
+                "Подключение по коду выключено отдельно. Включайте его только на время выдачи приглашения; "
+                "уже подтверждённые устройства продолжат работать после выключения."
+            )
+            pairing_note.setWordWrap(True)
+            pairing_note.setProperty("muted", True)
+            layout.addWidget(pairing_note)
+            audit_title = QLabel("Последние внешние обращения")
+            audit_title.setStyleSheet("font-weight: 700; margin-top: 8px;")
+            layout.addWidget(audit_title)
+            self.remote_audit_rows = QVBoxLayout()
+            layout.addLayout(self.remote_audit_rows)
         elif name == "Диагностика":
             description = QLabel(
                 "Core автоматически проверяет SQLite, доступность дисков, безопасный запас места "
@@ -1695,5 +1799,9 @@ class SettingsPage(QWidget):
                 "advanced_mode": bool(self.mode.currentData()),
                 "lan_enabled": self.lan_enabled.isChecked(),
                 "lan_port": self.lan_port.value(),
+                "remote_enabled": self.remote_enabled.isChecked(),
+                "remote_port": self.remote_port.value(),
+                "remote_public_url": self.remote_public_url.text().strip().rstrip("/"),
+                "remote_pairing_enabled": self.remote_pairing_enabled.isChecked(),
             }
         )

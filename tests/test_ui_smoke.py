@@ -34,6 +34,10 @@ def test_main_window_smoke(tmp_path) -> None:
     assert window.stack.count() == 4
     assert window.help_page.article_list.count() > 0
     assert window.settings_page.lan_port.value() == 8766
+    assert window.settings_page.remote_port.value() == 8767
+    assert window.settings_page.remote_enabled.isChecked() is False
+    assert window.settings_page.remote_status_label is not None
+    assert window.settings_page.remote_audit_rows is not None
     assert len(window.disks) == 1
     assert window.disks[0].label == "Test disk"
 

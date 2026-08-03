@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 import sqlite3
 import threading
@@ -178,7 +179,11 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
     diagnostics.recover_interrupted_scans()
     recovery = RecoveryService(database, repository, storage)
     recovery.recover_interrupted_jobs()
-    tls_identity = load_or_create_tls_identity(config) if config.lan_enabled else None
+    tls_identity = (
+        load_or_create_tls_identity(config)
+        if config.lan_enabled or config.remote_enabled
+        else None
+    )
     return CoreRuntime(
         config=config,
         secrets=secrets_store,
@@ -209,38 +214,83 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     app = FastAPI(
         title="Cloud Storage Server Core",
         version=__version__,
-        description="Local API for the Cloud Storage Server Manager and trusted devices.",
+        description="Local manager API and protected client API for trusted devices.",
         lifespan=lifespan,
     )
     app.state.runtime = runtime
     app.state.shutdown_callback = None
     bearer = HTTPBearer(auto_error=False)
     pairing_limiter = SlidingWindowLimiter(limit=10, window_seconds=300)
+    remote_pairing_limiter = SlidingWindowLimiter(limit=5, window_seconds=900)
+    remote_request_limiter = SlidingWindowLimiter(limit=600, window_seconds=60)
+    remote_audit_limiter = SlidingWindowLimiter(limit=30, window_seconds=3600)
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=(
             ["*"]
-            if runtime.config.lan_enabled
+            if runtime.config.lan_enabled or runtime.config.remote_enabled
             else ["127.0.0.1", "localhost", "[::1]", "testserver"]
         ),
     )
 
+    def is_listener_request(request: Request, port: int, enabled: bool) -> bool:
+        server = request.scope.get("server")
+        return bool(enabled and server and len(server) > 1 and server[1] == port)
+
+    def remote_client_path_allowed(path: str) -> bool:
+        if path in {"/v1/health", "/v1/pairing/redeem", "/v1/pairing/status", "/v1/spaces"}:
+            return True
+        patterns = (
+            r"/v1/spaces/[^/]+/entries",
+            r"/v1/spaces/[^/]+/uploads",
+            r"/v1/spaces/[^/]+/files/.+",
+            r"/v1/uploads/[^/]+",
+            r"/v1/uploads/[^/]+/complete",
+        )
+        return any(re.fullmatch(pattern, path) for pattern in patterns)
+
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
-        server = request.scope.get("server")
-        lan_request = bool(
-            runtime.config.lan_enabled
-            and server
-            and len(server) > 1
-            and server[1] == runtime.config.lan_port
+        lan_request = is_listener_request(
+            request, runtime.config.lan_port, runtime.config.lan_enabled
         )
+        remote_request = is_listener_request(
+            request, runtime.config.remote_port, runtime.config.remote_enabled
+        )
+        request.state.remote_request = remote_request
+        remote_address = request.client.host if request.client else "unknown"
+        local_host = (request.url.hostname or "").casefold()
+        invalid_local_host = not lan_request and not remote_request and local_host not in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+            "testserver",
+        }
         restricted_path = request.url.path.startswith("/v1/admin") or request.url.path in {
             "/docs",
             "/redoc",
             "/openapi.json",
         }
-        if lan_request and restricted_path:
+        if invalid_local_host:
+            response = JSONResponse(status_code=400, content={"detail": "invalid host header"})
+        elif (lan_request and restricted_path) or (
+            remote_request and not remote_client_path_allowed(request.url.path)
+        ):
             response = JSONResponse(status_code=404, content={"detail": "not found"})
+        elif remote_request and not remote_request_limiter.allow(remote_address):
+            response = JSONResponse(
+                status_code=429,
+                content={"detail": "too many remote requests"},
+            )
+        elif (
+            remote_request
+            and request.url.path == "/v1/pairing/redeem"
+            and not runtime.config.remote_pairing_enabled
+        ):
+            response = JSONResponse(
+                status_code=403,
+                content={"detail": "remote pairing is disabled by the administrator"},
+            )
         elif request.method in {"POST", "PUT", "PATCH", "DELETE"} and (
             runtime.recovery.server_mode()["mode"] == "read_only"
             and not request.url.path.startswith(
@@ -264,6 +314,25 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+        if remote_request:
+            important = request.method != "GET" or response.status_code >= 400
+            if important or remote_audit_limiter.allow(remote_address):
+                try:
+                    runtime.repository.record_audit(
+                        actor_type="remote_client",
+                        actor_id=None,
+                        action=(
+                            "remote.access.allowed"
+                            if response.status_code < 400
+                            else "remote.access.denied"
+                        ),
+                        target_type="api_route",
+                        target_id=request.url.path[:1024],
+                        detail=f"{request.method} {request.url.path} -> {response.status_code}",
+                        remote_address=remote_address,
+                    )
+                except sqlite3.Error:
+                    pass
         return response
 
     def require_manager(
@@ -338,6 +407,18 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                 "display_fingerprint": runtime.tls_identity.display_fingerprint,
                 "endpoints": lan_endpoints(runtime.config),
             }
+        remote = None
+        if runtime.config.remote_enabled and runtime.tls_identity is not None:
+            remote = {
+                "enabled": True,
+                "port": runtime.config.remote_port,
+                "public_url": runtime.config.remote_public_url.rstrip("/"),
+                "pairing_enabled": runtime.config.remote_pairing_enabled,
+                "fingerprint": runtime.tls_identity.fingerprint,
+                "display_fingerprint": runtime.tls_identity.display_fingerprint,
+                "manager_api_exposed": False,
+                "automatic_router_changes": False,
+            }
         return {
             "status": "ok" if database_status == "ok" else "degraded",
             "version": __version__,
@@ -348,6 +429,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "uptime_seconds": round(time.monotonic() - runtime.started_monotonic),
             "bind": f"{runtime.config.host}:{runtime.config.port}",
             "lan": lan,
+            "remote": remote,
         }
 
     @app.get("/v1/admin/summary", tags=["manager"], dependencies=[Depends(require_manager)])
@@ -874,7 +956,8 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     @app.post("/v1/pairing/redeem", tags=["pairing"], status_code=status.HTTP_201_CREATED)
     def redeem_invitation(body: RedeemInvitationRequest, request: Request) -> dict[str, Any]:
         remote = request.client.host if request.client else "unknown"
-        if not pairing_limiter.allow(remote):
+        limiter = remote_pairing_limiter if request.state.remote_request else pairing_limiter
+        if not limiter.allow(remote):
             raise HTTPException(status_code=429, detail="too many pairing attempts")
         result = runtime.repository.redeem_invitation(
             code=body.code,

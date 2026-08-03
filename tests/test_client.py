@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import socket
 import threading
@@ -49,6 +50,54 @@ def test_client_profile_and_device_token_are_persisted(tmp_path) -> None:
     assert vault.load() is None
 
 
+def test_multiple_server_profiles_have_independent_tokens(tmp_path) -> None:
+    store = ClientSettingsStore(tmp_path)
+    first = store.load()
+    first.server_name = "First cloud"
+    first.server_url = "https://first.example:8767"
+    first.certificate_fingerprint = "11" * 32
+    store.save(first)
+
+    second = store.add_profile()
+    second.server_name = "Second cloud"
+    second.server_url = "https://second.example:8767"
+    second.certificate_fingerprint = "22" * 32
+    store.save(second)
+
+    first_token = "csd_" + "a" * 64
+    second_token = "csd_" + "b" * 64
+    DeviceTokenVault(tmp_path, first.profile_id).store(first_token)
+    DeviceTokenVault(tmp_path, second.profile_id).store(second_token)
+
+    assert len(store.list_profiles()) == 2
+    assert store.load().profile_id == second.profile_id
+    assert store.set_active(first.profile_id).server_name == "First cloud"
+    assert DeviceTokenVault(tmp_path, first.profile_id).load() == first_token
+    assert DeviceTokenVault(tmp_path, second.profile_id).load() == second_token
+    assert DeviceTokenVault(tmp_path, first.profile_id).path != DeviceTokenVault(
+        tmp_path, second.profile_id
+    ).path
+
+
+def test_legacy_single_profile_is_migrated_on_save(tmp_path) -> None:
+    store = ClientSettingsStore(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        '{"server_url":"https://old.example:8766","device_id":"legacy-device"}',
+        encoding="utf-8",
+    )
+
+    migrated = store.load()
+    assert migrated.profile_id == "default"
+    assert migrated.device_id == "legacy-device"
+    store.save(migrated)
+
+    payload = json.loads(store.path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert payload["active_profile_id"] == "default"
+    assert len(payload["profiles"]) == 1
+
+
 def test_remote_plain_http_is_rejected() -> None:
     assert validate_server_url("http://127.0.0.1:8765") == "http://127.0.0.1:8765"
     assert validate_server_url("https://cloud.home:8765/") == "https://cloud.home:8765"
@@ -65,7 +114,11 @@ def test_desktop_client_window_smoke(tmp_path) -> None:
     assert window.stack.count() == 5
     assert window.help_page.article_list.count() > 0
     assert window.discover_button.text() == "Найти в сети"
+    assert window.server_selector.count() == 1
     assert window.nav_buttons[1].isEnabled() is False
+    window.add_server()
+    assert window.server_selector.count() == 2
+    assert window.profile.profile_id != "default"
     window.close()
 
 

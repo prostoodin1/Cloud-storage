@@ -36,3 +36,15 @@ def test_unknown_questions_are_persisted_without_inventing_an_answer(tmp_path) -
     assert answer.confidence == 0
     assert repeated.sources == ()
     assert knowledge.unanswered_count() == 2
+
+
+def test_local_assistant_explains_remote_access_and_multiple_servers(tmp_path) -> None:
+    knowledge = KnowledgeBase(tmp_path / "knowledge.db")
+
+    remote = knowledge.ask("как подключиться к серверу из интернета", "server")
+    multiple = knowledge.ask("можно подключить несколько серверов", "client")
+
+    assert remote.sources and remote.sources[0].id == "internet-access"
+    assert "административный API" in remote.text
+    assert multiple.sources and multiple.sources[0].id == "multiple-servers"
+    assert "отдельный" in multiple.text

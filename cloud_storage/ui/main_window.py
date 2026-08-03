@@ -71,6 +71,11 @@ class MainWindow(QMainWindow):
             lan_host=environment_config.lan_host,
             lan_port=self.settings.lan_port,
             discovery_port=environment_config.discovery_port,
+            remote_enabled=self.settings.remote_enabled,
+            remote_host=environment_config.remote_host,
+            remote_port=self.settings.remote_port,
+            remote_public_url=self.settings.remote_public_url,
+            remote_pairing_enabled=self.settings.remote_pairing_enabled,
             server_name=self.settings.server_name,
             max_upload_bytes=environment_config.max_upload_bytes,
             pairing_ttl_seconds=environment_config.pairing_ttl_seconds,
@@ -81,6 +86,7 @@ class MainWindow(QMainWindow):
         self.core_summary: dict | None = None
         self.core_users: list[dict] = []
         self.core_devices: list[dict] = []
+        self.core_audit: list[dict] = []
         self.core_storage_roots: list[dict] = []
         self.core_maintenance_jobs: list[dict] = []
         self.core_backup_jobs: list[dict] = []
@@ -98,7 +104,7 @@ class MainWindow(QMainWindow):
         self._setup_banner_hidden = False
         self._nav_buttons: list[QPushButton] = []
 
-        self.setWindowTitle(f"Cloud Storage Server Manager · Beta {__version__}")
+        self.setWindowTitle(f"Cloud Storage Server Manager · {__version__}")
         self.setMinimumSize(1050, 700)
         self.resize(1320, 820)
         self._build_ui()
@@ -130,7 +136,7 @@ class MainWindow(QMainWindow):
         name_box = QVBoxLayout()
         name = QLabel("CLOUD STORAGE")
         name.setObjectName("Brand")
-        beta = QLabel(f"SERVER MANAGER · BETA {__version__}")
+        beta = QLabel(f"SERVER MANAGER · {__version__}")
         beta.setProperty("muted", True)
         beta.setStyleSheet("font-size: 10px;")
         name_box.addWidget(name)
@@ -288,6 +294,7 @@ class MainWindow(QMainWindow):
             self.core_server_mode,
             self.core_restore_jobs,
             self.core_backup_automation,
+            self.core_audit,
         )
         unconfigured = sum(
             item.available
@@ -303,6 +310,7 @@ class MainWindow(QMainWindow):
         self.core_summary = None
         self.core_users = []
         self.core_devices = []
+        self.core_audit = []
         self.core_storage_roots = []
         self.core_maintenance_jobs = []
         self.core_backup_jobs = []
@@ -317,6 +325,7 @@ class MainWindow(QMainWindow):
             self.core_summary = self.core_client.summary()
             self.core_users = self.core_client.list_users()
             self.core_devices = self.core_client.list_devices()
+            self.core_audit = self.core_client.list_audit(100)
             self.core_storage_roots = self.core_client.list_storage_roots()
             self.core_maintenance_jobs = self.core_client.list_maintenance_jobs()
             self.core_backup_jobs = self.core_client.list_backups()
@@ -411,14 +420,24 @@ class MainWindow(QMainWindow):
         self, invitation_id: str, display_name: str, code: str, expires_at: str
     ) -> None:
         lan = self.core_health.get("lan") if self.core_health else None
+        remote = self.core_health.get("remote") if self.core_health else None
         endpoints = lan.get("endpoints", []) if lan else []
+        use_remote = bool(remote and remote.get("pairing_enabled"))
         dialog = InvitationDialog(
             invitation_id,
             display_name,
             code,
             expires_at,
-            str(endpoints[0]) if endpoints else "",
-            str(lan.get("fingerprint", "")) if lan else "",
+            (
+                str(remote.get("public_url", ""))
+                if use_remote
+                else str(endpoints[0]) if endpoints else ""
+            ),
+            (
+                str(remote.get("fingerprint", ""))
+                if use_remote
+                else str(lan.get("fingerprint", "")) if lan else ""
+            ),
             self,
         )
         dialog.cancel_requested.connect(self.cancel_invitation)
@@ -968,6 +987,47 @@ class MainWindow(QMainWindow):
         self._refresh_pages()
 
     def save_general_settings(self, values: dict) -> None:
+        if len(
+            {
+                self.core_client.config.port,
+                values["lan_port"],
+                values["remote_port"],
+            }
+        ) != 3:
+            QMessageBox.warning(
+                self,
+                "Неверные сетевые порты",
+                "Локальный API, LAN HTTPS и удалённый HTTPS должны использовать разные порты.",
+            )
+            return
+        if values["remote_pairing_enabled"] and not values["remote_enabled"]:
+            QMessageBox.warning(
+                self,
+                "Удалённый доступ выключен",
+                "Сначала включите удалённый HTTPS-вход, затем разрешайте подключение по коду.",
+            )
+            return
+        try:
+            replace(
+                self.core_client.config,
+                remote_enabled=values["remote_enabled"],
+                remote_port=values["remote_port"],
+                remote_public_url=values["remote_public_url"],
+                remote_pairing_enabled=values["remote_pairing_enabled"],
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Неверный удалённый адрес", str(exc))
+            return
+        if values["remote_enabled"] and not self.settings.remote_enabled:
+            response = QMessageBox.question(
+                self,
+                "Включить внешний HTTPS-вход?",
+                "Будет открыт отдельный порт только для клиентских файловых функций. "
+                "Административный API останется локальным. Cloud Storage не меняет роутер и firewall "
+                "автоматически: используйте VPN либо вручную настройте перенаправление порта. Продолжить?",
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return
         if values["lan_port"] == self.core_client.config.port:
             QMessageBox.warning(
                 self,
@@ -979,6 +1039,10 @@ class MainWindow(QMainWindow):
             self.settings.server_name != values["server_name"]
             or self.settings.lan_enabled != values["lan_enabled"]
             or self.settings.lan_port != values["lan_port"]
+            or self.settings.remote_enabled != values["remote_enabled"]
+            or self.settings.remote_port != values["remote_port"]
+            or self.settings.remote_public_url != values["remote_public_url"]
+            or self.settings.remote_pairing_enabled != values["remote_pairing_enabled"]
         )
         core_was_running = self.core_health is not None
         if network_changed and core_was_running:
@@ -1004,6 +1068,10 @@ class MainWindow(QMainWindow):
         self.settings.advanced_mode = values["advanced_mode"]
         self.settings.lan_enabled = values["lan_enabled"]
         self.settings.lan_port = values["lan_port"]
+        self.settings.remote_enabled = values["remote_enabled"]
+        self.settings.remote_port = values["remote_port"]
+        self.settings.remote_public_url = values["remote_public_url"]
+        self.settings.remote_pairing_enabled = values["remote_pairing_enabled"]
         self.store.save(self.settings)
         if network_changed:
             self.core_client = CoreClient(
@@ -1011,6 +1079,10 @@ class MainWindow(QMainWindow):
                     self.core_client.config,
                     lan_enabled=self.settings.lan_enabled,
                     lan_port=self.settings.lan_port,
+                    remote_enabled=self.settings.remote_enabled,
+                    remote_port=self.settings.remote_port,
+                    remote_public_url=self.settings.remote_public_url,
+                    remote_pairing_enabled=self.settings.remote_pairing_enabled,
                     server_name=self.settings.server_name,
                 )
             )

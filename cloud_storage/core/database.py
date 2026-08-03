@@ -218,6 +218,32 @@ CREATE TABLE IF NOT EXISTS diagnostic_incidents (
     last_scan_id TEXT REFERENCES diagnostic_scans(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS server_state (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    mode TEXT NOT NULL CHECK(mode IN ('normal', 'read_only')),
+    reason TEXT NOT NULL DEFAULT '',
+    changed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS restore_jobs (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+    backup_job_id TEXT NOT NULL REFERENCES backup_jobs(id) ON DELETE RESTRICT,
+    target_root_id TEXT NOT NULL REFERENCES storage_roots(id) ON DELETE RESTRICT,
+    total_objects INTEGER NOT NULL DEFAULT 0 CHECK(total_objects >= 0),
+    total_bytes INTEGER NOT NULL DEFAULT 0 CHECK(total_bytes >= 0),
+    processed_objects INTEGER NOT NULL DEFAULT 0 CHECK(processed_objects >= 0),
+    processed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(processed_bytes >= 0),
+    restored_objects INTEGER NOT NULL DEFAULT 0 CHECK(restored_objects >= 0),
+    skipped_objects INTEGER NOT NULL DEFAULT 0 CHECK(skipped_objects >= 0),
+    failed_objects INTEGER NOT NULL DEFAULT 0 CHECK(failed_objects >= 0),
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
@@ -244,6 +270,7 @@ CREATE INDEX IF NOT EXISTS idx_diagnostic_scans_created
     ON diagnostic_scans(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_diagnostic_incidents_status
     ON diagnostic_incidents(status, severity, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_restore_jobs_status ON restore_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp DESC);
 """
 
@@ -292,6 +319,14 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO server_state(id, mode, reason, changed_at) "
+                "VALUES(1, 'normal', '', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
             connection.commit()
 

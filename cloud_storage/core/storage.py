@@ -430,6 +430,7 @@ class StorageService:
         content_type: str | None,
         expected_size: int | None,
     ) -> UploadSession:
+        self._require_server_writable()
         space = self.repository.require_space_permission(space_id, user_id, write=True)
         logical_path = normalize_logical_path(logical_path)
         existing = self.find_file(space_id, logical_path, include_deleted=True)
@@ -465,6 +466,7 @@ class StorageService:
         content_type: str | None,
         expected_sha256: str | None = None,
     ) -> ResumableUploadRecord:
+        self._require_server_writable()
         space = self.repository.require_space_permission(space_id, user_id, write=True)
         logical_path = normalize_logical_path(logical_path)
         if expected_size < 0 or expected_size > self.config.max_upload_bytes:
@@ -558,6 +560,7 @@ class StorageService:
         offset: int,
         payload: bytes,
     ) -> ResumableUploadRecord:
+        self._require_server_writable()
         if not payload:
             raise ValueError("upload chunk cannot be empty")
         with self._resumable_lock(upload_id):
@@ -602,6 +605,7 @@ class StorageService:
         upload_id: str,
         user_id: str,
     ) -> FileRecord:
+        self._require_server_writable()
         with self._resumable_lock(upload_id):
             record = self.get_resumable_upload(upload_id, user_id)
             if record.status == "completed":
@@ -688,6 +692,14 @@ class StorageService:
             if self.cancel_resumable_upload(row["id"], row["user_id"]):
                 cleaned += 1
         return cleaned
+
+    def _require_server_writable(self) -> None:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT mode FROM server_state WHERE id = 1"
+            ).fetchone()
+        if row is not None and row["mode"] != "normal":
+            raise ConflictError("server is in emergency read-only mode")
 
     def _select_root(self, expected_size: int) -> StorageRootRecord:
         candidates: list[tuple[float, StorageRootRecord]] = []
@@ -825,6 +837,7 @@ class StorageService:
         raise NotFoundError("physical storage and a current mirror replica are unavailable")
 
     def soft_delete(self, space_id: str, user_id: str, logical_path: str) -> FileRecord:
+        self._require_server_writable()
         self.repository.require_space_permission(space_id, user_id, write=True)
         record = self.find_file(space_id, logical_path)
         if record is None:
@@ -879,6 +892,7 @@ class StorageService:
         sha256: str,
         content_type: str,
     ) -> FileRecord:
+        self._require_server_writable()
         now = utc_text()
         with self.database.transaction() as connection:
             quota = connection.execute(

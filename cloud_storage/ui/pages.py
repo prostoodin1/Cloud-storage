@@ -359,6 +359,11 @@ class SettingsPage(QWidget):
     mirror_cancel_requested = Signal(str)
     diagnostics_quick_requested = Signal()
     diagnostics_full_requested = Signal()
+    server_read_only_requested = Signal()
+    server_normal_requested = Signal()
+    restore_requested = Signal(str, str)
+    restore_resume_requested = Signal(str)
+    restore_cancel_requested = Signal(str)
 
     _SECTIONS = [
         ("Сервер", False),
@@ -427,6 +432,10 @@ class SettingsPage(QWidget):
         self.core_details_label: QLabel | None = None
         self.core_start_button: QPushButton | None = None
         self.core_stop_button: QPushButton | None = None
+        self.server_mode_label: QLabel | None = None
+        self.server_mode_detail: QLabel | None = None
+        self.read_only_button: QPushButton | None = None
+        self.normal_mode_button: QPushButton | None = None
         self.lan_enabled = QCheckBox("Разрешить защищённое подключение устройств из локальной сети")
         self.lan_port = QSpinBox()
         self.lan_port.setRange(1024, 65535)
@@ -443,6 +452,8 @@ class SettingsPage(QWidget):
         self.backup_target: QComboBox | None = None
         self.backup_start_button: QPushButton | None = None
         self.backup_rows: QVBoxLayout | None = None
+        self.restore_target: QComboBox | None = None
+        self.restore_rows: QVBoxLayout | None = None
         self.mirror_target: QComboBox | None = None
         self.mirror_start_button: QPushButton | None = None
         self.mirror_rows: QVBoxLayout | None = None
@@ -467,6 +478,8 @@ class SettingsPage(QWidget):
         backup_jobs: list[dict] | None = None,
         mirror_state: dict | None = None,
         diagnostics: dict | None = None,
+        server_mode: dict | None = None,
+        restore_jobs: list[dict] | None = None,
     ) -> None:
         online = health is not None
         if self.core_status_label is not None:
@@ -484,6 +497,30 @@ class SettingsPage(QWidget):
             self.core_start_button.setEnabled(not online)
         if self.core_stop_button is not None:
             self.core_stop_button.setEnabled(online)
+        mode = (server_mode or {}).get("mode", "normal")
+        read_only = online and mode == "read_only"
+        if self.server_mode_label is not None:
+            self.server_mode_label.setText(
+                "Аварийный режим · только чтение" if read_only else "Обычный режим"
+            )
+            self.server_mode_label.setStyleSheet(
+                "color: #e2383f; font-weight: 700;"
+                if read_only
+                else "color: #43c778; font-weight: 700;"
+            )
+        if self.server_mode_detail is not None:
+            reason = str((server_mode or {}).get("reason") or "Причина не указана")
+            changed = str((server_mode or {}).get("changed_at") or "—")
+            self.server_mode_detail.setText(
+                f"Запись, удаление, новые подключения и фоновые задания остановлены. "
+                f"Чтение и диагностика доступны.\nПричина: {reason} · изменено {changed}"
+                if read_only
+                else "Загрузка, удаление, подключение устройств и фоновые задания разрешены."
+            )
+        if self.read_only_button is not None:
+            self.read_only_button.setEnabled(online and not read_only)
+        if self.normal_mode_button is not None:
+            self.normal_mode_button.setEnabled(online and read_only)
         if self.lan_status_label is not None:
             lan = health.get("lan") if health else None
             if lan:
@@ -557,11 +594,19 @@ class SettingsPage(QWidget):
             for device in pending:
                 self._add_device_card(self.pending_device_rows, device, pending=True)
         self._update_maintenance(storage_roots or [], maintenance_jobs or [], online)
-        self._update_backups(storage_roots or [], backup_jobs or [], online)
+        self._update_backups(
+            storage_roots or [], backup_jobs or [], restore_jobs or [], online
+        )
         self._update_mirrors(mirror_state or {"roots": [], "jobs": []}, online)
         self._update_diagnostics(diagnostics or {}, online)
 
-    def _update_backups(self, roots: list[dict], jobs: list[dict], online: bool) -> None:
+    def _update_backups(
+        self,
+        roots: list[dict],
+        jobs: list[dict],
+        restore_jobs: list[dict],
+        online: bool,
+    ) -> None:
         if self.backup_target is not None:
             previous = self.backup_target.currentData()
             self.backup_target.clear()
@@ -575,6 +620,18 @@ class SettingsPage(QWidget):
                 self.backup_target.setCurrentIndex(previous_index)
             if self.backup_start_button is not None:
                 self.backup_start_button.setEnabled(online and self.backup_target.count() > 0)
+        if self.restore_target is not None:
+            previous = self.restore_target.currentData()
+            self.restore_target.clear()
+            for root in roots:
+                if root.get("purpose") == "primary" and root.get("write_enabled", True):
+                    self.restore_target.addItem(
+                        f"{root.get('disk_id') or root['id']} · {root['path']}", root["id"]
+                    )
+            previous_index = self.restore_target.findData(previous)
+            if previous_index >= 0:
+                self.restore_target.setCurrentIndex(previous_index)
+        self._render_restore_jobs(restore_jobs, online)
         if self.backup_rows is None:
             return
         clear_layout(self.backup_rows)
@@ -641,9 +698,86 @@ class SettingsPage(QWidget):
                     )
                 )
                 controls.addWidget(cancel)
+            if job["status"] == "completed" and self.restore_target is not None:
+                restore = QPushButton("Восстановить повреждённые объекты")
+                restore.setEnabled(self.restore_target.count() > 0)
+                restore.clicked.connect(
+                    lambda _checked=False, backup_id=job["id"]: self._emit_restore(
+                        backup_id
+                    )
+                )
+                controls.addWidget(restore)
             controls.addStretch()
             card_layout.addLayout(controls)
             self.backup_rows.addWidget(card)
+    def _render_restore_jobs(self, jobs: list[dict], online: bool) -> None:
+        if self.restore_rows is None:
+            return
+        clear_layout(self.restore_rows)
+        if not online:
+            self._add_muted(self.restore_rows, "Запустите Core для восстановления объектов.")
+            return
+        if not jobs:
+            self._add_muted(self.restore_rows, "Заданий восстановления пока нет.")
+            return
+        status_labels = {
+            "queued": "В очереди",
+            "running": "Восстанавливается",
+            "completed": "Завершено",
+            "failed": "Завершено с ошибками",
+            "cancelled": "Остановлено",
+        }
+        for job in jobs:
+            card = QFrame()
+            card.setProperty("card", True)
+            box = QVBoxLayout(card)
+            title = QLabel(f"Восстановление · снимок {job['backup_job_id']}")
+            title.setStyleSheet("font-weight: 700;")
+            total = int(job.get("total_bytes", 0))
+            processed = int(job.get("processed_bytes", 0))
+            detail = QLabel(
+                f"{status_labels.get(job['status'], job['status'])} · "
+                f"{format_bytes(processed)} из {format_bytes(total)} · "
+                f"восстановлено {job.get('restored_objects', 0)} · "
+                f"пропущено {job.get('skipped_objects', 0)} · "
+                f"ошибок {job.get('failed_objects', 0)}"
+            )
+            detail.setProperty("muted", True)
+            progress = QProgressBar()
+            progress.setRange(0, 100)
+            progress.setValue(
+                round(processed / total * 100)
+                if total
+                else (100 if job["status"] == "completed" else 0)
+            )
+            box.addWidget(title)
+            box.addWidget(detail)
+            box.addWidget(progress)
+            if job.get("error"):
+                error = QLabel(str(job["error"]))
+                error.setWordWrap(True)
+                error.setStyleSheet("color: #e2383f;")
+                box.addWidget(error)
+            controls = QHBoxLayout()
+            if job["status"] in {"failed", "cancelled"}:
+                resume = QPushButton("Повторить восстановление")
+                resume.clicked.connect(
+                    lambda _checked=False, job_id=job["id"]: (
+                        self.restore_resume_requested.emit(job_id)
+                    )
+                )
+                controls.addWidget(resume)
+            if job["status"] in {"queued", "running"}:
+                cancel = QPushButton("Остановить")
+                cancel.clicked.connect(
+                    lambda _checked=False, job_id=job["id"]: (
+                        self.restore_cancel_requested.emit(job_id)
+                    )
+                )
+                controls.addWidget(cancel)
+            controls.addStretch()
+            box.addLayout(controls)
+            self.restore_rows.addWidget(card)
 
     def _update_mirrors(self, state: dict, online: bool) -> None:
         roots = list(state.get("roots") or [])
@@ -1013,6 +1147,30 @@ class SettingsPage(QWidget):
             controls.addWidget(refresh_core)
             controls.addStretch()
             layout.addLayout(controls)
+            mode_card = QFrame()
+            mode_card.setProperty("card", True)
+            mode_box = QVBoxLayout(mode_card)
+            self.server_mode_label = QLabel("Обычный режим")
+            self.server_mode_label.setStyleSheet("color: #43c778; font-weight: 700;")
+            self.server_mode_detail = QLabel(
+                "Загрузка, удаление, подключение устройств и фоновые задания разрешены."
+            )
+            self.server_mode_detail.setWordWrap(True)
+            self.server_mode_detail.setProperty("muted", True)
+            mode_controls = QHBoxLayout()
+            self.read_only_button = QPushButton("Включить аварийный режим")
+            self.read_only_button.clicked.connect(self.server_read_only_requested)
+            self.normal_mode_button = QPushButton("Вернуть обычный режим")
+            self.normal_mode_button.setProperty("primary", True)
+            self.normal_mode_button.setEnabled(False)
+            self.normal_mode_button.clicked.connect(self.server_normal_requested)
+            mode_controls.addWidget(self.read_only_button)
+            mode_controls.addWidget(self.normal_mode_button)
+            mode_controls.addStretch()
+            mode_box.addWidget(self.server_mode_label)
+            mode_box.addWidget(self.server_mode_detail)
+            mode_box.addLayout(mode_controls)
+            layout.addWidget(mode_card)
         elif name == "Пользователи":
             top = QHBoxLayout()
             description = QLabel("Личные пространства, квоты и одноразовые приглашения.")
@@ -1195,6 +1353,8 @@ class SettingsPage(QWidget):
             form = QFormLayout()
             self.backup_target = QComboBox()
             form.addRow("Диск с ролью «Резервные копии»", self.backup_target)
+            self.restore_target = QComboBox()
+            form.addRow("Основной диск для восстановления", self.restore_target)
             layout.addLayout(form)
             controls = QHBoxLayout()
             self.backup_start_button = QPushButton("Создать проверенный снимок")
@@ -1209,6 +1369,11 @@ class SettingsPage(QWidget):
             layout.addLayout(controls)
             self.backup_rows = QVBoxLayout()
             layout.addLayout(self.backup_rows)
+            restore_title = QLabel("Последние восстановления")
+            restore_title.setStyleSheet("font-weight: 700; margin-top: 8px;")
+            layout.addWidget(restore_title)
+            self.restore_rows = QVBoxLayout()
+            layout.addLayout(self.restore_rows)
         elif name == "Обслуживание":
             description = QLabel(
                 "Безопасный перенос доступен только с диска, где новые записи приостановлены, "
@@ -1260,6 +1425,12 @@ class SettingsPage(QWidget):
     def _emit_backup(self) -> None:
         if self.backup_target is not None and self.backup_target.currentData():
             self.backup_requested.emit(str(self.backup_target.currentData()))
+
+    def _emit_restore(self, backup_job_id: str) -> None:
+        if self.restore_target is not None and self.restore_target.currentData():
+            self.restore_requested.emit(
+                backup_job_id, str(self.restore_target.currentData())
+            )
 
     def _emit_mirror_reconcile(self) -> None:
         if self.mirror_target is not None and self.mirror_target.currentData():

@@ -53,6 +53,22 @@ class CoreClient:
     def diagnostics(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/diagnostics")
 
+    def server_mode(self) -> dict[str, Any]:
+        return self._manager_request("/v1/admin/server-mode")
+
+    def set_server_mode(
+        self,
+        mode: str,
+        reason: str = "",
+        *,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/server-mode",
+            method="PUT",
+            payload={"mode": mode, "reason": reason, "confirmed": confirmed},
+        )
+
     def start_diagnostic_scan(self, kind: str) -> dict[str, Any]:
         return self._manager_request(
             "/v1/admin/diagnostics/scans",
@@ -113,6 +129,26 @@ class CoreClient:
 
     def cancel_backup(self, job_id: str) -> dict[str, Any]:
         return self._manager_request(f"/v1/admin/backups/{job_id}", method="DELETE")
+
+    def list_restores(self) -> list[dict[str, Any]]:
+        return self._manager_request("/v1/admin/restores")
+
+    def create_restore(self, backup_job_id: str, target_root_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/restores",
+            method="POST",
+            payload={
+                "backup_job_id": backup_job_id,
+                "target_root_id": target_root_id,
+            },
+            timeout=10.0,
+        )
+
+    def resume_restore(self, job_id: str) -> dict[str, Any]:
+        return self._manager_request(f"/v1/admin/restores/{job_id}/resume", method="POST")
+
+    def cancel_restore(self, job_id: str) -> dict[str, Any]:
+        return self._manager_request(f"/v1/admin/restores/{job_id}", method="DELETE")
 
     def mirror_status(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/mirrors")

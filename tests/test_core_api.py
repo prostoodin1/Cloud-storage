@@ -388,6 +388,164 @@ def test_verified_backup_contains_database_manifest_current_file_and_version(tmp
     assert client.get(route, headers=device_headers).content == b"version two"
 
 
+def test_verified_restore_repairs_damage_without_overwriting_newer_file(tmp_path) -> None:
+    app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(
+        tmp_path
+    )
+    primary = tmp_path / "restore-primary" / "CloudStorageData"
+    backup = tmp_path / "restore-backup" / "CloudStorageData"
+    primary.parent.mkdir()
+    backup.parent.mkdir()
+    roots = client.put(
+        "/v1/admin/storage-roots",
+        headers=manager_headers,
+        json={
+            "roots": [
+                {
+                    "disk_id": "restore-primary",
+                    "path": str(primary),
+                    "priority": 100,
+                    "max_fill_percent": 99,
+                    "min_free_gib": 0,
+                    "purpose": "primary",
+                },
+                {
+                    "disk_id": "restore-backup",
+                    "path": str(backup),
+                    "priority": 100,
+                    "max_fill_percent": 99,
+                    "min_free_gib": 0,
+                    "purpose": "backup",
+                },
+            ]
+        },
+    )
+    assert roots.status_code == 200
+    primary_root_id = next(
+        item["id"] for item in roots.json() if item["purpose"] == "primary"
+    )
+    backup_root_id = next(
+        item["id"] for item in roots.json() if item["purpose"] == "backup"
+    )
+    route = f"/v1/spaces/{space['id']}/files/recovery.bin"
+    corrupt_route = f"/v1/spaces/{space['id']}/files/corrupt.bin"
+    original = b"verified recovery payload"
+    corrupt_original = b"another verified payload"
+    assert client.put(route, headers=device_headers, content=original).status_code == 201
+    assert (
+        client.put(corrupt_route, headers=device_headers, content=corrupt_original).status_code
+        == 201
+    )
+    backup_job = client.post(
+        "/v1/admin/backups",
+        headers=manager_headers,
+        json={"target_root_id": backup_root_id},
+    ).json()
+    assert backup_job["status"] == "queued"
+    completed_backup = client.get(
+        f"/v1/admin/backups/{backup_job['id']}", headers=manager_headers
+    ).json()
+    assert completed_backup["status"] == "completed"
+
+    damaged = app.state.runtime.storage.find_file(space["id"], "recovery.bin")
+    corrupt = app.state.runtime.storage.find_file(space["id"], "corrupt.bin")
+    assert damaged is not None
+    assert corrupt is not None
+    damaged_path = primary / damaged.object_path
+    corrupt_path = primary / corrupt.object_path
+    os.chmod(damaged_path, stat.S_IREAD | stat.S_IWRITE)
+    damaged_path.unlink()
+    os.chmod(corrupt_path, stat.S_IREAD | stat.S_IWRITE)
+    corrupt_path.write_bytes(b"damaged")
+    restore = client.post(
+        "/v1/admin/restores",
+        headers=manager_headers,
+        json={
+            "backup_job_id": backup_job["id"],
+            "target_root_id": primary_root_id,
+        },
+    )
+    assert restore.status_code == 202
+    restored = client.get(
+        f"/v1/admin/restores/{restore.json()['id']}", headers=manager_headers
+    ).json()
+    assert restored["status"] == "completed"
+    assert restored["restored_objects"] == 2
+    assert restored["failed_objects"] == 0
+    assert client.get(route, headers=device_headers).content == original
+    assert client.get(corrupt_route, headers=device_headers).content == corrupt_original
+
+    newer = b"a newer healthy version"
+    assert client.put(route, headers=device_headers, content=newer).status_code == 201
+    second = client.post(
+        "/v1/admin/restores",
+        headers=manager_headers,
+        json={
+            "backup_job_id": backup_job["id"],
+            "target_root_id": primary_root_id,
+        },
+    )
+    assert second.status_code == 202
+    second_job = client.get(
+        f"/v1/admin/restores/{second.json()['id']}", headers=manager_headers
+    ).json()
+    assert second_job["status"] == "completed"
+    assert second_job["restored_objects"] == 0
+    assert second_job["skipped_objects"] == 2
+    assert client.get(route, headers=device_headers).content == newer
+
+
+def test_emergency_read_only_mode_blocks_mutations_but_keeps_reads_and_diagnostics(
+    tmp_path,
+) -> None:
+    _, client, manager_headers, device_headers, user, space, _ = provision_trusted_device(
+        tmp_path
+    )
+    route = f"/v1/spaces/{space['id']}/files/available.txt"
+    assert client.put(route, headers=device_headers, content=b"available").status_code == 201
+
+    unconfirmed = client.put(
+        "/v1/admin/server-mode",
+        headers=manager_headers,
+        json={"mode": "read_only", "reason": "disk incident"},
+    )
+    assert unconfirmed.status_code == 400
+    activated = client.put(
+        "/v1/admin/server-mode",
+        headers=manager_headers,
+        json={"mode": "read_only", "reason": "disk incident", "confirmed": True},
+    )
+    assert activated.status_code == 200
+    assert activated.json()["mode"] == "read_only"
+    assert client.get("/v1/health").json()["server_mode"] == "read_only"
+    assert client.get(route, headers=device_headers).content == b"available"
+    assert client.put(route, headers=device_headers, content=b"blocked").status_code == 503
+    assert client.delete(route, headers=device_headers).status_code == 503
+    invitation = client.post(
+        "/v1/admin/invitations",
+        headers=manager_headers,
+        json={"user_id": user["id"]},
+    )
+    assert invitation.status_code == 503
+    diagnostic = client.post(
+        "/v1/admin/diagnostics/scans",
+        headers=manager_headers,
+        json={"kind": "quick"},
+    )
+    assert diagnostic.status_code == 202
+    assert diagnostic.json()["status"] == "queued"
+
+    normal = client.put(
+        "/v1/admin/server-mode",
+        headers=manager_headers,
+        json={"mode": "normal", "reason": "incident resolved"},
+    )
+    assert normal.status_code == 200
+    assert normal.json()["mode"] == "normal"
+    assert client.put(route, headers=device_headers, content=b"working").status_code == 201
+    assert client.get(route, headers=device_headers).content == b"working"
+
+
 def test_mirror_replication_repair_and_download_failover(tmp_path) -> None:
     app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(tmp_path)
     primary = tmp_path / "primary-mirror-test" / "CloudStorageData"

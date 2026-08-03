@@ -8,6 +8,7 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -83,8 +84,14 @@ class MainWindow(QMainWindow):
         self.core_storage_roots: list[dict] = []
         self.core_maintenance_jobs: list[dict] = []
         self.core_backup_jobs: list[dict] = []
+        self.core_restore_jobs: list[dict] = []
         self.core_mirror_state: dict = {"roots": [], "jobs": []}
         self.core_diagnostics: dict = {}
+        self.core_server_mode: dict = {
+            "mode": "normal",
+            "reason": "",
+            "changed_at": "",
+        }
         self.disks: list[DiskSnapshot] = []
         self._disk_reminder_hidden = False
         self._setup_banner_hidden = False
@@ -198,6 +205,11 @@ class MainWindow(QMainWindow):
         self.settings_page.backup_requested.connect(self.start_backup)
         self.settings_page.backup_resume_requested.connect(self.resume_backup)
         self.settings_page.backup_cancel_requested.connect(self.cancel_backup)
+        self.settings_page.restore_requested.connect(self.start_restore)
+        self.settings_page.restore_resume_requested.connect(self.resume_restore)
+        self.settings_page.restore_cancel_requested.connect(self.cancel_restore)
+        self.settings_page.server_read_only_requested.connect(self.enter_read_only_mode)
+        self.settings_page.server_normal_requested.connect(self.leave_read_only_mode)
         self.settings_page.mirror_reconcile_requested.connect(self.reconcile_mirror)
         self.settings_page.mirror_resume_requested.connect(self.resume_mirror_job)
         self.settings_page.mirror_cancel_requested.connect(self.cancel_mirror_job)
@@ -266,6 +278,8 @@ class MainWindow(QMainWindow):
             self.core_backup_jobs,
             self.core_mirror_state,
             self.core_diagnostics,
+            self.core_server_mode,
+            self.core_restore_jobs,
         )
         unconfigured = sum(
             item.available
@@ -284,8 +298,10 @@ class MainWindow(QMainWindow):
         self.core_storage_roots = []
         self.core_maintenance_jobs = []
         self.core_backup_jobs = []
+        self.core_restore_jobs = []
         self.core_mirror_state = {"roots": [], "jobs": []}
         self.core_diagnostics = {}
+        self.core_server_mode = {"mode": "normal", "reason": "", "changed_at": ""}
         if not self.core_health:
             return
         try:
@@ -295,8 +311,10 @@ class MainWindow(QMainWindow):
             self.core_storage_roots = self.core_client.list_storage_roots()
             self.core_maintenance_jobs = self.core_client.list_maintenance_jobs()
             self.core_backup_jobs = self.core_client.list_backups()
+            self.core_restore_jobs = self.core_client.list_restores()
             self.core_mirror_state = self.core_client.mirror_status()
             self.core_diagnostics = self.core_client.diagnostics()
+            self.core_server_mode = self.core_client.server_mode()
         except (CoreApiError, CoreUnavailable) as exc:
             self.audit.record(
                 "core.read.failed", f"Не удалось прочитать состояние ядра: {exc}", "warning"
@@ -516,6 +534,112 @@ class MainWindow(QMainWindow):
         except (CoreApiError, CoreUnavailable) as exc:
             QMessageBox.warning(self, "Снимок не отменён", self._core_error_text(exc))
             return
+        self.refresh_core()
+
+    def start_restore(self, backup_job_id: str, target_root_id: str) -> None:
+        response = QMessageBox.question(
+            self,
+            "Восстановить повреждённые объекты?",
+            "Core заново проверит объекты из выбранного снимка по размеру и SHA-256. "
+            "Он восстановит только отсутствующие или повреждённые данные, которые всё ещё "
+            "соответствуют снимку. Исправные и более новые версии файлов не перезаписываются.",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            job = self.core_client.create_restore(backup_job_id, target_root_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(
+                self, "Восстановление не запущено", self._core_error_text(exc)
+            )
+            return
+        self.audit.record(
+            "core.restore.started",
+            f"Запущено восстановление снимка {backup_job_id} на {target_root_id}; "
+            f"задание {job['id']}",
+        )
+        self.refresh_core()
+
+    def resume_restore(self, job_id: str) -> None:
+        try:
+            self.core_client.resume_restore(job_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(
+                self, "Восстановление не продолжено", self._core_error_text(exc)
+            )
+            return
+        self.refresh_core()
+
+    def cancel_restore(self, job_id: str) -> None:
+        response = QMessageBox.question(
+            self,
+            "Остановить восстановление?",
+            "Уже проверенные и восстановленные объекты останутся на месте. Задание можно "
+            "будет повторить позже.",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.core_client.cancel_restore(job_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(
+                self, "Восстановление не остановлено", self._core_error_text(exc)
+            )
+            return
+        self.refresh_core()
+
+    def enter_read_only_mode(self) -> None:
+        response = QMessageBox.warning(
+            self,
+            "Включить аварийный режим?",
+            "Новые загрузки, удаления, подключения устройств и фоновые задания будут "
+            "остановлены. Скачивание файлов, диагностика и проверяемое восстановление "
+            "останутся доступны.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        reason, accepted = QInputDialog.getText(
+            self,
+            "Причина аварийного режима",
+            "Коротко укажите причину (она попадёт в журнал):",
+        )
+        if not accepted:
+            return
+        try:
+            result = self.core_client.set_server_mode(
+                "read_only",
+                reason.strip() or "Включено оператором через Server Manager",
+                confirmed=True,
+            )
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Режим не включён", self._core_error_text(exc))
+            return
+        self.audit.record(
+            "core.server.read_only",
+            f"Включён аварийный режим; остановлено заданий {result.get('cancelled_jobs', 0)}",
+            "warning",
+        )
+        self.refresh_core()
+
+    def leave_read_only_mode(self) -> None:
+        response = QMessageBox.question(
+            self,
+            "Вернуть обычный режим?",
+            "Загрузка, удаление и новые подключения снова станут доступны. Убедитесь, "
+            "что причина аварийного режима устранена.",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.core_client.set_server_mode(
+                "normal", "Аварийный режим отключён оператором"
+            )
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Режим не изменён", self._core_error_text(exc))
+            return
+        self.audit.record("core.server.normal", "Сервер возвращён в обычный режим")
         self.refresh_core()
 
     def reconcile_mirror(self, root_id: str) -> None:

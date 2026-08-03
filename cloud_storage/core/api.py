@@ -32,6 +32,7 @@ from cloud_storage import __version__
 from cloud_storage.core.config import CoreConfig, CoreSecrets
 from cloud_storage.core.database import Database
 from cloud_storage.core.diagnostics import DiagnosticsService
+from cloud_storage.core.recovery import RecoveryService
 from cloud_storage.core.repository import (
     ConflictError,
     CoreRepository,
@@ -92,6 +93,17 @@ class CreateDiagnosticScanRequest(BaseModel):
     kind: str = Field(default="quick", pattern="^(quick|full)$")
 
 
+class CreateRestoreRequest(BaseModel):
+    backup_job_id: str = Field(min_length=1, max_length=100)
+    target_root_id: str = Field(min_length=1, max_length=100)
+
+
+class SetServerModeRequest(BaseModel):
+    mode: str = Field(pattern="^(normal|read_only)$")
+    reason: str = Field(default="", max_length=500)
+    confirmed: bool = False
+
+
 class CreateResumableUploadRequest(BaseModel):
     logical_path: str = Field(min_length=1, max_length=1024)
     size_bytes: int = Field(ge=0)
@@ -111,6 +123,7 @@ class CoreRuntime:
     repository: CoreRepository
     storage: StorageService
     diagnostics: DiagnosticsService
+    recovery: RecoveryService
     tls_identity: TlsIdentity | None
     started_monotonic: float
 
@@ -148,6 +161,8 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
     storage.recover_interrupted_maintenance()
     diagnostics = DiagnosticsService(config, database, repository)
     diagnostics.recover_interrupted_scans()
+    recovery = RecoveryService(database, repository, storage)
+    recovery.recover_interrupted_jobs()
     tls_identity = load_or_create_tls_identity(config) if config.lan_enabled else None
     return CoreRuntime(
         config=config,
@@ -156,6 +171,7 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         repository=repository,
         storage=storage,
         diagnostics=diagnostics,
+        recovery=recovery,
         tls_identity=tls_identity,
         started_monotonic=time.monotonic(),
     )
@@ -207,6 +223,22 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         }
         if lan_request and restricted_path:
             response = JSONResponse(status_code=404, content={"detail": "not found"})
+        elif request.method in {"POST", "PUT", "PATCH", "DELETE"} and (
+            runtime.recovery.server_mode()["mode"] == "read_only"
+            and not request.url.path.startswith(
+                (
+                    "/v1/admin/server-mode",
+                    "/v1/admin/diagnostics",
+                    "/v1/admin/restores",
+                )
+            )
+            and request.url.path != "/v1/admin/shutdown"
+            and not request.url.path.endswith("/revoke")
+        ):
+            response = JSONResponse(
+                status_code=503,
+                content={"detail": "server is in emergency read-only mode"},
+            )
         else:
             response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -292,6 +324,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "version": __version__,
             "api_version": "v1",
             "server_name": runtime.config.server_name,
+            "server_mode": runtime.recovery.server_mode()["mode"],
             "database": database_status,
             "uptime_seconds": round(time.monotonic() - runtime.started_monotonic),
             "bind": f"{runtime.config.host}:{runtime.config.port}",
@@ -301,6 +334,27 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     @app.get("/v1/admin/summary", tags=["manager"], dependencies=[Depends(require_manager)])
     def admin_summary() -> dict[str, Any]:
         return runtime.repository.summary()
+
+    @app.get(
+        "/v1/admin/server-mode",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def server_mode() -> dict[str, Any]:
+        return runtime.recovery.server_mode()
+
+    @app.put(
+        "/v1/admin/server-mode",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def set_server_mode(body: SetServerModeRequest) -> dict[str, Any]:
+        if body.mode == "read_only" and not body.confirmed:
+            raise HTTPException(
+                status_code=400,
+                detail="explicit confirmation is required for emergency read-only mode",
+            )
+        return runtime.recovery.set_server_mode(body.mode, body.reason)
 
     @app.get(
         "/v1/admin/diagnostics",
@@ -519,6 +573,63 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     )
     def cancel_backup(job_id: str) -> dict[str, Any]:
         return runtime.storage.backup_to_dict(runtime.storage.cancel_backup_job(job_id))
+
+    @app.get(
+        "/v1/admin/restores",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def list_restores() -> list[dict[str, Any]]:
+        return [
+            runtime.recovery.restore_job_to_dict(item)
+            for item in runtime.recovery.list_restore_jobs()
+        ]
+
+    @app.post(
+        "/v1/admin/restores",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def create_restore(
+        body: CreateRestoreRequest,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        job = runtime.recovery.create_restore_job(
+            body.backup_job_id,
+            body.target_root_id,
+        )
+        background_tasks.add_task(runtime.recovery.run_restore_job, job.id)
+        return runtime.recovery.restore_job_to_dict(job)
+
+    @app.get(
+        "/v1/admin/restores/{job_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def restore_status(job_id: str) -> dict[str, Any]:
+        return runtime.recovery.restore_job_to_dict(runtime.recovery.get_restore_job(job_id))
+
+    @app.post(
+        "/v1/admin/restores/{job_id}/resume",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def resume_restore(
+        job_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        job = runtime.recovery.resume_restore_job(job_id)
+        background_tasks.add_task(runtime.recovery.run_restore_job, job.id)
+        return runtime.recovery.restore_job_to_dict(job)
+
+    @app.delete(
+        "/v1/admin/restores/{job_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def cancel_restore(job_id: str) -> dict[str, Any]:
+        return runtime.recovery.restore_job_to_dict(runtime.recovery.cancel_restore_job(job_id))
 
     @app.get(
         "/v1/admin/mirrors",

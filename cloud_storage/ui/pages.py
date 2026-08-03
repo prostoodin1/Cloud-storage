@@ -364,6 +364,8 @@ class SettingsPage(QWidget):
     mirror_cancel_requested = Signal(str)
     diagnostics_quick_requested = Signal()
     diagnostics_full_requested = Signal()
+    tunnel_restart_requested = Signal(str)
+    support_bundle_requested = Signal()
     server_read_only_requested = Signal()
     server_normal_requested = Signal()
     restore_requested = Signal(str, str)
@@ -474,6 +476,7 @@ class SettingsPage(QWidget):
         self.zrok_share_name.setPlaceholderText("Необязательно: имя заранее созданного reserved share")
         self.zrok_status_label: QLabel | None = None
         self.zrok_details_label: QLabel | None = None
+        self.zrok_restart_button: QPushButton | None = None
         self.users_rows: QVBoxLayout | None = None
         self.trusted_device_rows: QVBoxLayout | None = None
         self.pending_device_rows: QVBoxLayout | None = None
@@ -503,6 +506,7 @@ class SettingsPage(QWidget):
         self.diagnostics_rows: QVBoxLayout | None = None
         self.diagnostics_quick_button: QPushButton | None = None
         self.diagnostics_full_button: QPushButton | None = None
+        self.support_bundle_button: QPushButton | None = None
         self._current_settings = AppSettings()
         self._pages_by_name = {name: self._make_section(name) for name, _ in self._SECTIONS}
         self._rebuild_sections()
@@ -631,6 +635,8 @@ class SettingsPage(QWidget):
                 self.remote_audit_rows.addWidget(label)
 
         zrok = (tunnels or {}).get("zrok", {})
+        if self.zrok_restart_button is not None:
+            self.zrok_restart_button.setEnabled(online and bool(zrok.get("enabled")))
         if self.zrok_status_label is not None:
             state = str(zrok.get("state", "disabled"))
             labels = {
@@ -1087,6 +1093,8 @@ class SettingsPage(QWidget):
             self.diagnostics_quick_button.setEnabled(online and not scan_running)
         if self.diagnostics_full_button is not None:
             self.diagnostics_full_button.setEnabled(online and not scan_running)
+        if self.support_bundle_button is not None:
+            self.support_bundle_button.setEnabled(online)
         if self.diagnostics_status_label is not None:
             status_value = diagnostics.get("status") if online else "offline"
             labels = {
@@ -1506,6 +1514,11 @@ class SettingsPage(QWidget):
             layout.addWidget(self.zrok_enabled)
             layout.addLayout(zrok_form)
             layout.addWidget(self.zrok_details_label)
+            self.zrok_restart_button = QPushButton("Перезапустить zrok без перезапуска Core")
+            self.zrok_restart_button.clicked.connect(
+                lambda: self.tunnel_restart_requested.emit("zrok")
+            )
+            layout.addWidget(self.zrok_restart_button)
         elif name == "Диагностика":
             description = QLabel(
                 "Core автоматически проверяет SQLite, доступность дисков, безопасный запас места "
@@ -1541,6 +1554,16 @@ class SettingsPage(QWidget):
             controls.addWidget(refresh)
             controls.addStretch()
             layout.addLayout(controls)
+            support_note = QLabel(
+                "Пакет поддержки содержит только обезличенные показатели. База, журналы, "
+                "пользовательские файлы, имена, адреса, пути, пароли и токены в него не входят."
+            )
+            support_note.setWordWrap(True)
+            support_note.setProperty("muted", True)
+            layout.addWidget(support_note)
+            self.support_bundle_button = QPushButton("Сохранить пакет поддержки")
+            self.support_bundle_button.clicked.connect(self.support_bundle_requested)
+            layout.addWidget(self.support_bundle_button)
             incidents_title = QLabel("Активные инциденты")
             incidents_title.setStyleSheet("font-weight: 700; margin-top: 8px;")
             layout.addWidget(incidents_title)

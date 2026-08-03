@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -55,6 +57,54 @@ class CoreClient:
 
     def tunnels(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/tunnels")
+
+    def restart_tunnel(self, provider_id: str) -> dict[str, Any]:
+        safe_provider_id = provider_id.strip().casefold()
+        if not safe_provider_id or not safe_provider_id.replace("-", "").isalnum():
+            raise ValueError("invalid tunnel provider id")
+        return self._manager_request(
+            f"/v1/admin/tunnels/{safe_provider_id}/restart",
+            method="POST",
+            timeout=10.0,
+        )
+
+    def download_support_bundle(self, destination: Path) -> dict[str, Any]:
+        destination = destination.expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        token = CoreSecrets.load_or_create(self.config).manager_token
+        request = urllib.request.Request(
+            self.base_url + "/v1/admin/support-bundle",
+            headers={
+                "Accept": "application/zip",
+                "Authorization": f"Bearer {token}",
+            },
+            method="GET",
+        )
+        temporary = destination.with_name(destination.name + ".tmp")
+        try:
+            with urllib.request.urlopen(request, timeout=15.0) as response:
+                payload = response.read()
+                expected = str(response.headers.get("X-Support-Bundle-SHA256", ""))
+            actual = hashlib.sha256(payload).hexdigest()
+            if len(expected) != 64 or not secrets.compare_digest(actual, expected.casefold()):
+                raise CoreUnavailable("support bundle checksum validation failed")
+            with temporary.open("wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+            return {"path": str(destination), "sha256": actual, "size_bytes": len(payload)}
+        except urllib.error.HTTPError as exc:
+            try:
+                payload_error = json.loads(exc.read().decode("utf-8"))
+                detail = payload_error.get("detail", str(exc))
+            except (ValueError, UnicodeDecodeError):
+                detail = str(exc)
+            raise CoreApiError(exc.code, str(detail)) from exc
+        except (OSError, urllib.error.URLError) as exc:
+            raise CoreUnavailable("support bundle could not be downloaded") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def server_mode(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/server-mode")

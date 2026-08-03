@@ -191,6 +191,16 @@ def test_zrok_gateway_requires_account_login_and_hides_manager_api(tmp_path) -> 
         device_headers = {"Authorization": f"Bearer {paired['device_token']}"}
 
         assert internet.get("/v1/admin/summary", headers=manager_headers).status_code == 404
+        assert (
+            internet.get("/v1/admin/support-bundle", headers=manager_headers).status_code
+            == 404
+        )
+        assert (
+            internet.post(
+                "/v1/admin/tunnels/zrok/restart", headers=manager_headers
+            ).status_code
+            == 404
+        )
         assert internet.get("/v1/spaces", headers=device_headers).status_code == 403
         wrong = internet.post(
             "/v1/remote/session",
@@ -217,7 +227,7 @@ def test_zrok_gateway_requires_account_login_and_hides_manager_api(tmp_path) -> 
 
     assert spaces.status_code == 200
     assert spaces.json()[0]["name"] == "Мои файлы"
-    assert app.state.runtime.zrok_tunnel.status()["installed"] is False
+    assert app.state.runtime.tunnels.status("zrok")["installed"] is False
 
 
 def test_zrok_process_environment_does_not_inherit_unrelated_secrets(monkeypatch) -> None:
@@ -292,6 +302,11 @@ def test_live_https_listener_pinning_discovery_and_local_admin_boundary(tmp_path
 
         local_client = CoreClient(config)
         assert local_client.summary()["users"] == 0
+        bundle_path = tmp_path / "exported-support.zip"
+        bundle = local_client.download_support_bundle(bundle_path)
+        assert bundle["path"] == str(bundle_path.resolve())
+        assert bundle["size_bytes"] == bundle_path.stat().st_size
+        assert bundle_path.read_bytes().startswith(b"PK")
     finally:
         servers.request_shutdown(delay=False)
         thread.join(timeout=8)
@@ -328,11 +343,14 @@ def test_live_zrok_backend_stays_loopback_and_core_survives_missing_binary(tmp_p
         assert denied.value.status_code == 404
         deadline = time.monotonic() + 3
         while (
-            servers.application.state.runtime.zrok_tunnel.status()["state"] == "starting"
+            servers.application.state.runtime.tunnels.status("zrok")["state"] == "starting"
             and time.monotonic() < deadline
         ):
             time.sleep(0.02)
-        assert servers.application.state.runtime.zrok_tunnel.status()["state"] == "not_installed"
+        assert (
+            servers.application.state.runtime.tunnels.status("zrok")["state"]
+            == "not_installed"
+        )
     finally:
         servers.request_shutdown(delay=False)
         thread.join(timeout=8)

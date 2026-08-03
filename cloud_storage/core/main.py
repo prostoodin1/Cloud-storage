@@ -162,8 +162,7 @@ class CoreServerGroup:
         if self.lan_server is not None:
             if self.discovery is not None:
                 self.discovery.start()
-        if self.zrok_server is not None:
-            self.application.state.runtime.zrok_tunnel.start()
+        self.application.state.runtime.tunnels.start_all()
         try:
             self.local_server.run()
         finally:
@@ -187,7 +186,7 @@ class CoreServerGroup:
             self.remote_server.should_exit = True
         if self.zrok_server is not None:
             self.zrok_server.should_exit = True
-            self.application.state.runtime.zrok_tunnel.stop()
+        self.application.state.runtime.tunnels.stop_all()
 
     def _run_lan(self) -> None:
         assert self.lan_server is not None

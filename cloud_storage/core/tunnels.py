@@ -7,15 +7,32 @@ import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, Protocol
 
 from cloud_storage.core.config import CoreConfig
 
 _PUBLIC_URL = re.compile(r"https?://[a-zA-Z0-9.-]+(?::\d+)?")
 
 
+class TunnelProvider(Protocol):
+    provider_id: str
+    display_name: str
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def restart(self) -> dict[str, Any]: ...
+
+    def status(self) -> dict[str, Any]: ...
+
+    def manifest(self) -> dict[str, Any]: ...
+
+
 @dataclass(slots=True)
 class ZrokTunnelService:
+    provider_id: ClassVar[str] = "zrok"
+    display_name: ClassVar[str] = "zrok"
     config: CoreConfig
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _stop_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
@@ -59,6 +76,28 @@ class ZrokTunnelService:
             self._process = None
             if self.config.zrok_enabled:
                 self._state = "stopped"
+
+    def restart(self) -> dict[str, Any]:
+        if not self.config.zrok_enabled:
+            raise RuntimeError("zrok provider is disabled in server settings")
+        self.stop()
+        self.start()
+        return self.status()
+
+    def manifest(self) -> dict[str, Any]:
+        return {
+            "id": self.provider_id,
+            "name": self.display_name,
+            "kind": "tunnel",
+            "built_in": True,
+            "loads_python_code": False,
+            "capabilities": [
+                "status",
+                "restart",
+                "public_https",
+                "reserved_share",
+            ],
+        }
 
     def status(self) -> dict[str, Any]:
         executable = self._resolve_executable()
@@ -206,3 +245,59 @@ class ZrokTunnelService:
         with self._lock:
             self._state = state
             self._last_error = error
+
+
+@dataclass(slots=True)
+class TunnelProviderRegistry:
+    providers: dict[str, TunnelProvider]
+
+    @classmethod
+    def built_in(cls, config: CoreConfig) -> TunnelProviderRegistry:
+        zrok = ZrokTunnelService(config)
+        return cls(providers={zrok.provider_id: zrok})
+
+    def start_all(self) -> None:
+        for provider in self.providers.values():
+            provider.start()
+
+    def stop_all(self) -> None:
+        for provider in self.providers.values():
+            provider.stop()
+
+    def restart(self, provider_id: str) -> dict[str, Any]:
+        provider = self.providers.get(provider_id)
+        if provider is None:
+            raise KeyError(provider_id)
+        return provider.restart()
+
+    def status(self, provider_id: str) -> dict[str, Any]:
+        provider = self.providers.get(provider_id)
+        if provider is None:
+            raise KeyError(provider_id)
+        return provider.status()
+
+    def overview(self) -> dict[str, Any]:
+        statuses = {
+            provider_id: provider.status()
+            for provider_id, provider in self.providers.items()
+        }
+        return {
+            "plugins": [provider.manifest() for provider in self.providers.values()],
+            **statuses,
+        }
+
+    def support_snapshot(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for provider_id, provider in self.providers.items():
+            state = provider.status()
+            result[provider_id] = {
+                "enabled": bool(state.get("enabled")),
+                "state": str(state.get("state", "unknown")),
+                "installed": bool(state.get("installed")),
+                "process_running": bool(state.get("process_running")),
+                "share_type": str(state.get("share_type", "unknown")),
+                "login_required": bool(state.get("login_required")),
+                "manager_api_exposed": bool(state.get("manager_api_exposed")),
+                "restart_count": int(state.get("restart_count", 0)),
+            }
+        return result

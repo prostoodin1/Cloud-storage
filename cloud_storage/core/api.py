@@ -24,7 +24,7 @@ from fastapi import (
     Request,
     status,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -50,8 +50,9 @@ from cloud_storage.core.storage import (
     StorageCapacityError,
     StorageService,
 )
+from cloud_storage.core.support import SupportBundleService
 from cloud_storage.core.tls import TlsIdentity, lan_endpoints, load_or_create_tls_identity
-from cloud_storage.core.tunnels import ZrokTunnelService
+from cloud_storage.core.tunnels import TunnelProviderRegistry
 
 
 class CreateUserRequest(BaseModel):
@@ -145,7 +146,8 @@ class CoreRuntime:
     diagnostics: DiagnosticsService
     recovery: RecoveryService
     tls_identity: TlsIdentity | None
-    zrok_tunnel: ZrokTunnelService
+    tunnels: TunnelProviderRegistry
+    support: SupportBundleService
     started_monotonic: float
 
 
@@ -191,7 +193,8 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         if config.lan_enabled or config.remote_enabled
         else None
     )
-    zrok_tunnel = ZrokTunnelService(config)
+    tunnels = TunnelProviderRegistry.built_in(config)
+    support = SupportBundleService(config, repository, diagnostics, tunnels)
     return CoreRuntime(
         config=config,
         secrets=secrets_store,
@@ -202,7 +205,8 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         diagnostics=diagnostics,
         recovery=recovery,
         tls_identity=tls_identity,
-        zrok_tunnel=zrok_tunnel,
+        tunnels=tunnels,
+        support=support,
         started_monotonic=time.monotonic(),
     )
 
@@ -458,7 +462,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                 "automatic_router_changes": False,
                 "login_required": True,
             }
-        zrok_status = runtime.zrok_tunnel.status()
+        zrok_status = runtime.tunnels.status("zrok")
         zrok = {
             "enabled": zrok_status["enabled"],
             "provider": "zrok",
@@ -492,7 +496,53 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
 
     @app.get("/v1/admin/tunnels", tags=["manager"], dependencies=[Depends(require_manager)])
     def tunnel_status() -> dict[str, Any]:
-        return {"zrok": runtime.zrok_tunnel.status()}
+        return runtime.tunnels.overview()
+
+    @app.post(
+        "/v1/admin/tunnels/{provider_id}/restart",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def restart_tunnel(provider_id: str) -> dict[str, Any]:
+        try:
+            result = runtime.tunnels.restart(provider_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="tunnel provider not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        runtime.repository.record_audit(
+            actor_type="manager",
+            actor_id=None,
+            action="tunnel.provider.restarted",
+            target_type="tunnel_provider",
+            target_id=provider_id,
+            detail=f"Перезапущен встроенный tunnel-provider {provider_id}",
+        )
+        return result
+
+    @app.get(
+        "/v1/admin/support-bundle",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def support_bundle() -> Response:
+        bundle = runtime.support.build()
+        runtime.repository.record_audit(
+            actor_type="manager",
+            actor_id=None,
+            action="support.bundle.created",
+            target_type="support_bundle",
+            target_id=None,
+            detail="Сформирован обезличенный диагностический пакет без базы и секретов",
+        )
+        return Response(
+            content=bundle.content,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{bundle.filename}"',
+                "X-Support-Bundle-SHA256": bundle.sha256,
+            },
+        )
 
     @app.get(
         "/v1/admin/server-mode",

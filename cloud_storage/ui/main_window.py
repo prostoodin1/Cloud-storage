@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -238,6 +240,8 @@ class MainWindow(QMainWindow):
         self.settings_page.diagnostics_full_requested.connect(
             lambda: self.start_diagnostic_scan("full")
         )
+        self.settings_page.tunnel_restart_requested.connect(self.restart_tunnel)
+        self.settings_page.support_bundle_requested.connect(self.export_support_bundle)
 
     def _show_page(self, page: QWidget) -> None:
         self.stack.setCurrentWidget(page)
@@ -827,6 +831,65 @@ class MainWindow(QMainWindow):
             f"Запущена {'полная' if kind == 'full' else 'быстрая'} проверка; {scan['id']}",
         )
         QTimer.singleShot(800, self.refresh_core)
+
+    def restart_tunnel(self, provider_id: str) -> None:
+        try:
+            status = self.core_client.restart_tunnel(provider_id)
+        except (CoreApiError, CoreUnavailable, ValueError) as exc:
+            QMessageBox.warning(
+                self,
+                "Туннель не перезапущен",
+                self._core_error_text(exc),
+            )
+            return
+        self.audit.record(
+            "core.tunnel.restarted",
+            f"Перезапущен встроенный провайдер {provider_id}",
+        )
+        self.refresh_core()
+        state = str(status.get("state", "starting"))
+        QMessageBox.information(
+            self,
+            "Команда отправлена",
+            f"Провайдер {provider_id} перезапущен. Текущее состояние: {state}.",
+        )
+
+    def export_support_bundle(self) -> None:
+        if not self.core_health:
+            QMessageBox.information(self, "Ядро выключено", "Сначала запустите серверное ядро.")
+            return
+        suggested = Path.home() / "Documents" / (
+            f"CloudStorage-support-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+        )
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить обезличенный пакет поддержки",
+            str(suggested),
+            "ZIP-архив (*.zip)",
+        )
+        if not selected:
+            return
+        destination = Path(selected)
+        if destination.suffix.casefold() != ".zip":
+            destination = destination.with_suffix(".zip")
+        try:
+            bundle = self.core_client.download_support_bundle(destination)
+        except (CoreApiError, CoreUnavailable, OSError) as exc:
+            QMessageBox.warning(
+                self,
+                "Пакет не сохранён",
+                self._core_error_text(exc),
+            )
+            return
+        self.audit.record(
+            "core.support_bundle.saved",
+            f"Сохранён обезличенный пакет поддержки ({bundle['size_bytes']} байт)",
+        )
+        QMessageBox.information(
+            self,
+            "Пакет поддержки сохранён",
+            f"Файл: {bundle['path']}\nSHA-256: {bundle['sha256']}",
+        )
 
     @staticmethod
     def _core_error_text(error: Exception) -> str:

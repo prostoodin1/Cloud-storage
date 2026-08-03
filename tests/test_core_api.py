@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import stat
+import zipfile
 
 from fastapi.testclient import TestClient
 
@@ -79,6 +81,138 @@ def test_health_and_manager_authorization(tmp_path) -> None:
     assert denied.status_code == 401
     assert allowed.status_code == 200
     assert allowed.json()["users"] == 0
+
+
+def test_tunnel_registry_is_builtin_and_restart_is_manager_only(tmp_path) -> None:
+    config = CoreConfig(
+        data_directory=tmp_path,
+        zrok_enabled=True,
+        zrok_executable="missing-zrok-provider-test",
+    )
+    app = create_app(config)
+    manager_headers = {
+        "Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"
+    }
+
+    with TestClient(app) as client:
+        overview = client.get("/v1/admin/tunnels", headers=manager_headers)
+        denied = client.post("/v1/admin/tunnels/zrok/restart")
+        missing = client.post(
+            "/v1/admin/tunnels/unknown/restart", headers=manager_headers
+        )
+        restarted = client.post(
+            "/v1/admin/tunnels/zrok/restart", headers=manager_headers
+        )
+        audit = client.get("/v1/admin/audit", headers=manager_headers).json()
+    app.state.runtime.tunnels.stop_all()
+
+    assert overview.status_code == 200
+    assert overview.json()["plugins"] == [
+        {
+            "id": "zrok",
+            "name": "zrok",
+            "kind": "tunnel",
+            "built_in": True,
+            "loads_python_code": False,
+            "capabilities": [
+                "status",
+                "restart",
+                "public_https",
+                "reserved_share",
+            ],
+        }
+    ]
+    assert denied.status_code == 401
+    assert missing.status_code == 404
+    assert restarted.status_code == 200
+    assert restarted.json()["state"] in {"starting", "not_installed"}
+    assert any(item["action"] == "tunnel.provider.restarted" for item in audit)
+
+
+def test_support_bundle_is_anonymized_and_checksum_protected(tmp_path) -> None:
+    secret_password = "support-secret-password-2026"
+    private_username = "private-support-user"
+    private_display_name = "Private Support Person"
+    config = CoreConfig(
+        data_directory=tmp_path / "private-data-directory",
+        server_name="Private Server Name",
+        zrok_enabled=True,
+        zrok_executable=str(tmp_path / "secret-bin" / "zrok.exe"),
+        zrok_share_name="private-reserved-share",
+    )
+    app = create_app(config)
+    manager_token = app.state.runtime.secrets.manager_token
+    manager_headers = {"Authorization": f"Bearer {manager_token}"}
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/admin/users",
+            headers=manager_headers,
+            json={
+                "username": private_username,
+                "display_name": private_display_name,
+                "quota_gib": 1,
+            },
+        ).json()
+        invitation = client.post(
+            "/v1/admin/invitations",
+            headers=manager_headers,
+            json={"user_id": created["user"]["id"]},
+        ).json()
+        client.post(
+            "/v1/pairing/redeem",
+            json={
+                "code": invitation["code"],
+                "password": secret_password,
+                "device_name": "Private Device Name",
+                "platform": "Windows",
+            },
+        ).raise_for_status()
+        response = client.get("/v1/admin/support-bundle", headers=manager_headers)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/zip")
+    assert response.headers["x-support-bundle-sha256"] == hashlib.sha256(
+        response.content
+    ).hexdigest()
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert set(archive.namelist()) == {
+            "README.txt",
+            "manifest.json",
+            "system.json",
+            "configuration.json",
+            "database.json",
+            "diagnostics.json",
+            "plugins.json",
+            "activity.json",
+        }
+        contents = "\n".join(
+            archive.read(name).decode("utf-8") for name in archive.namelist()
+        )
+        manifest = json.loads(archive.read("manifest.json"))
+        plugins = json.loads(archive.read("plugins.json"))
+
+    forbidden = {
+        secret_password,
+        private_username,
+        private_display_name,
+        "Private Device Name",
+        "Private Server Name",
+        "private-reserved-share",
+        manager_token,
+        app.state.runtime.secrets.hmac_secret,
+        str(tmp_path),
+    }
+    assert all(value not in contents for value in forbidden)
+    assert manifest["privacy"] == {
+        "credentials_included": False,
+        "database_included": False,
+        "identifiers_included": False,
+        "logs_included": False,
+        "network_addresses_included": False,
+        "user_files_included": False,
+    }
+    assert plugins["manifests"][0]["loads_python_code"] is False
 
 
 def test_one_time_pairing_requires_admin_approval(tmp_path) -> None:

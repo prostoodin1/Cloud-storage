@@ -12,8 +12,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cloud_storage import __version__
+from cloud_storage.core.automation import AutomationService
 from cloud_storage.core.config import CoreConfig
 from cloud_storage.core.diagnostics import DiagnosticsService
+from cloud_storage.core.integrations import IntegrationRegistry
+from cloud_storage.core.notifications import NotificationService
 from cloud_storage.core.repository import CoreRepository
 from cloud_storage.core.tunnels import TunnelProviderRegistry
 
@@ -31,6 +34,9 @@ class SupportBundleService:
     repository: CoreRepository
     diagnostics: DiagnosticsService
     tunnels: TunnelProviderRegistry
+    automation: AutomationService
+    notifications: NotificationService
+    integrations: IntegrationRegistry
 
     def build(self) -> SupportBundle:
         created_at = datetime.now(UTC)
@@ -57,13 +63,12 @@ class SupportBundleService:
             "diagnostics.json": self._json(self._diagnostics_snapshot()),
             "plugins.json": self._json(
                 {
-                    "manifests": [
-                        provider.manifest()
-                        for provider in self.tunnels.providers.values()
-                    ],
+                    "manifests": self.integrations.manifests(),
                     "status": self.tunnels.support_snapshot(),
                 }
             ),
+            "automation.json": self._json(self._automation_snapshot()),
+            "notifications.json": self._json(self._notification_snapshot()),
             "activity.json": self._json(self._activity_snapshot()),
         }
         buffer = io.BytesIO()
@@ -196,4 +201,57 @@ class SupportBundleService:
             "sample_size": len(events),
             "action_counts": dict(sorted(actions.items())),
             "actor_type_counts": dict(sorted(actors.items())),
+        }
+
+    def _automation_snapshot(self) -> dict[str, Any]:
+        overview = self.automation.overview()
+        rules = overview.get("rules") or []
+        runs = overview.get("runs") or []
+        return {
+            "scheduler": overview.get("scheduler", {}),
+            "rule_count": len(rules),
+            "enabled_rule_count": sum(bool(item.get("enabled")) for item in rules),
+            "system_rule_count": sum(bool(item.get("system_rule")) for item in rules),
+            "trigger_counts": dict(
+                sorted(
+                    Counter(str(item.get("trigger_type")) for item in rules).items()
+                )
+            ),
+            "action_counts": dict(
+                sorted(
+                    Counter(str(item.get("action_type")) for item in rules).items()
+                )
+            ),
+            "recent_run_status_counts": dict(
+                sorted(Counter(str(item.get("status")) for item in runs).items())
+            ),
+        }
+
+    def _notification_snapshot(self) -> dict[str, Any]:
+        with self.repository.database.connection() as connection:
+            severities = connection.execute(
+                "SELECT severity, count(*) AS count FROM notifications GROUP BY severity"
+            ).fetchall()
+            unacknowledged = int(
+                connection.execute(
+                    "SELECT count(*) FROM notifications WHERE acknowledged_at IS NULL"
+                ).fetchone()[0]
+            )
+            deliveries = connection.execute(
+                """
+                SELECT provider_id, status, count(*) AS count
+                FROM notification_deliveries GROUP BY provider_id, status
+                """
+            ).fetchall()
+        return {
+            "severity_counts": {str(row["severity"]): int(row["count"]) for row in severities},
+            "unacknowledged_count": unacknowledged,
+            "delivery_counts": [
+                {
+                    "provider": str(row["provider_id"]),
+                    "status": str(row["status"]),
+                    "count": int(row["count"]),
+                }
+                for row in deliveries
+            ],
         }

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
+import stat
 import threading
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -242,6 +245,18 @@ class DiagnosticsService:
                 FROM diagnostic_incidents WHERE status = 'active'
                 """
             ).fetchone()
+            history = connection.execute(
+                """
+                SELECT created_at, kind, status, warning_count, critical_count,
+                       checked_objects, checked_bytes
+                FROM diagnostic_scans ORDER BY created_at DESC LIMIT 20
+                """
+            ).fetchall()
+            resolved_count = int(
+                connection.execute(
+                    "SELECT count(*) FROM diagnostic_incidents WHERE status = 'resolved'"
+                ).fetchone()[0]
+            )
         incidents = self.list_incidents(include_resolved=False, limit=100)
         return {
             "status": "critical"
@@ -253,6 +268,8 @@ class DiagnosticsService:
             "active_critical_count": int(counts["critical"] or 0),
             "latest_scan": self.scan_to_dict(self._scan(latest)) if latest else None,
             "incidents": [self.incident_to_dict(item) for item in incidents],
+            "history": [dict(row) for row in history],
+            "resolved_incident_count": resolved_count,
             "monitor": {
                 "running": bool(
                     self._monitor_thread is not None and self._monitor_thread.is_alive()
@@ -296,6 +313,15 @@ class DiagnosticsService:
             ).fetchall()
         return [self._incident(row) for row in rows]
 
+    def get_incident(self, incident_id: str) -> DiagnosticIncidentRecord:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM diagnostic_incidents WHERE id = ?", (incident_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("diagnostic incident not found")
+        return self._incident(row)
+
     def _monitor_loop(self) -> None:
         self._run_monitor_scan("startup")
         while not self._monitor_stop.wait(self.monitor_interval_seconds):
@@ -320,6 +346,11 @@ class DiagnosticsService:
             "storage.marker",
             "storage.capacity",
             "jobs.failed",
+            "security.secrets",
+            "security.remote_pairing",
+            "security.tls_identity",
+            "uploads.expired",
+            "backup.overdue",
         }
         database_findings, checks = self._check_database()
         findings.extend(database_findings)
@@ -331,6 +362,14 @@ class DiagnosticsService:
 
         job_findings, checks = self._check_failed_jobs()
         findings.extend(job_findings)
+        metrics["checks"] += checks
+
+        security_findings, checks = self._check_security_posture()
+        findings.extend(security_findings)
+        metrics["checks"] += checks
+
+        operational_findings, checks = self._check_operational_hygiene()
+        findings.extend(operational_findings)
         metrics["checks"] += checks
 
         object_limit = None if kind == "full" else 200
@@ -367,6 +406,130 @@ class DiagnosticsService:
         metrics["checks"] += checks
         covered_keys.add("backup.snapshot")
         return findings, metrics, covered_keys
+
+    def _check_security_posture(self) -> tuple[list[DiagnosticFinding], int]:
+        findings: list[DiagnosticFinding] = []
+        if not self.config.secrets_path.is_file():
+            findings.append(
+                DiagnosticFinding(
+                    "security.secrets",
+                    "core-secrets",
+                    "critical",
+                    "Безопасность",
+                    "Файл секретов Core отсутствует",
+                    "Core не может подтвердить целостность локальной учётной записи Manager.",
+                    "Остановите внешние входы и восстановите core-secrets.json из защищённой копии.",
+                )
+            )
+        elif os.name != "nt":
+            try:
+                mode = stat.S_IMODE(self.config.secrets_path.stat().st_mode)
+            except OSError as exc:
+                findings.append(
+                    DiagnosticFinding(
+                        "security.secrets",
+                        "core-secrets",
+                        "critical",
+                        "Безопасность",
+                        "Не удалось проверить права файла секретов",
+                        str(exc),
+                        "Проверьте владельца файла и установите права 0600.",
+                    )
+                )
+            else:
+                if mode & 0o077:
+                    findings.append(
+                        DiagnosticFinding(
+                            "security.secrets",
+                            "core-secrets",
+                            "critical",
+                            "Безопасность",
+                            "Файл секретов доступен другим пользователям ОС",
+                            f"Обнаружены права {mode:04o}",
+                            "Установите права 0600 и повторите проверку.",
+                        )
+                    )
+        if self.config.remote_pairing_enabled:
+            findings.append(
+                DiagnosticFinding(
+                    "security.remote_pairing",
+                    "remote-pairing",
+                    "warning",
+                    "Безопасность",
+                    "Удалённое подключение по коду оставлено включённым",
+                    "Новые одноразовые коды можно погашать через внешний вход.",
+                    "После подключения нужного устройства выключите удалённое погашение кодов.",
+                )
+            )
+        if (self.config.lan_enabled or self.config.remote_enabled) and not (
+            self.config.tls_certificate_path.is_file()
+            and self.config.tls_private_key_path.is_file()
+        ):
+            findings.append(
+                DiagnosticFinding(
+                    "security.tls_identity",
+                    "server-tls",
+                    "critical",
+                    "Безопасность",
+                    "TLS-идентичность сервера неполна",
+                    "Сетевой вход включён, но сертификат или закрытый ключ отсутствует.",
+                    "Отключите сетевые входы до восстановления постоянной TLS-идентичности.",
+                )
+            )
+        return findings, 3
+
+    def _check_operational_hygiene(self) -> tuple[list[DiagnosticFinding], int]:
+        findings: list[DiagnosticFinding] = []
+        now = datetime.now(UTC)
+        with self.database.connection() as connection:
+            expired_uploads = int(
+                connection.execute(
+                    """
+                    SELECT count(*) FROM upload_sessions
+                    WHERE status = 'active' AND expires_at < ?
+                    """,
+                    (utc_text(now),),
+                ).fetchone()[0]
+            )
+            policies = connection.execute(
+                """
+                SELECT target_root_id, interval_hours, next_run_at
+                FROM backup_policies WHERE enabled = 1 AND next_run_at IS NOT NULL
+                """
+            ).fetchall()
+        if expired_uploads:
+            findings.append(
+                DiagnosticFinding(
+                    "uploads.expired",
+                    "expired-upload-sessions",
+                    "warning",
+                    "Передачи",
+                    "Остались просроченные незавершённые загрузки",
+                    f"Просроченных сессий: {expired_uploads}",
+                    "Запустите безопасную очистку просроченных загрузок из карточки инцидента.",
+                )
+            )
+        for policy in policies:
+            try:
+                next_run = datetime.fromisoformat(str(policy["next_run_at"]))
+            except ValueError:
+                continue
+            if next_run.tzinfo is None:
+                next_run = next_run.replace(tzinfo=UTC)
+            grace = timedelta(hours=max(2, int(policy["interval_hours"])))
+            if now > next_run + grace:
+                findings.append(
+                    DiagnosticFinding(
+                        "backup.overdue",
+                        str(policy["target_root_id"]),
+                        "warning",
+                        "Резервные копии",
+                        "Автоматический резервный снимок просрочен",
+                        f"Ожидался запуск {policy['next_run_at']}",
+                        "Проверьте доступность backup-диска и запустите цикл вручную.",
+                    )
+                )
+        return findings, 1 + len(policies)
 
     def _check_database(self) -> tuple[list[DiagnosticFinding], int]:
         findings: list[DiagnosticFinding] = []

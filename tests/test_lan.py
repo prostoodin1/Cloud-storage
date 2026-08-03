@@ -201,6 +201,15 @@ def test_zrok_gateway_requires_account_login_and_hides_manager_api(tmp_path) -> 
             ).status_code
             == 404
         )
+        assert internet.get("/v1/admin/automation", headers=manager_headers).status_code == 404
+        assert (
+            internet.get("/v1/admin/notifications", headers=manager_headers).status_code
+            == 404
+        )
+        assert (
+            internet.get("/v1/admin/integrations", headers=manager_headers).status_code
+            == 404
+        )
         assert internet.get("/v1/spaces", headers=device_headers).status_code == 403
         wrong = internet.post(
             "/v1/remote/session",
@@ -302,6 +311,31 @@ def test_live_https_listener_pinning_discovery_and_local_admin_boundary(tmp_path
 
         local_client = CoreClient(config)
         assert local_client.summary()["users"] == 0
+        assert len(local_client.automation()["rules"]) == 4
+        assert local_client.integrations()["policy"]["built_in_only"] is True
+        tested_inbox = local_client.test_integration("manager-inbox")
+        notifications = local_client.list_notifications()
+        assert notifications[0]["id"] == tested_inbox["notification_id"]
+        local_client.acknowledge_notification(notifications[0]["id"])
+        rule = local_client.create_automation_rule(
+            {
+                "name": "Live client rule",
+                "trigger_type": "backup_failed",
+                "action_type": "notify",
+                "cooldown_minutes": 60,
+            }
+        )
+        local_client.update_automation_rule(
+            rule["id"],
+            {
+                "name": rule["name"],
+                "enabled": False,
+                "trigger_type": rule["trigger_type"],
+                "action_type": rule["action_type"],
+                "cooldown_minutes": rule["cooldown_seconds"] // 60,
+            },
+        )
+        local_client.delete_automation_rule(rule["id"])
         bundle_path = tmp_path / "exported-support.zip"
         bundle = local_client.download_support_bundle(bundle_path)
         assert bundle["path"] == str(bundle_path.resolve())

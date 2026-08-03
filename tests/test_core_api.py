@@ -184,6 +184,8 @@ def test_support_bundle_is_anonymized_and_checksum_protected(tmp_path) -> None:
             "database.json",
             "diagnostics.json",
             "plugins.json",
+            "automation.json",
+            "notifications.json",
             "activity.json",
         }
         contents = "\n".join(

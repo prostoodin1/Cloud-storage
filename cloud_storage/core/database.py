@@ -273,6 +273,54 @@ CREATE TABLE IF NOT EXISTS restore_jobs (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS notifications (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK(severity IN ('info', 'warning', 'critical')),
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_key TEXT NOT NULL DEFAULT '',
+    acknowledged_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+    notification_id TEXT NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+    provider_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('delivered', 'failed')),
+    error TEXT NOT NULL DEFAULT '',
+    attempted_at TEXT NOT NULL,
+    PRIMARY KEY(notification_id, provider_id)
+);
+
+CREATE TABLE IF NOT EXISTS automation_rules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    trigger_type TEXT NOT NULL CHECK(trigger_type IN (
+        'diagnostic_warning', 'diagnostic_critical', 'storage_low',
+        'backup_failed', 'tunnel_offline'
+    )),
+    action_type TEXT NOT NULL CHECK(action_type IN ('notify', 'quick_scan', 'read_only')),
+    cooldown_seconds INTEGER NOT NULL DEFAULT 3600 CHECK(cooldown_seconds BETWEEN 60 AND 604800),
+    system_rule INTEGER NOT NULL DEFAULT 0 CHECK(system_rule IN (0, 1)),
+    last_triggered_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS automation_runs (
+    id TEXT PRIMARY KEY,
+    rule_id TEXT NOT NULL REFERENCES automation_rules(id) ON DELETE CASCADE,
+    trigger_source TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('completed', 'failed', 'skipped')),
+    condition_summary TEXT NOT NULL,
+    action_result TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
@@ -302,6 +350,13 @@ CREATE INDEX IF NOT EXISTS idx_diagnostic_scans_created
 CREATE INDEX IF NOT EXISTS idx_diagnostic_incidents_status
     ON diagnostic_incidents(status, severity, last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_restore_jobs_status ON restore_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_acknowledged
+    ON notifications(acknowledged_at, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_rules_enabled
+    ON automation_rules(enabled, trigger_type);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_created
+    ON automation_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp DESC);
 """
 
@@ -367,6 +422,10 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(8, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(9, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
             connection.commit()
 

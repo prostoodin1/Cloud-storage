@@ -102,6 +102,9 @@ class MainWindow(QMainWindow):
         self.core_mirror_state: dict = {"roots": [], "jobs": []}
         self.core_diagnostics: dict = {}
         self.core_tunnels: dict = {"zrok": {"enabled": False, "state": "disabled"}}
+        self.core_automation: dict = {"rules": [], "runs": []}
+        self.core_notifications: list[dict] = []
+        self.core_integrations: dict = {"plugins": []}
         self.core_server_mode: dict = {
             "mode": "normal",
             "reason": "",
@@ -240,8 +243,27 @@ class MainWindow(QMainWindow):
         self.settings_page.diagnostics_full_requested.connect(
             lambda: self.start_diagnostic_scan("full")
         )
+        self.settings_page.diagnostic_remediation_requested.connect(
+            self.remediate_diagnostic_incident
+        )
         self.settings_page.tunnel_restart_requested.connect(self.restart_tunnel)
         self.settings_page.support_bundle_requested.connect(self.export_support_bundle)
+        self.settings_page.automation_rule_create_requested.connect(
+            self.create_automation_rule
+        )
+        self.settings_page.automation_rule_update_requested.connect(
+            self.update_automation_rule
+        )
+        self.settings_page.automation_rule_delete_requested.connect(
+            self.delete_automation_rule
+        )
+        self.settings_page.automation_evaluate_requested.connect(
+            self.evaluate_automation
+        )
+        self.settings_page.notification_acknowledge_requested.connect(
+            self.acknowledge_notification
+        )
+        self.settings_page.integration_test_requested.connect(self.test_integration)
 
     def _show_page(self, page: QWidget) -> None:
         self.stack.setCurrentWidget(page)
@@ -306,6 +328,9 @@ class MainWindow(QMainWindow):
             self.core_backup_automation,
             self.core_audit,
             self.core_tunnels,
+            self.core_automation,
+            self.core_notifications,
+            self.core_integrations,
         )
         unconfigured = sum(
             item.available
@@ -330,6 +355,9 @@ class MainWindow(QMainWindow):
         self.core_mirror_state = {"roots": [], "jobs": []}
         self.core_diagnostics = {}
         self.core_tunnels = {"zrok": {"enabled": False, "state": "disabled"}}
+        self.core_automation = {"rules": [], "runs": []}
+        self.core_notifications = []
+        self.core_integrations = {"plugins": []}
         self.core_server_mode = {"mode": "normal", "reason": "", "changed_at": ""}
         if not self.core_health:
             return
@@ -346,6 +374,9 @@ class MainWindow(QMainWindow):
             self.core_mirror_state = self.core_client.mirror_status()
             self.core_diagnostics = self.core_client.diagnostics()
             self.core_tunnels = self.core_client.tunnels()
+            self.core_automation = self.core_client.automation()
+            self.core_notifications = self.core_client.list_notifications(limit=100)
+            self.core_integrations = self.core_client.integrations()
             self.core_server_mode = self.core_client.server_mode()
         except (CoreApiError, CoreUnavailable) as exc:
             self.audit.record(
@@ -831,6 +862,134 @@ class MainWindow(QMainWindow):
             f"Запущена {'полная' if kind == 'full' else 'быстрая'} проверка; {scan['id']}",
         )
         QTimer.singleShot(800, self.refresh_core)
+
+    def remediate_diagnostic_incident(self, incident_id: str, action: str) -> None:
+        confirmed = False
+        if action == "enter_read_only":
+            response = QMessageBox.warning(
+                self,
+                "Защитить сервер режимом только чтения?",
+                "Новые загрузки, подключения и фоновые задания будут остановлены. "
+                "Скачивание и диагностика останутся доступны.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return
+            confirmed = True
+        elif action == "cleanup_expired_uploads":
+            response = QMessageBox.question(
+                self,
+                "Очистить просроченные загрузки?",
+                "Core удалит только временные части уже просроченных сессий. "
+                "Готовые файлы не изменятся.",
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            self.core_client.remediate_diagnostic_incident(
+                incident_id,
+                action,
+                confirmed=confirmed,
+            )
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Действие не выполнено", self._core_error_text(exc))
+            return
+        QTimer.singleShot(800 if action == "recheck" else 0, self.refresh_core)
+
+    def create_automation_rule(self, values: dict) -> None:
+        if not str(values.get("name", "")).strip():
+            QMessageBox.warning(self, "Нет названия", "Введите понятное название правила.")
+            return
+        payload = dict(values)
+        if payload.get("action_type") == "read_only":
+            response = QMessageBox.warning(
+                self,
+                "Разрешить автоматический режим только чтения?",
+                "Это правило сможет автоматически остановить новые записи и фоновые задания. "
+                "Действие разрешено только для критического инцидента и попадёт в аудит.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return
+            payload["confirmed"] = True
+        try:
+            self.core_client.create_automation_rule(payload)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Правило не создано", self._core_error_text(exc))
+            return
+        if self.settings_page.automation_rule_name is not None:
+            self.settings_page.automation_rule_name.clear()
+        self.refresh_core()
+
+    def update_automation_rule(self, rule_id: str, values: dict) -> None:
+        payload = dict(values)
+        if payload.get("action_type") == "read_only" and payload.get("enabled"):
+            response = QMessageBox.warning(
+                self,
+                "Включить защитное правило?",
+                "При критическом инциденте Core автоматически перейдёт в режим только чтения.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return
+            payload["confirmed"] = True
+        try:
+            self.core_client.update_automation_rule(rule_id, payload)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Правило не изменено", self._core_error_text(exc))
+            return
+        self.refresh_core()
+
+    def delete_automation_rule(self, rule_id: str) -> None:
+        response = QMessageBox.question(
+            self,
+            "Удалить правило?",
+            "История запусков этого пользовательского правила также будет удалена.",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.core_client.delete_automation_rule(rule_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Правило не удалено", self._core_error_text(exc))
+            return
+        self.refresh_core()
+
+    def evaluate_automation(self) -> None:
+        try:
+            result = self.core_client.evaluate_automation()
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Правила не проверены", self._core_error_text(exc))
+            return
+        self.refresh_core()
+        QMessageBox.information(
+            self,
+            "Проверка завершена",
+            f"Сработало правил: {result.get('matched_rules', 0)}.",
+        )
+
+    def acknowledge_notification(self, notification_id: str) -> None:
+        try:
+            self.core_client.acknowledge_notification(notification_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Уведомление не закрыто", self._core_error_text(exc))
+            return
+        self.refresh_core()
+
+    def test_integration(self, provider_id: str) -> None:
+        try:
+            self.core_client.test_integration(provider_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Интеграция не отвечает", self._core_error_text(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Интеграция работает",
+            f"Встроенный провайдер {provider_id} принял тестовое уведомление.",
+        )
 
     def restart_tunnel(self, provider_id: str) -> None:
         try:

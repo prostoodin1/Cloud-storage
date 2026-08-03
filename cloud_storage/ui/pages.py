@@ -364,8 +364,15 @@ class SettingsPage(QWidget):
     mirror_cancel_requested = Signal(str)
     diagnostics_quick_requested = Signal()
     diagnostics_full_requested = Signal()
+    diagnostic_remediation_requested = Signal(str, str)
     tunnel_restart_requested = Signal(str)
     support_bundle_requested = Signal()
+    automation_rule_create_requested = Signal(dict)
+    automation_rule_update_requested = Signal(str, dict)
+    automation_rule_delete_requested = Signal(str)
+    automation_evaluate_requested = Signal()
+    notification_acknowledge_requested = Signal(str)
+    integration_test_requested = Signal(str)
     server_read_only_requested = Signal()
     server_normal_requested = Signal()
     restore_requested = Signal(str, str)
@@ -501,6 +508,16 @@ class SettingsPage(QWidget):
         self.mirror_start_button: QPushButton | None = None
         self.mirror_rows: QVBoxLayout | None = None
         self.mirror_job_rows: QVBoxLayout | None = None
+        self.automation_rule_name: QLineEdit | None = None
+        self.automation_trigger: QComboBox | None = None
+        self.automation_action: QComboBox | None = None
+        self.automation_cooldown: QSpinBox | None = None
+        self.automation_create_button: QPushButton | None = None
+        self.automation_evaluate_button: QPushButton | None = None
+        self.automation_rule_rows: QVBoxLayout | None = None
+        self.automation_run_rows: QVBoxLayout | None = None
+        self.notification_rows: QVBoxLayout | None = None
+        self.integration_rows: QVBoxLayout | None = None
         self.diagnostics_status_label: QLabel | None = None
         self.diagnostics_detail_label: QLabel | None = None
         self.diagnostics_rows: QVBoxLayout | None = None
@@ -527,6 +544,9 @@ class SettingsPage(QWidget):
         backup_automation: dict | None = None,
         audit_events: list[dict] | None = None,
         tunnels: dict | None = None,
+        automation_rules: dict | None = None,
+        notifications: list[dict] | None = None,
+        integrations: dict | None = None,
     ) -> None:
         online = health is not None
         if self.core_status_label is not None:
@@ -720,6 +740,8 @@ class SettingsPage(QWidget):
             online,
         )
         self._update_mirrors(mirror_state or {"roots": [], "jobs": []}, online)
+        self._update_automation(automation_rules or {}, online)
+        self._update_notifications(notifications or [], integrations or {}, online)
         self._update_diagnostics(diagnostics or {}, online)
 
     def _update_backups(
@@ -1086,6 +1108,187 @@ class SettingsPage(QWidget):
             box.addLayout(controls)
             self.mirror_job_rows.addWidget(card)
 
+    def _update_automation(self, automation: dict, online: bool) -> None:
+        if self.automation_create_button is not None:
+            self.automation_create_button.setEnabled(online)
+        if self.automation_evaluate_button is not None:
+            self.automation_evaluate_button.setEnabled(online)
+        if self.automation_rule_rows is not None:
+            clear_layout(self.automation_rule_rows)
+            rules = list(automation.get("rules") or [])
+            if not online:
+                self._add_muted(
+                    self.automation_rule_rows,
+                    "Запустите Core для управления постоянными правилами.",
+                )
+            elif not rules:
+                self._add_muted(self.automation_rule_rows, "Правил автоматизации пока нет.")
+            trigger_labels = {
+                "diagnostic_warning": "предупреждение диагностики",
+                "diagnostic_critical": "критический инцидент",
+                "storage_low": "нехватка места",
+                "backup_failed": "ошибка резервной копии",
+                "tunnel_offline": "сбой интернет-шлюза",
+            }
+            action_labels = {
+                "notify": "создать уведомление",
+                "quick_scan": "запустить быструю проверку",
+                "read_only": "включить режим только чтения",
+            }
+            for rule in rules:
+                card = QFrame()
+                card.setProperty("card", True)
+                box = QVBoxLayout(card)
+                state = "Включено" if rule.get("enabled") else "Выключено"
+                title = QLabel(
+                    f"{rule.get('name', 'Правило')} · {state}"
+                    + (" · системное" if rule.get("system_rule") else "")
+                )
+                title.setStyleSheet("font-weight: 700;")
+                detail = QLabel(
+                    f"Если: {trigger_labels.get(rule.get('trigger_type'), rule.get('trigger_type'))} · "
+                    f"то: {action_labels.get(rule.get('action_type'), rule.get('action_type'))} · "
+                    f"не чаще {max(1, int(rule.get('cooldown_seconds', 60)) // 60)} мин"
+                )
+                detail.setWordWrap(True)
+                detail.setProperty("muted", True)
+                box.addWidget(title)
+                box.addWidget(detail)
+                if rule.get("last_triggered_at"):
+                    last = QLabel(f"Последний запуск: {rule['last_triggered_at']}")
+                    last.setProperty("muted", True)
+                    box.addWidget(last)
+                controls = QHBoxLayout()
+                toggle = QPushButton("Выключить" if rule.get("enabled") else "Включить")
+                update_payload = {
+                    "name": str(rule.get("name", "Правило")),
+                    "enabled": not bool(rule.get("enabled")),
+                    "trigger_type": str(rule.get("trigger_type")),
+                    "action_type": str(rule.get("action_type")),
+                    "cooldown_minutes": max(
+                        1, int(rule.get("cooldown_seconds", 60)) // 60
+                    ),
+                }
+                toggle.clicked.connect(
+                    lambda _checked=False, rule_id=str(rule["id"]), values=update_payload: (
+                        self.automation_rule_update_requested.emit(rule_id, values)
+                    )
+                )
+                controls.addWidget(toggle)
+                if not rule.get("system_rule"):
+                    remove = QPushButton("Удалить")
+                    remove.clicked.connect(
+                        lambda _checked=False, rule_id=str(rule["id"]): (
+                            self.automation_rule_delete_requested.emit(rule_id)
+                        )
+                    )
+                    controls.addWidget(remove)
+                controls.addStretch()
+                box.addLayout(controls)
+                self.automation_rule_rows.addWidget(card)
+        if self.automation_run_rows is None:
+            return
+        clear_layout(self.automation_run_rows)
+        runs = list(automation.get("runs") or [])[:12]
+        if not runs:
+            self._add_muted(self.automation_run_rows, "История запусков пока пуста.")
+            return
+        status_labels = {
+            "completed": "выполнено",
+            "failed": "ошибка",
+            "skipped": "пропущено безопасно",
+        }
+        for run in runs:
+            label = QLabel(
+                f"{run.get('created_at', '—')} · {run.get('rule_name', 'Правило')} · "
+                f"{status_labels.get(run.get('status'), run.get('status'))} · "
+                f"{run.get('action_result') or run.get('error') or run.get('condition_summary', '')}"
+            )
+            label.setWordWrap(True)
+            label.setProperty("muted", True)
+            self.automation_run_rows.addWidget(label)
+
+    def _update_notifications(
+        self,
+        notifications: list[dict],
+        integrations: dict,
+        online: bool,
+    ) -> None:
+        if self.integration_rows is not None:
+            clear_layout(self.integration_rows)
+            providers = [
+                item
+                for item in (integrations.get("plugins") or [])
+                if item.get("kind") == "notification"
+            ]
+            if not online:
+                self._add_muted(self.integration_rows, "Запустите Core для проверки интеграций.")
+            for provider in providers:
+                card = QFrame()
+                card.setProperty("card", True)
+                row = QHBoxLayout(card)
+                text = QVBoxLayout()
+                title = QLabel(str(provider.get("name", provider.get("id"))))
+                title.setStyleSheet("font-weight: 700;")
+                detail = QLabel(
+                    "Встроенный · без внешней сети · без загрузки стороннего кода"
+                )
+                detail.setProperty("muted", True)
+                text.addWidget(title)
+                text.addWidget(detail)
+                row.addLayout(text, 1)
+                test = QPushButton("Проверить")
+                test.setEnabled(online)
+                test.clicked.connect(
+                    lambda _checked=False, provider_id=str(provider["id"]): (
+                        self.integration_test_requested.emit(provider_id)
+                    )
+                )
+                row.addWidget(test)
+                self.integration_rows.addWidget(card)
+        if self.notification_rows is None:
+            return
+        clear_layout(self.notification_rows)
+        if not online:
+            self._add_muted(self.notification_rows, "Core выключен.")
+            return
+        if not notifications:
+            self._add_muted(self.notification_rows, "Новых уведомлений нет.")
+            return
+        for notification in notifications:
+            card = QFrame()
+            card.setProperty("card", True)
+            box = QVBoxLayout(card)
+            severity = str(notification.get("severity", "info"))
+            title = QLabel(str(notification.get("title", "Уведомление")))
+            title.setStyleSheet(
+                "font-weight: 700; color: "
+                + (
+                    "#e2383f;"
+                    if severity == "critical"
+                    else "#f5bd4f;"
+                    if severity == "warning"
+                    else "#7ab7ff;"
+                )
+            )
+            message = QLabel(str(notification.get("message", "")))
+            message.setWordWrap(True)
+            source = QLabel(
+                f"{notification.get('created_at', '—')} · {notification.get('source', 'Core')}"
+            )
+            source.setProperty("muted", True)
+            box.addWidget(title)
+            box.addWidget(message)
+            box.addWidget(source)
+            acknowledge = QPushButton("Прочитано")
+            acknowledge.clicked.connect(
+                lambda _checked=False, notification_id=str(notification["id"]): (
+                    self.notification_acknowledge_requested.emit(notification_id)
+                )
+            )
+            box.addWidget(acknowledge)
+            self.notification_rows.addWidget(card)
+
     def _update_diagnostics(self, diagnostics: dict, online: bool) -> None:
         latest = diagnostics.get("latest_scan") or {}
         scan_running = latest.get("status") in {"queued", "running"}
@@ -1172,6 +1375,36 @@ class SettingsPage(QWidget):
             box.addWidget(component)
             box.addWidget(detail)
             box.addWidget(remediation)
+            controls = QHBoxLayout()
+            recheck = QPushButton("Перепроверить")
+            recheck.clicked.connect(
+                lambda _checked=False, incident_id=str(incident["id"]): (
+                    self.diagnostic_remediation_requested.emit(incident_id, "recheck")
+                )
+            )
+            controls.addWidget(recheck)
+            if incident.get("check_key") == "uploads.expired":
+                cleanup = QPushButton("Очистить просроченные загрузки")
+                cleanup.clicked.connect(
+                    lambda _checked=False, incident_id=str(incident["id"]): (
+                        self.diagnostic_remediation_requested.emit(
+                            incident_id, "cleanup_expired_uploads"
+                        )
+                    )
+                )
+                controls.addWidget(cleanup)
+            if incident.get("severity") == "critical":
+                protect = QPushButton("Защитить сервер: только чтение")
+                protect.clicked.connect(
+                    lambda _checked=False, incident_id=str(incident["id"]): (
+                        self.diagnostic_remediation_requested.emit(
+                            incident_id, "enter_read_only"
+                        )
+                    )
+                )
+                controls.addWidget(protect)
+            controls.addStretch()
+            box.addLayout(controls)
             self.diagnostics_rows.addWidget(card)
 
     def _update_maintenance(
@@ -1416,6 +1649,24 @@ class SettingsPage(QWidget):
             layout.addLayout(self.pending_device_rows)
         elif name == "Уведомления":
             layout.addWidget(self.notifications)
+            description = QLabel(
+                "Core хранит важные сообщения в постоянном центре уведомлений и доставляет их "
+                "через безопасные встроенные провайдеры. Они не используют интернет и не загружают "
+                "сторонний код."
+            )
+            description.setWordWrap(True)
+            description.setProperty("muted", True)
+            layout.addWidget(description)
+            provider_title = QLabel("Встроенные провайдеры")
+            provider_title.setStyleSheet("font-weight: 700; margin-top: 8px;")
+            layout.addWidget(provider_title)
+            self.integration_rows = QVBoxLayout()
+            layout.addLayout(self.integration_rows)
+            notification_title = QLabel("Новые уведомления")
+            notification_title.setStyleSheet("font-weight: 700; margin-top: 8px;")
+            layout.addWidget(notification_title)
+            self.notification_rows = QVBoxLayout()
+            layout.addLayout(self.notification_rows)
         elif name == "Интерфейс":
             form = QFormLayout()
             form.addRow("Обновлять данные каждые", self.refresh_interval)
@@ -1605,13 +1856,75 @@ class SettingsPage(QWidget):
             layout.addWidget(body)
         elif name == "Автоматизация":
             description = QLabel(
-                "Каждая новая версия файла автоматически копируется на активные диски с ролью "
-                "«Зеркало». Ошибка зеркала не блокирует загрузку: Core отмечает деградацию, а "
-                "проверка ниже сверяет SHA-256 и восстанавливает отсутствующие или повреждённые реплики."
+                "Правила работают внутри Core, сохраняются в SQLite и переживают перезапуск. "
+                "Cooldown защищает от повторяющихся действий. Системные правила можно выключить, "
+                "но нельзя удалить."
             )
             description.setWordWrap(True)
             description.setProperty("muted", True)
             layout.addWidget(description)
+            rule_form = QFormLayout()
+            self.automation_rule_name = QLineEdit()
+            self.automation_rule_name.setMaxLength(120)
+            self.automation_rule_name.setPlaceholderText("Например: защита при критической ошибке")
+            rule_form.addRow("Название правила", self.automation_rule_name)
+            self.automation_trigger = QComboBox()
+            for label, value in (
+                ("Предупреждение диагностики", "diagnostic_warning"),
+                ("Критический инцидент", "diagnostic_critical"),
+                ("Нехватка места", "storage_low"),
+                ("Ошибка резервной копии", "backup_failed"),
+                ("Сбой интернет-шлюза", "tunnel_offline"),
+            ):
+                self.automation_trigger.addItem(label, value)
+            rule_form.addRow("Если", self.automation_trigger)
+            self.automation_action = QComboBox()
+            for label, value in (
+                ("Создать уведомление", "notify"),
+                ("Запустить быструю проверку", "quick_scan"),
+                ("Включить режим только чтения", "read_only"),
+            ):
+                self.automation_action.addItem(label, value)
+            rule_form.addRow("То", self.automation_action)
+            self.automation_cooldown = QSpinBox()
+            self.automation_cooldown.setRange(1, 10080)
+            self.automation_cooldown.setValue(60)
+            self.automation_cooldown.setSuffix(" мин")
+            rule_form.addRow("Не чаще", self.automation_cooldown)
+            layout.addLayout(rule_form)
+            rule_controls = QHBoxLayout()
+            self.automation_create_button = QPushButton("Добавить постоянное правило")
+            self.automation_create_button.setProperty("primary", True)
+            self.automation_create_button.clicked.connect(self._emit_automation_rule)
+            self.automation_evaluate_button = QPushButton("Проверить правила сейчас")
+            self.automation_evaluate_button.clicked.connect(
+                self.automation_evaluate_requested
+            )
+            rule_controls.addWidget(self.automation_create_button)
+            rule_controls.addWidget(self.automation_evaluate_button)
+            rule_controls.addStretch()
+            layout.addLayout(rule_controls)
+            rule_title = QLabel("Активные правила")
+            rule_title.setStyleSheet("font-weight: 700; margin-top: 8px;")
+            layout.addWidget(rule_title)
+            self.automation_rule_rows = QVBoxLayout()
+            layout.addLayout(self.automation_rule_rows)
+            run_title = QLabel("Последние срабатывания")
+            run_title.setStyleSheet("font-weight: 700; margin-top: 8px;")
+            layout.addWidget(run_title)
+            self.automation_run_rows = QVBoxLayout()
+            layout.addLayout(self.automation_run_rows)
+            mirror_title = QLabel("Зеркалирование")
+            mirror_title.setStyleSheet("font-weight: 700; font-size: 16px; margin-top: 12px;")
+            layout.addWidget(mirror_title)
+            mirror_description = QLabel(
+                "Каждая новая версия файла автоматически копируется на активные диски с ролью "
+                "«Зеркало». Ошибка зеркала не блокирует загрузку: Core отмечает деградацию, а "
+                "проверка ниже сверяет SHA-256 и восстанавливает отсутствующие или повреждённые реплики."
+            )
+            mirror_description.setWordWrap(True)
+            mirror_description.setProperty("muted", True)
+            layout.addWidget(mirror_description)
             form = QFormLayout()
             self.mirror_target = QComboBox()
             form.addRow("Зеркальный диск", self.mirror_target)
@@ -1830,6 +2143,24 @@ class SettingsPage(QWidget):
     def _emit_mirror_reconcile(self) -> None:
         if self.mirror_target is not None and self.mirror_target.currentData():
             self.mirror_reconcile_requested.emit(str(self.mirror_target.currentData()))
+
+    def _emit_automation_rule(self) -> None:
+        if (
+            self.automation_rule_name is None
+            or self.automation_trigger is None
+            or self.automation_action is None
+            or self.automation_cooldown is None
+        ):
+            return
+        self.automation_rule_create_requested.emit(
+            {
+                "name": self.automation_rule_name.text().strip(),
+                "enabled": True,
+                "trigger_type": str(self.automation_trigger.currentData()),
+                "action_type": str(self.automation_action.currentData()),
+                "cooldown_minutes": self.automation_cooldown.value(),
+            }
+        )
 
     @staticmethod
     def _add_muted(layout: QVBoxLayout, text: str) -> None:

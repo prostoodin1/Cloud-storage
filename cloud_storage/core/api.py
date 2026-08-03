@@ -30,10 +30,13 @@ from pydantic import BaseModel, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from cloud_storage import __version__
+from cloud_storage.core.automation import AutomationService
 from cloud_storage.core.backup_automation import BackupAutomationService
 from cloud_storage.core.config import CoreConfig, CoreSecrets
 from cloud_storage.core.database import Database
 from cloud_storage.core.diagnostics import DiagnosticsService
+from cloud_storage.core.integrations import IntegrationRegistry
+from cloud_storage.core.notifications import NotificationService
 from cloud_storage.core.recovery import RecoveryService
 from cloud_storage.core.repository import (
     ConflictError,
@@ -113,6 +116,22 @@ class CreateDiagnosticScanRequest(BaseModel):
     kind: str = Field(default="quick", pattern="^(quick|full)$")
 
 
+class DiagnosticRemediationRequest(BaseModel):
+    action: str = Field(pattern="^(recheck|cleanup_expired_uploads|enter_read_only)$")
+    confirmed: bool = False
+
+
+class AutomationRuleRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    enabled: bool = True
+    trigger_type: str = Field(
+        pattern="^(diagnostic_warning|diagnostic_critical|storage_low|backup_failed|tunnel_offline)$"
+    )
+    action_type: str = Field(pattern="^(notify|quick_scan|read_only)$")
+    cooldown_minutes: int = Field(default=60, ge=1, le=10080)
+    confirmed: bool = False
+
+
 class CreateRestoreRequest(BaseModel):
     backup_job_id: str = Field(min_length=1, max_length=100)
     target_root_id: str = Field(min_length=1, max_length=100)
@@ -147,6 +166,9 @@ class CoreRuntime:
     recovery: RecoveryService
     tls_identity: TlsIdentity | None
     tunnels: TunnelProviderRegistry
+    integrations: IntegrationRegistry
+    notifications: NotificationService
+    automation: AutomationService
     support: SupportBundleService
     started_monotonic: float
 
@@ -194,7 +216,25 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         else None
     )
     tunnels = TunnelProviderRegistry.built_in(config)
-    support = SupportBundleService(config, repository, diagnostics, tunnels)
+    integrations = IntegrationRegistry.built_in(tunnels, config)
+    notifications = NotificationService(database, repository, integrations)
+    automation = AutomationService(
+        database,
+        repository,
+        diagnostics,
+        recovery,
+        tunnels,
+        notifications,
+    )
+    support = SupportBundleService(
+        config,
+        repository,
+        diagnostics,
+        tunnels,
+        automation,
+        notifications,
+        integrations,
+    )
     return CoreRuntime(
         config=config,
         secrets=secrets_store,
@@ -206,6 +246,9 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         recovery=recovery,
         tls_identity=tls_identity,
         tunnels=tunnels,
+        integrations=integrations,
+        notifications=notifications,
+        automation=automation,
         support=support,
         started_monotonic=time.monotonic(),
     )
@@ -218,9 +261,11 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     async def lifespan(_: FastAPI):
         runtime.diagnostics.start_monitor()
         runtime.backup_automation.start_scheduler()
+        runtime.automation.start_scheduler()
         try:
             yield
         finally:
+            runtime.automation.stop_scheduler()
             runtime.backup_automation.stop_scheduler()
             runtime.diagnostics.stop_monitor()
 
@@ -327,6 +372,9 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                     "/v1/admin/diagnostics",
                     "/v1/admin/restores",
                     "/v1/admin/backup-verifications",
+                    "/v1/admin/automation",
+                    "/v1/admin/notifications",
+                    "/v1/admin/integrations",
                 )
             )
             and request.url.path != "/v1/admin/shutdown"
@@ -521,6 +569,126 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         return result
 
     @app.get(
+        "/v1/admin/integrations",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def integrations_overview() -> dict[str, Any]:
+        return runtime.integrations.overview()
+
+    @app.post(
+        "/v1/admin/integrations/{provider_id}/test",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def test_integration(provider_id: str) -> dict[str, Any]:
+        return runtime.notifications.test_provider(provider_id)
+
+    @app.get(
+        "/v1/admin/notifications",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def list_notifications(
+        include_acknowledged: bool = Query(default=False),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> list[dict[str, Any]]:
+        return runtime.notifications.list(
+            include_acknowledged=include_acknowledged,
+            limit=limit,
+        )
+
+    @app.post(
+        "/v1/admin/notifications/{notification_id}/acknowledge",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def acknowledge_notification(notification_id: str) -> dict[str, Any]:
+        return runtime.notifications.acknowledge(notification_id)
+
+    @app.get(
+        "/v1/admin/automation",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def automation_overview() -> dict[str, Any]:
+        return runtime.automation.overview()
+
+    @app.post(
+        "/v1/admin/automation/rules",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_automation_rule(body: AutomationRuleRequest) -> dict[str, Any]:
+        if body.action_type == "read_only" and not body.confirmed:
+            raise HTTPException(
+                status_code=400,
+                detail="explicit confirmation is required for automatic read-only mode",
+            )
+        try:
+            rule = runtime.automation.create_rule(
+                name=body.name,
+                enabled=body.enabled,
+                trigger_type=body.trigger_type,
+                action_type=body.action_type,
+                cooldown_seconds=body.cooldown_minutes * 60,
+            )
+        except ConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return runtime.automation.rule_to_dict(rule)
+
+    @app.put(
+        "/v1/admin/automation/rules/{rule_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def update_automation_rule(
+        rule_id: str,
+        body: AutomationRuleRequest,
+    ) -> dict[str, Any]:
+        if body.action_type == "read_only" and body.enabled and not body.confirmed:
+            raise HTTPException(
+                status_code=400,
+                detail="explicit confirmation is required for automatic read-only mode",
+            )
+        try:
+            rule = runtime.automation.update_rule(
+                rule_id,
+                name=body.name,
+                enabled=body.enabled,
+                trigger_type=body.trigger_type,
+                action_type=body.action_type,
+                cooldown_seconds=body.cooldown_minutes * 60,
+            )
+        except ConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return runtime.automation.rule_to_dict(rule)
+
+    @app.delete(
+        "/v1/admin/automation/rules/{rule_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def delete_automation_rule(rule_id: str) -> Response:
+        runtime.automation.delete_rule(rule_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post(
+        "/v1/admin/automation/evaluate",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def evaluate_automation() -> dict[str, Any]:
+        runs = runtime.automation.evaluate(trigger_source="manager")
+        return {"matched_rules": len(runs), "runs": runs}
+
+    @app.get(
         "/v1/admin/support-bundle",
         tags=["manager"],
         dependencies=[Depends(require_manager)],
@@ -620,6 +788,55 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                 include_resolved=include_resolved
             )
         ]
+
+    @app.post(
+        "/v1/admin/diagnostics/incidents/{incident_id}/remediate",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def remediate_diagnostic_incident(
+        incident_id: str,
+        body: DiagnosticRemediationRequest,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        incident = runtime.diagnostics.get_incident(incident_id)
+        if body.action == "recheck":
+            scan = runtime.diagnostics.create_scan("quick", source="manager")
+            background_tasks.add_task(runtime.diagnostics.run_scan_safely, scan.id)
+            result: dict[str, Any] = {"action": body.action, "scan_id": scan.id}
+        elif body.action == "cleanup_expired_uploads":
+            if incident.check_key != "uploads.expired":
+                raise HTTPException(
+                    status_code=409,
+                    detail="cleanup action does not apply to this incident",
+                )
+            removed = runtime.storage.cleanup_expired_uploads()
+            result = {"action": body.action, "removed_uploads": removed}
+        else:
+            if incident.severity != "critical":
+                raise HTTPException(
+                    status_code=409,
+                    detail="read-only remediation requires a critical incident",
+                )
+            if not body.confirmed:
+                raise HTTPException(
+                    status_code=400,
+                    detail="explicit confirmation is required for read-only remediation",
+                )
+            state = runtime.recovery.set_server_mode(
+                "read_only",
+                f"Диагностический инцидент: {incident.summary}",
+            )
+            result = {"action": body.action, "server_mode": state}
+        runtime.repository.record_audit(
+            actor_type="manager",
+            actor_id=None,
+            action=f"diagnostics.incident.{body.action}",
+            target_type="diagnostic_incident",
+            target_id=incident_id,
+            detail=f"Выполнено действие {body.action} для «{incident.summary}»",
+        )
+        return result
 
     @app.put(
         "/v1/admin/storage-roots",

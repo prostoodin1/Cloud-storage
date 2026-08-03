@@ -58,6 +58,67 @@ class CoreClient:
     def tunnels(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/tunnels")
 
+    def integrations(self) -> dict[str, Any]:
+        return self._manager_request("/v1/admin/integrations")
+
+    def test_integration(self, provider_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/integrations/{provider_id}/test",
+            method="POST",
+        )
+
+    def list_notifications(
+        self,
+        *,
+        include_acknowledged: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(limit, 500))
+        include = "true" if include_acknowledged else "false"
+        return self._manager_request(
+            f"/v1/admin/notifications?include_acknowledged={include}&limit={safe_limit}"
+        )
+
+    def acknowledge_notification(self, notification_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/notifications/{notification_id}/acknowledge",
+            method="POST",
+        )
+
+    def automation(self) -> dict[str, Any]:
+        return self._manager_request("/v1/admin/automation")
+
+    def create_automation_rule(self, values: dict[str, Any]) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/automation/rules",
+            method="POST",
+            payload=values,
+        )
+
+    def update_automation_rule(
+        self,
+        rule_id: str,
+        values: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/automation/rules/{rule_id}",
+            method="PUT",
+            payload=values,
+        )
+
+    def delete_automation_rule(self, rule_id: str) -> None:
+        self._manager_request(
+            f"/v1/admin/automation/rules/{rule_id}",
+            method="DELETE",
+        )
+
+    def evaluate_automation(self) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/automation/evaluate",
+            method="POST",
+            timeout=10.0,
+        )
+
     def restart_tunnel(self, provider_id: str) -> dict[str, Any]:
         safe_provider_id = provider_id.strip().casefold()
         if not safe_provider_id or not safe_provider_id.replace("-", "").isalnum():
@@ -127,6 +188,20 @@ class CoreClient:
             "/v1/admin/diagnostics/scans",
             method="POST",
             payload={"kind": kind},
+            timeout=10.0,
+        )
+
+    def remediate_diagnostic_incident(
+        self,
+        incident_id: str,
+        action: str,
+        *,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/diagnostics/incidents/{incident_id}/remediate",
+            method="POST",
+            payload={"action": action, "confirmed": confirmed},
             timeout=10.0,
         )
 

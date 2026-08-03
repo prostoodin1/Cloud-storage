@@ -43,6 +43,10 @@ def test_main_window_smoke(tmp_path) -> None:
     assert window.settings_page.zrok_status_label is not None
     assert window.settings_page.zrok_restart_button is not None
     assert window.settings_page.support_bundle_button is not None
+    assert window.settings_page.automation_create_button is not None
+    assert window.settings_page.automation_rule_rows is not None
+    assert window.settings_page.notification_rows is not None
+    assert window.settings_page.integration_rows is not None
     assert len(window.disks) == 1
     assert window.disks[0].label == "Test disk"
 

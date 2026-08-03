@@ -1,0 +1,18 @@
+[Unit]
+Description=Cloud Storage Server Core
+After=network.target
+
+[Service]
+Type=simple
+Environment=CLOUD_STORAGE_CORE_DATA_DIR=%h/.local/share/cloud-storage
+ExecStart=%h/.local/opt/cloud-storage/CloudStorageServerCore
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/cloud-storage
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,1197 @@
+from __future__ import annotations
+
+from datetime import datetime
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from cloud_storage.models import AppSettings, DiskRole, DiskSnapshot, DiskStatus
+from cloud_storage.services.audit_log import AuditEvent
+from cloud_storage.services.disk_service import evaluate_status
+from cloud_storage.ui.theme import COLORS
+from cloud_storage.ui.widgets import DiskCard, StatCard, clear_layout, format_bytes, make_header
+
+
+def _scroll_page(content: QWidget) -> QScrollArea:
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.setWidget(content)
+    return area
+
+
+class DashboardPage(QWidget):
+    setup_requested = Signal()
+    remind_later_requested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        content = QWidget()
+        self.layout = QVBoxLayout(content)
+        self.layout.setContentsMargins(4, 4, 16, 24)
+        self.layout.setSpacing(18)
+        self.layout.addWidget(
+            make_header(
+                "Основная",
+                "Состояние менеджера, накопителей и серверного ядра.",
+            )
+        )
+
+        self.setup_banner = QFrame()
+        self.setup_banner.setProperty("accent", "red")
+        banner_layout = QHBoxLayout(self.setup_banner)
+        banner_layout.setContentsMargins(18, 14, 18, 14)
+        text = QVBoxLayout()
+        banner_title = QLabel("Первоначальная настройка не завершена")
+        banner_title.setStyleSheet("font-weight: 700; font-size: 16px;")
+        banner_body = QLabel(
+            "Можно настроить диски сейчас или отложить. Менеджер не форматирует и не переносит данные."
+        )
+        banner_body.setProperty("muted", True)
+        banner_body.setWordWrap(True)
+        text.addWidget(banner_title)
+        text.addWidget(banner_body)
+        banner_layout.addLayout(text, 1)
+        later = QPushButton("Напомнить позже")
+        later.clicked.connect(self.remind_later_requested)
+        begin = QPushButton("Начать настройку")
+        begin.setProperty("primary", True)
+        begin.clicked.connect(self.setup_requested)
+        banner_layout.addWidget(later)
+        banner_layout.addWidget(begin)
+        self.layout.addWidget(self.setup_banner)
+
+        metrics = QHBoxLayout()
+        metrics.setSpacing(12)
+        self.server_card = StatCard("Сервер", "Ожидает настройки", "Ядро — следующий этап")
+        self.storage_card = StatCard("Хранилище", "—", "Диски не обнаружены")
+        self.disk_card = StatCard("Накопители", "0", "Нет данных")
+        self.connection_card = StatCard("Доступ", "Локально", "Удалённый доступ выключен")
+        for card in (self.server_card, self.storage_card, self.disk_card, self.connection_card):
+            metrics.addWidget(card, 1)
+        self.layout.addLayout(metrics)
+
+        storage = QFrame()
+        storage.setProperty("card", True)
+        storage_layout = QVBoxLayout(storage)
+        storage_layout.setContentsMargins(18, 16, 18, 16)
+        storage_title_row = QHBoxLayout()
+        title = QLabel("Использование хранилища")
+        title.setObjectName("SectionTitle")
+        self.storage_summary = QLabel("—")
+        self.storage_summary.setProperty("muted", True)
+        storage_title_row.addWidget(title)
+        storage_title_row.addStretch()
+        storage_title_row.addWidget(self.storage_summary)
+        self.storage_progress = QProgressBar()
+        self.storage_progress.setRange(0, 100)
+        self.storage_progress.setTextVisible(False)
+        storage_layout.addLayout(storage_title_row)
+        storage_layout.addWidget(self.storage_progress)
+        note = QLabel(
+            "Прогноз заполнения появится после накопления реальной истории использования."
+        )
+        note.setProperty("muted", True)
+        storage_layout.addWidget(note)
+        self.layout.addWidget(storage)
+
+        lower = QHBoxLayout()
+        lower.setSpacing(12)
+        health = QFrame()
+        health.setProperty("card", True)
+        health_layout = QVBoxLayout(health)
+        health_layout.setContentsMargins(18, 16, 18, 16)
+        health_title = QLabel("Состояние дисков")
+        health_title.setObjectName("SectionTitle")
+        self.health_rows = QVBoxLayout()
+        health_layout.addWidget(health_title)
+        health_layout.addLayout(self.health_rows)
+        health_layout.addStretch()
+        lower.addWidget(health, 1)
+
+        activity = QFrame()
+        activity.setProperty("card", True)
+        activity_layout = QVBoxLayout(activity)
+        activity_layout.setContentsMargins(18, 16, 18, 16)
+        activity_title = QLabel("Последние действия")
+        activity_title.setObjectName("SectionTitle")
+        self.activity_rows = QVBoxLayout()
+        activity_layout.addWidget(activity_title)
+        activity_layout.addLayout(self.activity_rows)
+        activity_layout.addStretch()
+        lower.addWidget(activity, 1)
+        self.layout.addLayout(lower)
+        self.layout.addStretch()
+        outer.addWidget(_scroll_page(content))
+
+    def set_setup_banner_visible(self, visible: bool) -> None:
+        self.setup_banner.setVisible(visible)
+
+    def update_data(
+        self,
+        disks: list[DiskSnapshot],
+        settings: AppSettings,
+        events: list[AuditEvent],
+        core_health: dict | None = None,
+        core_summary: dict | None = None,
+    ) -> None:
+        configured = [
+            item
+            for item in disks
+            if settings.configuration_for(item.id).role
+            not in {DiskRole.UNCONFIGURED, DiskRole.UNUSED}
+        ]
+        total = sum(item.total_bytes for item in configured if item.available)
+        used = sum(item.used_bytes for item in configured if item.available)
+        free = sum(item.free_bytes for item in configured if item.available)
+
+        if core_health:
+            uptime = int(core_health.get("uptime_seconds", 0))
+            self.server_card.set_value(
+                "Ядро работает",
+                f"Версия {core_health.get('version', '—')} · {uptime // 60} мин",
+            )
+        elif settings.setup_complete:
+            self.server_card.set_value("Ядро выключено", "Запускается в настройках сервера")
+        else:
+            self.server_card.set_value("Ожидает настройки", "Безопасный режим")
+        self.setup_banner.setVisible(not settings.setup_complete and self.setup_banner.isVisible())
+        self.storage_card.set_value(
+            format_bytes(total) if total else "—",
+            f"Свободно {format_bytes(free)}" if total else "Нет настроенных дисков",
+        )
+        unavailable = sum(not item.available for item in disks)
+        self.disk_card.set_value(str(len(disks)), f"Недоступно: {unavailable}")
+        if core_health:
+            users = (core_summary or {}).get("users", 0)
+            devices = (core_summary or {}).get("trusted_devices", 0)
+            self.connection_card.set_value(
+                "Только локально", f"Пользователи: {users} · Устройства: {devices}"
+            )
+        else:
+            self.connection_card.set_value("Недоступно", "Серверное ядро выключено")
+
+        percent = round(used / total * 100) if total else 0
+        self.storage_progress.setValue(percent)
+        self.storage_summary.setText(
+            f"{format_bytes(used)} из {format_bytes(total)}" if total else "Нет настроенных дисков"
+        )
+
+        clear_layout(self.health_rows)
+        if not disks:
+            label = QLabel("Физические накопители не обнаружены")
+            label.setProperty("muted", True)
+            self.health_rows.addWidget(label)
+        for disk in disks[:5]:
+            config = settings.configuration_for(disk.id)
+            status = evaluate_status(disk, config)
+            row = QHBoxLayout()
+            name = QLabel(config.display_name or disk.label or disk.mountpoint)
+            state = QLabel(
+                {
+                    DiskStatus.HEALTHY: "Всё хорошо",
+                    DiskStatus.UNCONFIGURED: "Не настроен",
+                    DiskStatus.ALMOST_FULL: "Почти заполнен",
+                }.get(status, status.value.replace("_", " "))
+            )
+            color = (
+                COLORS["green"]
+                if status == DiskStatus.HEALTHY
+                else (COLORS["gray"] if status == DiskStatus.UNCONFIGURED else COLORS["yellow"])
+            )
+            state.setStyleSheet(f"color: {color};")
+            row.addWidget(name, 1)
+            row.addWidget(state)
+            self.health_rows.addLayout(row)
+            name.show()
+            state.show()
+
+        clear_layout(self.activity_rows)
+        if not events:
+            label = QLabel("Действий пока нет")
+            label.setProperty("muted", True)
+            self.activity_rows.addWidget(label)
+        for event in events[:5]:
+            row = QVBoxLayout()
+            label = QLabel(event.detail)
+            label.setWordWrap(True)
+            try:
+                stamp = (
+                    datetime.fromisoformat(event.timestamp).astimezone().strftime("%d.%m · %H:%M")
+                )
+            except ValueError:
+                stamp = event.timestamp
+            time_label = QLabel(stamp)
+            time_label.setProperty("muted", True)
+            row.addWidget(label)
+            row.addWidget(time_label)
+            self.activity_rows.addLayout(row)
+            label.show()
+            time_label.show()
+
+
+class DisksPage(QWidget):
+    disk_selected = Signal(str)
+    refresh_requested = Signal()
+    configure_first_requested = Signal()
+    remind_later_requested = Signal()
+    ignore_unconfigured_requested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        content = QWidget()
+        self.layout = QVBoxLayout(content)
+        self.layout.setContentsMargins(4, 4, 16, 24)
+        self.layout.setSpacing(18)
+        self.layout.addWidget(
+            make_header(
+                "Диски",
+                "Реальные накопители системы. Beta 0.2 не форматирует и не переносит данные.",
+                ("Обновить", self.refresh_requested.emit),
+            )
+        )
+
+        self.new_disk_banner = QFrame()
+        self.new_disk_banner.setProperty("accent", "blue")
+        banner_layout = QHBoxLayout(self.new_disk_banner)
+        banner_layout.setContentsMargins(18, 14, 18, 14)
+        banner_text = QVBoxLayout()
+        self.new_disk_title = QLabel("Обнаружен новый диск")
+        self.new_disk_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        description = QLabel("Выберите назначение или вернитесь к настройке позднее.")
+        description.setProperty("muted", True)
+        banner_text.addWidget(self.new_disk_title)
+        banner_text.addWidget(description)
+        banner_layout.addLayout(banner_text, 1)
+        ignore = QPushButton("Пока не использовать")
+        ignore.clicked.connect(self.ignore_unconfigured_requested)
+        later = QPushButton("Напомнить позже")
+        later.clicked.connect(self.remind_later_requested)
+        configure = QPushButton("Настроить")
+        configure.setProperty("primary", True)
+        configure.clicked.connect(self.configure_first_requested)
+        banner_layout.addWidget(ignore)
+        banner_layout.addWidget(later)
+        banner_layout.addWidget(configure)
+        self.layout.addWidget(self.new_disk_banner)
+
+        self.cards = QGridLayout()
+        self.cards.setHorizontalSpacing(12)
+        self.cards.setVerticalSpacing(12)
+        self.layout.addLayout(self.cards)
+        self.empty = QLabel("Накопители не обнаружены. Подключите диск и нажмите «Обновить».")
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty.setProperty("muted", True)
+        self.empty.setMinimumHeight(180)
+        self.layout.addWidget(self.empty)
+        self.layout.addStretch()
+        outer.addWidget(_scroll_page(content))
+
+    def update_data(
+        self, disks: list[DiskSnapshot], settings: AppSettings, reminder_hidden=False
+    ) -> None:
+        while self.cards.count():
+            item = self.cards.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        pending = [
+            disk
+            for disk in disks
+            if settings.configuration_for(disk.id).role == DiskRole.UNCONFIGURED
+            and disk.id not in settings.ignored_disk_ids
+            and disk.available
+        ]
+        self.new_disk_banner.setVisible(bool(pending) and not reminder_hidden)
+        self.new_disk_title.setText(
+            "Обнаружен новый диск"
+            if len(pending) == 1
+            else f"Обнаружено новых дисков: {len(pending)}"
+        )
+        self.empty.setVisible(not disks)
+        for index, disk in enumerate(disks):
+            card = DiskCard(disk, settings.configuration_for(disk.id))
+            card.selected.connect(self.disk_selected)
+            self.cards.addWidget(card, index // 2, index % 2)
+
+
+class SettingsPage(QWidget):
+    save_requested = Signal(dict)
+    advanced_mode_changed = Signal(bool)
+    refresh_requested = Signal()
+    core_start_requested = Signal()
+    core_stop_requested = Signal()
+    core_refresh_requested = Signal()
+    add_user_requested = Signal()
+    invitation_requested = Signal(str, str)
+    approve_device_requested = Signal(str)
+    revoke_device_requested = Signal(str)
+    migration_requested = Signal(str, str)
+    maintenance_refresh_requested = Signal()
+    maintenance_resume_requested = Signal(str)
+    maintenance_cancel_requested = Signal(str)
+    backup_requested = Signal(str)
+    backup_resume_requested = Signal(str)
+    backup_cancel_requested = Signal(str)
+    mirror_reconcile_requested = Signal(str)
+    mirror_resume_requested = Signal(str)
+    mirror_cancel_requested = Signal(str)
+
+    _SECTIONS = [
+        ("Сервер", False),
+        ("Хранилище", False),
+        ("Диски", False),
+        ("Пользователи", False),
+        ("Права доступа", True),
+        ("Доверенные устройства", False),
+        ("Подключение устройств", False),
+        ("Резервные копии", True),
+        ("Автоматизация", True),
+        ("Сеть", True),
+        ("Удалённый доступ", True),
+        ("Безопасность", False),
+        ("Уведомления", False),
+        ("Интерфейс", False),
+        ("Журналы", True),
+        ("Диагностика", False),
+        ("Обслуживание", True),
+        ("Обновления", False),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 16, 24)
+        root.setSpacing(18)
+        root.addWidget(
+            make_header("Настройки", "Простой и расширенный режимы управления сервером.")
+        )
+
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel("Режим:"))
+        self.mode = QComboBox()
+        self.mode.addItem("Простой", False)
+        self.mode.addItem("Расширенный", True)
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        toolbar.addWidget(self.mode)
+        toolbar.addStretch()
+        save = QPushButton("Сохранить настройки")
+        save.setProperty("primary", True)
+        save.clicked.connect(self._emit_save)
+        toolbar.addWidget(save)
+        root.addLayout(toolbar)
+
+        body = QHBoxLayout()
+        body.setSpacing(16)
+        self.section_list = QListWidget()
+        self.section_list.setFixedWidth(230)
+        self.section_list.currentRowChanged.connect(self._show_section)
+        self.stack = QStackedWidget()
+        body.addWidget(self.section_list)
+        body.addWidget(self.stack, 1)
+        root.addLayout(body, 1)
+
+        self.server_name = QLineEdit()
+        self.server_name.setMaxLength(80)
+        self.notifications = QCheckBox("Показывать системные уведомления")
+        self.refresh_interval = QSpinBox()
+        self.refresh_interval.setRange(10, 300)
+        self.refresh_interval.setSuffix(" сек")
+        self.config_path = QLabel("—")
+        self.config_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.server_state_label: QLabel | None = None
+        self.core_status_label: QLabel | None = None
+        self.core_details_label: QLabel | None = None
+        self.core_start_button: QPushButton | None = None
+        self.core_stop_button: QPushButton | None = None
+        self.lan_enabled = QCheckBox("Разрешить защищённое подключение устройств из локальной сети")
+        self.lan_port = QSpinBox()
+        self.lan_port.setRange(1024, 65535)
+        self.lan_port.setValue(8766)
+        self.lan_status_label: QLabel | None = None
+        self.lan_details_label: QLabel | None = None
+        self.users_rows: QVBoxLayout | None = None
+        self.trusted_device_rows: QVBoxLayout | None = None
+        self.pending_device_rows: QVBoxLayout | None = None
+        self.migration_source: QComboBox | None = None
+        self.migration_target: QComboBox | None = None
+        self.migration_start_button: QPushButton | None = None
+        self.maintenance_rows: QVBoxLayout | None = None
+        self.backup_target: QComboBox | None = None
+        self.backup_start_button: QPushButton | None = None
+        self.backup_rows: QVBoxLayout | None = None
+        self.mirror_target: QComboBox | None = None
+        self.mirror_start_button: QPushButton | None = None
+        self.mirror_rows: QVBoxLayout | None = None
+        self.mirror_job_rows: QVBoxLayout | None = None
+        self._current_settings = AppSettings()
+        self._pages_by_name = {name: self._make_section(name) for name, _ in self._SECTIONS}
+        self._rebuild_sections()
+
+    def update_core_data(
+        self,
+        health: dict | None,
+        summary: dict | None,
+        users: list[dict],
+        devices: list[dict],
+        storage_roots: list[dict] | None = None,
+        maintenance_jobs: list[dict] | None = None,
+        backup_jobs: list[dict] | None = None,
+        mirror_state: dict | None = None,
+    ) -> None:
+        online = health is not None
+        if self.core_status_label is not None:
+            self.core_status_label.setText("Работает" if online else "Выключено")
+            self.core_status_label.setStyleSheet(
+                "color: #43c778; font-weight: 700;" if online else "color: #949ca8;"
+            )
+        if self.core_details_label is not None:
+            self.core_details_label.setText(
+                f"API {health.get('bind')} · версия {health.get('version')}"
+                if health
+                else "Ядро запускается отдельным процессом и продолжает работу после закрытия менеджера."
+            )
+        if self.core_start_button is not None:
+            self.core_start_button.setEnabled(not online)
+        if self.core_stop_button is not None:
+            self.core_stop_button.setEnabled(online)
+        if self.lan_status_label is not None:
+            lan = health.get("lan") if health else None
+            if lan:
+                self.lan_status_label.setText("HTTPS включён")
+                self.lan_status_label.setStyleSheet("color: #43c778; font-weight: 700;")
+            elif self._current_settings.lan_enabled and online:
+                self.lan_status_label.setText("Требуется перезапуск ядра")
+                self.lan_status_label.setStyleSheet("color: #f5bd4f; font-weight: 700;")
+            else:
+                self.lan_status_label.setText("Выключен")
+                self.lan_status_label.setStyleSheet("color: #949ca8;")
+        if self.lan_details_label is not None:
+            lan = health.get("lan") if health else None
+            if lan:
+                endpoints = lan.get("endpoints") or []
+                endpoint_text = " · ".join(endpoints) if endpoints else "сетевой адрес не найден"
+                fingerprint = str(lan.get("display_fingerprint", ""))
+                self.lan_details_label.setText(f"Адреса: {endpoint_text}\nSHA-256: {fingerprint}")
+            else:
+                self.lan_details_label.setText(
+                    "После включения Core создаст постоянный сертификат и отдельный HTTPS-вход для клиентов."
+                )
+
+        if self.users_rows is not None:
+            clear_layout(self.users_rows)
+            if not online:
+                self._add_muted(
+                    self.users_rows, "Запустите серверное ядро, чтобы управлять пользователями."
+                )
+            elif not users:
+                self._add_muted(self.users_rows, "Пользователей пока нет.")
+            for user in users:
+                card = QFrame()
+                card.setProperty("card", True)
+                row = QHBoxLayout(card)
+                text = QVBoxLayout()
+                title = QLabel(user["display_name"])
+                title.setStyleSheet("font-weight: 700; font-size: 16px;")
+                quota = user["quota_bytes"] / 1024**3
+                detail = QLabel(
+                    f"@{user['username']} · {'Администратор' if user['role'] == 'admin' else 'Пользователь'} · {quota:.0f} ГБ"
+                )
+                detail.setProperty("muted", True)
+                text.addWidget(title)
+                text.addWidget(detail)
+                row.addLayout(text, 1)
+                invite = QPushButton("Код подключения")
+                invite.clicked.connect(
+                    lambda checked=False, user_id=user["id"], name=user["display_name"]: (
+                        self.invitation_requested.emit(user_id, name)
+                    )
+                )
+                row.addWidget(invite)
+                self.users_rows.addWidget(card)
+                card.show()
+
+        trusted = [item for item in devices if item.get("status") == "trusted"]
+        pending = [item for item in devices if item.get("status") == "pending"]
+        if self.trusted_device_rows is not None:
+            clear_layout(self.trusted_device_rows)
+            if not trusted:
+                self._add_muted(self.trusted_device_rows, "Доверенных устройств пока нет.")
+            for device in trusted:
+                self._add_device_card(self.trusted_device_rows, device, pending=False)
+        if self.pending_device_rows is not None:
+            clear_layout(self.pending_device_rows)
+            if not online:
+                self._add_muted(self.pending_device_rows, "Серверное ядро выключено.")
+            elif not pending:
+                self._add_muted(self.pending_device_rows, "Новых запросов на подключение нет.")
+            for device in pending:
+                self._add_device_card(self.pending_device_rows, device, pending=True)
+        self._update_maintenance(storage_roots or [], maintenance_jobs or [], online)
+        self._update_backups(storage_roots or [], backup_jobs or [], online)
+        self._update_mirrors(mirror_state or {"roots": [], "jobs": []}, online)
+
+    def _update_backups(self, roots: list[dict], jobs: list[dict], online: bool) -> None:
+        if self.backup_target is not None:
+            previous = self.backup_target.currentData()
+            self.backup_target.clear()
+            for root in roots:
+                if root.get("purpose") == "backup" and root.get("write_enabled", True):
+                    self.backup_target.addItem(
+                        f"{root.get('disk_id') or root['id']} · {root['path']}", root["id"]
+                    )
+            previous_index = self.backup_target.findData(previous)
+            if previous_index >= 0:
+                self.backup_target.setCurrentIndex(previous_index)
+            if self.backup_start_button is not None:
+                self.backup_start_button.setEnabled(online and self.backup_target.count() > 0)
+        if self.backup_rows is None:
+            return
+        clear_layout(self.backup_rows)
+        if not online:
+            self._add_muted(self.backup_rows, "Запустите Core для резервного копирования.")
+            return
+        if not jobs:
+            self._add_muted(self.backup_rows, "Проверенных снимков пока нет.")
+            return
+        status_labels = {
+            "queued": "В очереди",
+            "running": "Выполняется",
+            "completed": "Готов и проверен",
+            "failed": "Ошибка",
+            "cancelled": "Отменено",
+        }
+        for job in jobs:
+            card = QFrame()
+            card.setProperty("card", True)
+            card_layout = QVBoxLayout(card)
+            title = QLabel(f"Резервный снимок · {job['target_root_id']}")
+            title.setStyleSheet("font-weight: 700;")
+            total = int(job.get("total_bytes", 0))
+            processed = int(job.get("processed_bytes", 0))
+            detail = QLabel(
+                f"{status_labels.get(job['status'], job['status'])} · "
+                f"{format_bytes(processed)} из {format_bytes(total)} · "
+                f"объектов {job.get('processed_files', 0)}/{job.get('total_files', 0)}"
+            )
+            detail.setProperty("muted", True)
+            progress = QProgressBar()
+            progress.setRange(0, 100)
+            progress.setValue(
+                round(processed / total * 100)
+                if total
+                else (100 if job["status"] == "completed" else 0)
+            )
+            card_layout.addWidget(title)
+            card_layout.addWidget(detail)
+            card_layout.addWidget(progress)
+            if job.get("snapshot_path"):
+                path = QLabel(str(job["snapshot_path"]))
+                path.setProperty("muted", True)
+                card_layout.addWidget(path)
+            if job.get("error"):
+                error = QLabel(str(job["error"]))
+                error.setWordWrap(True)
+                error.setStyleSheet("color: #e2383f;")
+                card_layout.addWidget(error)
+            controls = QHBoxLayout()
+            if job["status"] in {"failed", "cancelled"}:
+                resume = QPushButton("Повторить снимок")
+                resume.clicked.connect(
+                    lambda _checked=False, job_id=job["id"]: self.backup_resume_requested.emit(
+                        job_id
+                    )
+                )
+                controls.addWidget(resume)
+            if job["status"] in {"queued", "running"}:
+                cancel = QPushButton("Отменить")
+                cancel.clicked.connect(
+                    lambda _checked=False, job_id=job["id"]: self.backup_cancel_requested.emit(
+                        job_id
+                    )
+                )
+                controls.addWidget(cancel)
+            controls.addStretch()
+            card_layout.addLayout(controls)
+            self.backup_rows.addWidget(card)
+
+    def _update_mirrors(self, state: dict, online: bool) -> None:
+        roots = list(state.get("roots") or [])
+        jobs = list(state.get("jobs") or [])
+        if self.mirror_target is not None:
+            previous = self.mirror_target.currentData()
+            self.mirror_target.clear()
+            for root in roots:
+                if root.get("write_enabled", True):
+                    self.mirror_target.addItem(
+                        f"{root.get('disk_id') or root['root_id']} · {root['path']}",
+                        root["root_id"],
+                    )
+            previous_index = self.mirror_target.findData(previous)
+            if previous_index >= 0:
+                self.mirror_target.setCurrentIndex(previous_index)
+            if self.mirror_start_button is not None:
+                self.mirror_start_button.setEnabled(online and self.mirror_target.count() > 0)
+        if self.mirror_rows is not None:
+            clear_layout(self.mirror_rows)
+            if not online:
+                self._add_muted(self.mirror_rows, "Запустите Core для контроля зеркал.")
+            elif not roots:
+                self._add_muted(
+                    self.mirror_rows,
+                    "Назначьте отдельному диску роль «Зеркало». Обычные загрузки на него не направляются.",
+                )
+            for root in roots:
+                card = QFrame()
+                card.setProperty("card", True)
+                box = QVBoxLayout(card)
+                title = QLabel(f"Зеркало · {root.get('disk_id') or root['root_id']}")
+                title.setStyleSheet("font-weight: 700;")
+                current = int(root.get("current_files", 0))
+                total = int(root.get("total_files", 0))
+                degraded = int(root.get("degraded_files", 0))
+                status = "Полная копия" if degraded == 0 else f"Требует восстановления: {degraded}"
+                detail = QLabel(
+                    f"{status} · актуально {current}/{total} · "
+                    f"{format_bytes(int(root.get('current_bytes', 0)))}"
+                )
+                detail.setProperty("muted", True)
+                if degraded:
+                    detail.setStyleSheet("color: #f5bd4f;")
+                box.addWidget(title)
+                box.addWidget(detail)
+                checked = root.get("last_checked_at")
+                if checked:
+                    verified = QLabel(f"Последняя проверка: {checked}")
+                    verified.setProperty("muted", True)
+                    box.addWidget(verified)
+                self.mirror_rows.addWidget(card)
+        if self.mirror_job_rows is None:
+            return
+        clear_layout(self.mirror_job_rows)
+        if not jobs:
+            self._add_muted(self.mirror_job_rows, "Проверок зеркала пока не запускали.")
+            return
+        status_labels = {
+            "queued": "В очереди",
+            "running": "Проверяется",
+            "completed": "Зеркало исправно",
+            "failed": "Остались ошибки",
+            "cancelled": "Остановлено",
+        }
+        for job in jobs:
+            card = QFrame()
+            card.setProperty("card", True)
+            box = QVBoxLayout(card)
+            title = QLabel(f"Проверка · {job['target_root_id']}")
+            title.setStyleSheet("font-weight: 700;")
+            detail = QLabel(
+                f"{status_labels.get(job['status'], job['status'])} · "
+                f"обработано {job.get('processed_files', 0)}/{job.get('total_files', 0)} · "
+                f"исправлено {job.get('repaired_files', 0)} · ошибок {job.get('failed_files', 0)}"
+            )
+            detail.setProperty("muted", True)
+            box.addWidget(title)
+            box.addWidget(detail)
+            if job.get("error"):
+                error = QLabel(str(job["error"]))
+                error.setWordWrap(True)
+                error.setStyleSheet("color: #e2383f;")
+                box.addWidget(error)
+            controls = QHBoxLayout()
+            if job["status"] in {"failed", "cancelled"}:
+                resume = QPushButton("Проверить снова")
+                resume.clicked.connect(
+                    lambda _checked=False, job_id=job["id"]: self.mirror_resume_requested.emit(
+                        job_id
+                    )
+                )
+                controls.addWidget(resume)
+            if job["status"] in {"queued", "running"}:
+                cancel = QPushButton("Остановить")
+                cancel.clicked.connect(
+                    lambda _checked=False, job_id=job["id"]: self.mirror_cancel_requested.emit(
+                        job_id
+                    )
+                )
+                controls.addWidget(cancel)
+            controls.addStretch()
+            box.addLayout(controls)
+            self.mirror_job_rows.addWidget(card)
+
+    def _update_maintenance(
+        self,
+        roots: list[dict],
+        jobs: list[dict],
+        online: bool,
+    ) -> None:
+        if self.migration_source is not None and self.migration_target is not None:
+            previous_source = self.migration_source.currentData()
+            previous_target = self.migration_target.currentData()
+            self.migration_source.clear()
+            self.migration_target.clear()
+            for root in roots:
+                label = f"{root.get('disk_id') or root['id']} · {root['path']}"
+                if not root.get("write_enabled", True):
+                    self.migration_source.addItem(label, root["id"])
+                if root.get("write_enabled", True):
+                    self.migration_target.addItem(label, root["id"])
+            source_index = self.migration_source.findData(previous_source)
+            target_index = self.migration_target.findData(previous_target)
+            if source_index >= 0:
+                self.migration_source.setCurrentIndex(source_index)
+            if target_index >= 0:
+                self.migration_target.setCurrentIndex(target_index)
+            if self.migration_start_button is not None:
+                self.migration_start_button.setEnabled(
+                    online
+                    and self.migration_source.count() > 0
+                    and self.migration_target.count() > 0
+                )
+        if self.maintenance_rows is None:
+            return
+        clear_layout(self.maintenance_rows)
+        if not online:
+            self._add_muted(self.maintenance_rows, "Запустите Core для заданий обслуживания.")
+            return
+        if not jobs:
+            self._add_muted(self.maintenance_rows, "Заданий переноса пока нет.")
+            return
+        status_labels = {
+            "queued": "В очереди",
+            "running": "Выполняется",
+            "completed": "Завершено",
+            "failed": "Ошибка",
+            "cancelled": "Отменено",
+        }
+        for job in jobs:
+            card = QFrame()
+            card.setProperty("card", True)
+            card_layout = QVBoxLayout(card)
+            title = QLabel(f"Перенос {job['source_root_id']} → {job['target_root_id']}")
+            title.setStyleSheet("font-weight: 700;")
+            total = int(job.get("total_bytes", 0))
+            processed = int(job.get("processed_bytes", 0))
+            detail = QLabel(
+                f"{status_labels.get(job['status'], job['status'])} · "
+                f"{format_bytes(processed)} из {format_bytes(total)} · "
+                f"объектов {job.get('processed_files', 0)}/{job.get('total_files', 0)}"
+            )
+            detail.setProperty("muted", True)
+            progress = QProgressBar()
+            progress.setRange(0, 100)
+            progress.setValue(
+                round(processed / total * 100)
+                if total
+                else (100 if job["status"] == "completed" else 0)
+            )
+            card_layout.addWidget(title)
+            card_layout.addWidget(detail)
+            card_layout.addWidget(progress)
+            if job.get("error"):
+                error = QLabel(str(job["error"]))
+                error.setWordWrap(True)
+                error.setStyleSheet("color: #e2383f;")
+                card_layout.addWidget(error)
+            controls = QHBoxLayout()
+            if job["status"] in {"failed", "cancelled"}:
+                resume = QPushButton("Продолжить")
+                resume.clicked.connect(
+                    lambda _checked=False, job_id=job["id"]: (
+                        self.maintenance_resume_requested.emit(job_id)
+                    )
+                )
+                controls.addWidget(resume)
+            if job["status"] in {"queued", "running"}:
+                cancel = QPushButton("Отменить")
+                cancel.clicked.connect(
+                    lambda _checked=False, job_id=job["id"]: (
+                        self.maintenance_cancel_requested.emit(job_id)
+                    )
+                )
+                controls.addWidget(cancel)
+            controls.addStretch()
+            card_layout.addLayout(controls)
+            self.maintenance_rows.addWidget(card)
+
+    def load_settings(self, settings: AppSettings, config_path: str) -> None:
+        self._current_settings = settings
+        self.server_name.setText(settings.server_name)
+        self.notifications.setChecked(settings.notifications_enabled)
+        self.refresh_interval.setValue(settings.refresh_interval_seconds)
+        self.lan_enabled.setChecked(settings.lan_enabled)
+        self.lan_port.setValue(settings.lan_port)
+        self.config_path.setText(config_path)
+        if self.server_state_label is not None:
+            self.server_state_label.setText(
+                "Настройка завершена" if settings.setup_complete else "Ожидает настройки"
+            )
+        self.mode.blockSignals(True)
+        self.mode.setCurrentIndex(1 if settings.advanced_mode else 0)
+        self.mode.blockSignals(False)
+        self._rebuild_sections()
+
+    def _mode_changed(self) -> None:
+        self._rebuild_sections()
+        self.advanced_mode_changed.emit(bool(self.mode.currentData()))
+
+    def _rebuild_sections(self) -> None:
+        previous = (
+            self.section_list.currentItem().text() if self.section_list.currentItem() else "Сервер"
+        )
+        advanced = bool(self.mode.currentData())
+        self.section_list.blockSignals(True)
+        self.section_list.clear()
+        while self.stack.count():
+            widget = self.stack.widget(0)
+            self.stack.removeWidget(widget)
+        selected_row = 0
+        for name, advanced_only in self._SECTIONS:
+            if advanced_only and not advanced:
+                continue
+            self.section_list.addItem(QListWidgetItem(name))
+            self.stack.addWidget(self._pages_by_name[name])
+            if name == previous:
+                selected_row = self.section_list.count() - 1
+        self.section_list.blockSignals(False)
+        self.section_list.setCurrentRow(selected_row)
+        self.stack.setCurrentIndex(selected_row)
+
+    def _make_section(self, name: str) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        title = QLabel(name)
+        title.setObjectName("PageTitle")
+        layout.addWidget(title)
+        if name == "Сервер":
+            form = QFormLayout()
+            form.setVerticalSpacing(14)
+            form.addRow("Название сервера", self.server_name)
+            self.server_state_label = QLabel(
+                "Настройка завершена"
+                if self._current_settings.setup_complete
+                else "Ожидает настройки"
+            )
+            form.addRow("Состояние", self.server_state_label)
+            self.core_status_label = QLabel("Выключено")
+            form.addRow("Серверное ядро", self.core_status_label)
+            layout.addLayout(form)
+            self.core_details_label = QLabel(
+                "Ядро запускается отдельным процессом и продолжает работу после закрытия менеджера."
+            )
+            self.core_details_label.setProperty("muted", True)
+            self.core_details_label.setWordWrap(True)
+            layout.addWidget(self.core_details_label)
+            controls = QHBoxLayout()
+            self.core_start_button = QPushButton("Запустить ядро")
+            self.core_start_button.setProperty("primary", True)
+            self.core_start_button.clicked.connect(self.core_start_requested)
+            self.core_stop_button = QPushButton("Остановить ядро")
+            self.core_stop_button.setEnabled(False)
+            self.core_stop_button.clicked.connect(self.core_stop_requested)
+            refresh_core = QPushButton("Обновить состояние")
+            refresh_core.clicked.connect(self.core_refresh_requested)
+            controls.addWidget(self.core_start_button)
+            controls.addWidget(self.core_stop_button)
+            controls.addWidget(refresh_core)
+            controls.addStretch()
+            layout.addLayout(controls)
+        elif name == "Пользователи":
+            top = QHBoxLayout()
+            description = QLabel("Личные пространства, квоты и одноразовые приглашения.")
+            description.setProperty("muted", True)
+            top.addWidget(description, 1)
+            add = QPushButton("Добавить пользователя")
+            add.setProperty("primary", True)
+            add.clicked.connect(self.add_user_requested)
+            top.addWidget(add)
+            layout.addLayout(top)
+            self.users_rows = QVBoxLayout()
+            layout.addLayout(self.users_rows)
+        elif name == "Доверенные устройства":
+            description = QLabel(
+                "Каждое устройство имеет отдельный отзывный токен. Отзыв действует сразу."
+            )
+            description.setProperty("muted", True)
+            description.setWordWrap(True)
+            layout.addWidget(description)
+            self.trusted_device_rows = QVBoxLayout()
+            layout.addLayout(self.trusted_device_rows)
+        elif name == "Подключение устройств":
+            description = QLabel(
+                "Устройства, которые ввели одноразовый код, остаются заблокированными до подтверждения."
+            )
+            description.setProperty("muted", True)
+            description.setWordWrap(True)
+            layout.addWidget(description)
+            self.pending_device_rows = QVBoxLayout()
+            layout.addLayout(self.pending_device_rows)
+        elif name == "Уведомления":
+            layout.addWidget(self.notifications)
+        elif name == "Интерфейс":
+            form = QFormLayout()
+            form.addRow("Обновлять данные каждые", self.refresh_interval)
+            layout.addLayout(form)
+        elif name == "Сеть":
+            self.lan_status_label = QLabel("Выключен")
+            self.lan_details_label = QLabel(
+                "После включения Core создаст постоянный сертификат и отдельный HTTPS-вход для клиентов."
+            )
+            self.lan_details_label.setProperty("muted", True)
+            self.lan_details_label.setWordWrap(True)
+            form = QFormLayout()
+            form.setVerticalSpacing(14)
+            form.addRow("Состояние", self.lan_status_label)
+            form.addRow("HTTPS-порт", self.lan_port)
+            layout.addWidget(self.lan_enabled)
+            layout.addLayout(form)
+            layout.addWidget(self.lan_details_label)
+            boundary = QFrame()
+            boundary.setProperty("accent", "blue")
+            boundary_layout = QVBoxLayout(boundary)
+            boundary_title = QLabel("Административный API остаётся локальным")
+            boundary_title.setStyleSheet("font-weight: 700;")
+            boundary_text = QLabel(
+                "Через сетевой HTTPS-порт доступны только подключение устройства и файловые функции. "
+                "Настройки сервера, пользователи и команды остановки с него скрыты. В Windows при первом "
+                "запуске разрешите доступ только для частных сетей."
+            )
+            boundary_text.setProperty("muted", True)
+            boundary_text.setWordWrap(True)
+            boundary_layout.addWidget(boundary_title)
+            boundary_layout.addWidget(boundary_text)
+            layout.addWidget(boundary)
+        elif name == "Диагностика":
+            info = QLabel("Файл конфигурации")
+            info.setProperty("muted", True)
+            layout.addWidget(info)
+            layout.addWidget(self.config_path)
+            refresh = QPushButton("Повторить обнаружение дисков")
+            refresh.clicked.connect(self.refresh_requested)
+            layout.addWidget(refresh, alignment=Qt.AlignmentFlag.AlignLeft)
+        elif name == "Безопасность":
+            card = QFrame()
+            card.setProperty("accent", "blue")
+            card_layout = QVBoxLayout(card)
+            heading = QLabel("Политика загруженных файлов")
+            heading.setStyleSheet("font-weight: 700; font-size: 16px;")
+            body = QLabel(
+                "Серверное ядро хранит загрузки как данные: без запуска на сервере, "
+                "с удалёнными флагами выполнения, атомарной фиксацией и выдачей только "
+                "на чтение. Файловый API Beta 0.2 уже применяет эту политику."
+            )
+            body.setWordWrap(True)
+            body.setProperty("muted", True)
+            card_layout.addWidget(heading)
+            card_layout.addWidget(body)
+            layout.addWidget(card)
+        elif name == "Хранилище":
+            body = QLabel(
+                "Порог заполнения, минимальный резерв и приоритет записи задаются отдельно "
+                "для каждого диска на его подробной странице."
+            )
+            body.setWordWrap(True)
+            layout.addWidget(body)
+        elif name == "Диски":
+            body = QLabel(
+                "Менеджер только читает системные сведения. Форматирование, разметка и "
+                "перенос существующих файлов намеренно отсутствуют в Beta 0.2."
+            )
+            body.setWordWrap(True)
+            layout.addWidget(body)
+        elif name == "Автоматизация":
+            description = QLabel(
+                "Каждая новая версия файла автоматически копируется на активные диски с ролью "
+                "«Зеркало». Ошибка зеркала не блокирует загрузку: Core отмечает деградацию, а "
+                "проверка ниже сверяет SHA-256 и восстанавливает отсутствующие или повреждённые реплики."
+            )
+            description.setWordWrap(True)
+            description.setProperty("muted", True)
+            layout.addWidget(description)
+            form = QFormLayout()
+            self.mirror_target = QComboBox()
+            form.addRow("Зеркальный диск", self.mirror_target)
+            layout.addLayout(form)
+            controls = QHBoxLayout()
+            self.mirror_start_button = QPushButton("Проверить и восстановить зеркало")
+            self.mirror_start_button.setProperty("primary", True)
+            self.mirror_start_button.setEnabled(False)
+            self.mirror_start_button.clicked.connect(self._emit_mirror_reconcile)
+            refresh_mirrors = QPushButton("Обновить")
+            refresh_mirrors.clicked.connect(self.maintenance_refresh_requested)
+            controls.addWidget(self.mirror_start_button)
+            controls.addWidget(refresh_mirrors)
+            controls.addStretch()
+            layout.addLayout(controls)
+            self.mirror_rows = QVBoxLayout()
+            layout.addLayout(self.mirror_rows)
+            jobs_title = QLabel("Последние проверки")
+            jobs_title.setStyleSheet("font-weight: 700; margin-top: 8px;")
+            layout.addWidget(jobs_title)
+            self.mirror_job_rows = QVBoxLayout()
+            layout.addLayout(self.mirror_job_rows)
+        elif name == "Резервные копии":
+            description = QLabel(
+                "Снимок содержит согласованную SQLite-копию метаданных, manifest.json и все "
+                "текущие объекты вместе с историей версий. Готовым он считается только после "
+                "проверки размера и SHA-256 каждого файла."
+            )
+            description.setWordWrap(True)
+            description.setProperty("muted", True)
+            layout.addWidget(description)
+            form = QFormLayout()
+            self.backup_target = QComboBox()
+            form.addRow("Диск с ролью «Резервные копии»", self.backup_target)
+            layout.addLayout(form)
+            controls = QHBoxLayout()
+            self.backup_start_button = QPushButton("Создать проверенный снимок")
+            self.backup_start_button.setProperty("primary", True)
+            self.backup_start_button.setEnabled(False)
+            self.backup_start_button.clicked.connect(self._emit_backup)
+            refresh = QPushButton("Обновить")
+            refresh.clicked.connect(self.maintenance_refresh_requested)
+            controls.addWidget(self.backup_start_button)
+            controls.addWidget(refresh)
+            controls.addStretch()
+            layout.addLayout(controls)
+            self.backup_rows = QVBoxLayout()
+            layout.addLayout(self.backup_rows)
+        elif name == "Обслуживание":
+            description = QLabel(
+                "Безопасный перенос доступен только с диска, где новые записи приостановлены, "
+                "на активный диск. Каждый объект проверяется по размеру и SHA-256; исходная копия "
+                "остаётся на месте как страховочная."
+            )
+            description.setWordWrap(True)
+            description.setProperty("muted", True)
+            layout.addWidget(description)
+            form = QFormLayout()
+            self.migration_source = QComboBox()
+            self.migration_target = QComboBox()
+            form.addRow("Источник (запись на паузе)", self.migration_source)
+            form.addRow("Целевой активный диск", self.migration_target)
+            layout.addLayout(form)
+            controls = QHBoxLayout()
+            self.migration_start_button = QPushButton("Начать проверяемый перенос")
+            self.migration_start_button.setProperty("primary", True)
+            self.migration_start_button.setEnabled(False)
+            self.migration_start_button.clicked.connect(self._emit_migration)
+            refresh_jobs = QPushButton("Обновить задания")
+            refresh_jobs.clicked.connect(self.maintenance_refresh_requested)
+            controls.addWidget(self.migration_start_button)
+            controls.addWidget(refresh_jobs)
+            controls.addStretch()
+            layout.addLayout(controls)
+            self.maintenance_rows = QVBoxLayout()
+            layout.addLayout(self.maintenance_rows)
+        else:
+            stage = "этапе 4" if name in {"Резервные копии", "Автоматизация"} else "этапе 2"
+            body = QLabel(
+                f"Раздел подготовлен в архитектуре и станет активным на {stage}. "
+                "Неактивные функции не показывают фиктивные данные."
+            )
+            body.setWordWrap(True)
+            body.setProperty("muted", True)
+            layout.addWidget(body)
+        layout.addStretch()
+        return page
+
+    def _emit_migration(self) -> None:
+        if self.migration_source is None or self.migration_target is None:
+            return
+        source = self.migration_source.currentData()
+        target = self.migration_target.currentData()
+        if source and target:
+            self.migration_requested.emit(str(source), str(target))
+
+    def _emit_backup(self) -> None:
+        if self.backup_target is not None and self.backup_target.currentData():
+            self.backup_requested.emit(str(self.backup_target.currentData()))
+
+    def _emit_mirror_reconcile(self) -> None:
+        if self.mirror_target is not None and self.mirror_target.currentData():
+            self.mirror_reconcile_requested.emit(str(self.mirror_target.currentData()))
+
+    @staticmethod
+    def _add_muted(layout: QVBoxLayout, text: str) -> None:
+        label = QLabel(text)
+        label.setProperty("muted", True)
+        layout.addWidget(label)
+        label.show()
+
+    def _add_device_card(self, layout: QVBoxLayout, device: dict, pending: bool) -> None:
+        card = QFrame()
+        card.setProperty("card", True)
+        row = QHBoxLayout(card)
+        text = QVBoxLayout()
+        title = QLabel(device["name"])
+        title.setStyleSheet("font-weight: 700; font-size: 16px;")
+        detail = QLabel(f"{device['user_display_name']} · {device['platform']}")
+        detail.setProperty("muted", True)
+        text.addWidget(title)
+        text.addWidget(detail)
+        row.addLayout(text, 1)
+        if pending:
+            reject = QPushButton("Отклонить")
+            reject.clicked.connect(
+                lambda checked=False, device_id=device["id"]: self.revoke_device_requested.emit(
+                    device_id
+                )
+            )
+            approve = QPushButton("Подтвердить")
+            approve.setProperty("primary", True)
+            approve.clicked.connect(
+                lambda checked=False, device_id=device["id"]: self.approve_device_requested.emit(
+                    device_id
+                )
+            )
+            row.addWidget(reject)
+            row.addWidget(approve)
+        else:
+            revoke = QPushButton("Отключить")
+            revoke.clicked.connect(
+                lambda checked=False, device_id=device["id"]: self.revoke_device_requested.emit(
+                    device_id
+                )
+            )
+            row.addWidget(revoke)
+        layout.addWidget(card)
+        card.show()
+
+    def _show_section(self, row: int) -> None:
+        if row >= 0:
+            self.stack.setCurrentIndex(row)
+
+    def _emit_save(self) -> None:
+        self.save_requested.emit(
+            {
+                "server_name": self.server_name.text().strip() or "Домашнее облако",
+                "notifications_enabled": self.notifications.isChecked(),
+                "refresh_interval_seconds": self.refresh_interval.value(),
+                "advanced_mode": bool(self.mode.currentData()),
+                "lan_enabled": self.lan_enabled.isChecked(),
+                "lan_port": self.lan_port.value(),
+            }
+        )

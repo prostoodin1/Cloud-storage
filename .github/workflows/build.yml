@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Linux Qt runtime libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0
+      - name: Install project
+        run: python -m pip install -e ".[dev,build]"
+      - name: Lint
+        run: python -m ruff check .
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest
+      - name: Build standalone manager
+        run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageServer.spec
+      - name: Build standalone core
+        run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageCore.spec
+      - name: Build standalone desktop client
+        run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageClient.spec
+      - name: Build Windows service host
+        if: runner.os == 'Windows'
+        run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageWindowsService.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloudStorageServer-${{ runner.os }}
+          path: |
+            dist/CloudStorageServerManager/
+            dist/CloudStorageServerCore/
+            dist/CloudStorageServerService/
+            dist/CloudStorageClient/
+          if-no-files-found: warn

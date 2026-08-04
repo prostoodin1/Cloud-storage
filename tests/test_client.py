@@ -102,7 +102,7 @@ def test_legacy_single_profile_is_migrated_on_save(tmp_path) -> None:
     store.save(migrated)
 
     payload = json.loads(store.path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["active_profile_id"] == "default"
     assert len(payload["profiles"]) == 1
 
@@ -120,7 +120,7 @@ def test_desktop_client_window_smoke(tmp_path) -> None:
     window.reconnect_timer.stop()
     app.processEvents()
 
-    assert window.stack.count() == 5
+    assert window.stack.count() == 6
     assert window.help_page.article_list.count() > 0
     assert window.discover_button.text() == "Найти в сети"
     assert window.remote_login_button.text() == "Войти через интернет"

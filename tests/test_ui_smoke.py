@@ -31,7 +31,7 @@ def test_main_window_smoke(tmp_path) -> None:
     window.refresh_disks()
     app.processEvents()
 
-    assert window.stack.count() == 4
+    assert window.stack.count() == 5
     assert window.help_page.article_list.count() > 0
     assert window.settings_page.lan_port.value() == 8766
     assert window.settings_page.remote_port.value() == 8767

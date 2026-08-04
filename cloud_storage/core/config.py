@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -90,25 +91,57 @@ class CoreConfig:
     @classmethod
     def from_environment(cls) -> CoreConfig:
         data_directory = default_core_data_directory()
-        host = os.environ.get("CLOUD_STORAGE_CORE_HOST", "127.0.0.1")
-        port = int(os.environ.get("CLOUD_STORAGE_CORE_PORT", "8765"))
-        lan_enabled = _environment_bool("CLOUD_STORAGE_LAN_ENABLED", False)
-        lan_host = os.environ.get("CLOUD_STORAGE_LAN_HOST", "0.0.0.0")
-        lan_port = int(os.environ.get("CLOUD_STORAGE_LAN_PORT", "8766"))
-        discovery_port = int(os.environ.get("CLOUD_STORAGE_DISCOVERY_PORT", "47777"))
-        remote_enabled = _environment_bool("CLOUD_STORAGE_REMOTE_ENABLED", False)
-        remote_host = os.environ.get("CLOUD_STORAGE_REMOTE_HOST", "0.0.0.0")
-        remote_port = int(os.environ.get("CLOUD_STORAGE_REMOTE_PORT", "8767"))
-        remote_public_url = os.environ.get("CLOUD_STORAGE_REMOTE_PUBLIC_URL", "").strip()
-        remote_pairing_enabled = _environment_bool(
-            "CLOUD_STORAGE_REMOTE_PAIRING_ENABLED", False
+        persisted = _load_persisted_config(data_directory / "core-config.json")
+        host = os.environ.get("CLOUD_STORAGE_CORE_HOST", str(persisted.get("host", "127.0.0.1")))
+        port = int(os.environ.get("CLOUD_STORAGE_CORE_PORT", str(persisted.get("port", 8765))))
+        lan_enabled = _environment_bool(
+            "CLOUD_STORAGE_LAN_ENABLED", bool(persisted.get("lan_enabled", False))
         )
-        zrok_enabled = _environment_bool("CLOUD_STORAGE_ZROK_ENABLED", False)
-        zrok_host = os.environ.get("CLOUD_STORAGE_ZROK_HOST", "127.0.0.1")
-        zrok_port = int(os.environ.get("CLOUD_STORAGE_ZROK_PORT", "8768"))
-        zrok_executable = os.environ.get("CLOUD_STORAGE_ZROK_EXECUTABLE", "zrok").strip()
-        zrok_share_name = os.environ.get("CLOUD_STORAGE_ZROK_SHARE_NAME", "").strip()
-        server_name = os.environ.get("CLOUD_STORAGE_SERVER_NAME", "Домашнее облако").strip()
+        lan_host = os.environ.get(
+            "CLOUD_STORAGE_LAN_HOST", str(persisted.get("lan_host", "0.0.0.0"))
+        )
+        lan_port = int(
+            os.environ.get("CLOUD_STORAGE_LAN_PORT", str(persisted.get("lan_port", 8766)))
+        )
+        discovery_port = int(
+            os.environ.get(
+                "CLOUD_STORAGE_DISCOVERY_PORT", str(persisted.get("discovery_port", 47777))
+            )
+        )
+        remote_enabled = _environment_bool(
+            "CLOUD_STORAGE_REMOTE_ENABLED", bool(persisted.get("remote_enabled", False))
+        )
+        remote_host = os.environ.get(
+            "CLOUD_STORAGE_REMOTE_HOST", str(persisted.get("remote_host", "0.0.0.0"))
+        )
+        remote_port = int(
+            os.environ.get("CLOUD_STORAGE_REMOTE_PORT", str(persisted.get("remote_port", 8767)))
+        )
+        remote_public_url = os.environ.get(
+            "CLOUD_STORAGE_REMOTE_PUBLIC_URL", str(persisted.get("remote_public_url", ""))
+        ).strip()
+        remote_pairing_enabled = _environment_bool(
+            "CLOUD_STORAGE_REMOTE_PAIRING_ENABLED",
+            bool(persisted.get("remote_pairing_enabled", False)),
+        )
+        zrok_enabled = _environment_bool(
+            "CLOUD_STORAGE_ZROK_ENABLED", bool(persisted.get("zrok_enabled", False))
+        )
+        zrok_host = os.environ.get(
+            "CLOUD_STORAGE_ZROK_HOST", str(persisted.get("zrok_host", "127.0.0.1"))
+        )
+        zrok_port = int(
+            os.environ.get("CLOUD_STORAGE_ZROK_PORT", str(persisted.get("zrok_port", 8768)))
+        )
+        zrok_executable = os.environ.get(
+            "CLOUD_STORAGE_ZROK_EXECUTABLE", str(persisted.get("zrok_executable", "zrok"))
+        ).strip()
+        zrok_share_name = os.environ.get(
+            "CLOUD_STORAGE_ZROK_SHARE_NAME", str(persisted.get("zrok_share_name", ""))
+        ).strip()
+        server_name = os.environ.get(
+            "CLOUD_STORAGE_SERVER_NAME", str(persisted.get("server_name", "Домашнее облако"))
+        ).strip()
         max_upload_gib = int(os.environ.get("CLOUD_STORAGE_MAX_UPLOAD_GIB", "20"))
         if not server_name:
             server_name = "Домашнее облако"
@@ -151,6 +184,10 @@ class CoreConfig:
         return self.data_directory / "core.log"
 
     @property
+    def persisted_config_path(self) -> Path:
+        return self.data_directory / "core-config.json"
+
+    @property
     def tls_certificate_path(self) -> Path:
         return self.data_directory / "tls" / "server-cert.pem"
 
@@ -173,6 +210,44 @@ class CoreConfig:
             self.data_directory.chmod(0o700)
             self.default_storage_root.chmod(0o700)
 
+    def persist(self) -> None:
+        """Persist non-secret service settings atomically for reboot-safe startup."""
+        self.ensure_directories()
+        payload = {
+            "schema_version": 1,
+            "host": self.host,
+            "port": self.port,
+            "lan_enabled": self.lan_enabled,
+            "lan_host": self.lan_host,
+            "lan_port": self.lan_port,
+            "discovery_port": self.discovery_port,
+            "remote_enabled": self.remote_enabled,
+            "remote_host": self.remote_host,
+            "remote_port": self.remote_port,
+            "remote_public_url": self.remote_public_url,
+            "remote_pairing_enabled": self.remote_pairing_enabled,
+            "zrok_enabled": self.zrok_enabled,
+            "zrok_host": self.zrok_host,
+            "zrok_port": self.zrok_port,
+            "zrok_executable": self.zrok_executable,
+            "zrok_share_name": self.zrok_share_name,
+            "server_name": self.server_name,
+        }
+        descriptor, name = tempfile.mkstemp(
+            prefix="core-config-", suffix=".tmp", dir=self.data_directory
+        )
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if os.name != "nt":
+                temporary.chmod(0o600)
+            os.replace(temporary, self.persisted_config_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
 
 def _environment_bool(name: str, default: bool) -> bool:
     value = os.environ.get(name)
@@ -184,6 +259,18 @@ def _environment_bool(name: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be true or false")
+
+
+def _load_persisted_config(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or value.get("schema_version") != 1:
+            return {}
+        return value
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
 
 
 def default_core_data_directory() -> Path:

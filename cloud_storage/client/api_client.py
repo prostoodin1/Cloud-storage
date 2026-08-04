@@ -111,6 +111,38 @@ class ClientApi:
             f"/v1/spaces/{urllib.parse.quote(space_id, safe='')}/entries?{query}"
         )
 
+    def create_directory(self, space_id: str, logical_path: str) -> dict[str, Any]:
+        return self._json_request(
+            f"/v1/spaces/{urllib.parse.quote(space_id, safe='')}/directories",
+            method="POST",
+            payload={"logical_path": logical_path},
+        )
+
+    def delete_directory(self, space_id: str, logical_path: str) -> bool:
+        result = self._json_request(
+            f"/v1/spaces/{urllib.parse.quote(space_id, safe='')}/directories/"
+            f"{urllib.parse.quote(logical_path, safe='/')}",
+            method="DELETE",
+        )
+        return bool(result.get("deleted"))
+
+    def move_entry(
+        self,
+        space_id: str,
+        source_path: str,
+        destination_path: str,
+        kind: str,
+    ) -> dict[str, Any]:
+        return self._json_request(
+            f"/v1/spaces/{urllib.parse.quote(space_id, safe='')}/moves",
+            method="POST",
+            payload={
+                "source_path": source_path,
+                "destination_path": destination_path,
+                "kind": kind,
+            },
+        )
+
     def upload_file(
         self,
         space_id: str,

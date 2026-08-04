@@ -47,6 +47,7 @@ from cloud_storage.ui.dialogs import (
     SetupDialog,
 )
 from cloud_storage.ui.pages import DashboardPage, DisksPage, SettingsPage
+from cloud_storage.ui.update_page import UpdatePage
 
 
 class MainWindow(QMainWindow):
@@ -161,11 +162,17 @@ class MainWindow(QMainWindow):
         self.dashboard_page = DashboardPage()
         self.disks_page = DisksPage()
         self.settings_page = SettingsPage()
+        self.update_page = UpdatePage(
+            "server",
+            self.store.data_directory,
+            before_install=self._prepare_server_update,
+        )
         self.help_page = HelpPage(self.knowledge, "server")
         for label, page in (
             ("⌂   Основная", self.dashboard_page),
             ("▣   Диски", self.disks_page),
             ("⚙   Настройки", self.settings_page),
+            ("↻   Обновления", self.update_page),
             ("?   Помощь", self.help_page),
         ):
             button = QPushButton(label)
@@ -264,6 +271,17 @@ class MainWindow(QMainWindow):
             self.acknowledge_notification
         )
         self.settings_page.integration_test_requested.connect(self.test_integration)
+
+    def _prepare_server_update(self) -> None:
+        if self.core_health is None:
+            return
+        try:
+            stopped = self.core_supervisor.stop()
+        except (CoreApiError, CoreUnavailable, OSError) as exc:
+            raise OSError(f"Не удалось остановить сервер перед обновлением: {exc}") from exc
+        if not stopped:
+            raise OSError("Сервер не остановился перед обновлением")
+        self.core_health = None
 
     def _show_page(self, page: QWidget) -> None:
         self.stack.setCurrentWidget(page)

@@ -1,0 +1,15 @@
+Cloud Storage third-party notices
+=================================
+
+WinFsp 2025 (2.1.25156)
+Copyright (C) Bill Zissimopoulos / Navimatics LLC.
+License: GPLv3 with the WinFsp licensing exception for Free/Libre and Open Source Software.
+Source and license: https://github.com/winfsp/winfsp
+
+go-winfsp
+Copyright (c) 2017-2022 aegistudio and contributors.
+License: MIT.
+Source and license: https://github.com/winfsp/go-winfsp
+
+The complete Python dependency set and its license metadata remain available in the
+source distribution at https://github.com/prostoodin1/Cloud-storage.

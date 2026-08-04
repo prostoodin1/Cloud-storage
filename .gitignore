@@ -9,5 +9,7 @@ dist/
 work/
 *.spec.local
 *.log
+outputs/
+packaging/third_party/
 .idea/
 .vscode/

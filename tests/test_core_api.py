@@ -1154,6 +1154,71 @@ def test_personal_file_upload_update_download_and_soft_delete(tmp_path) -> None:
     assert client.get(f"/v1/spaces/{space['id']}/entries", headers=device_headers).json() == []
 
 
+def test_windows_drive_directory_create_move_and_delete_round_trip(tmp_path) -> None:
+    _, client, _, device_headers, _, space, _ = provision_trusted_device(tmp_path)
+    base = f"/v1/spaces/{space['id']}"
+
+    created = client.post(
+        f"{base}/directories",
+        headers=device_headers,
+        json={"logical_path": "Фото/Лето 2026"},
+    )
+    assert created.status_code == 201
+    assert client.put(
+        f"{base}/files/Фото/Лето%202026/море.txt",
+        headers=device_headers,
+        content=b"sea",
+    ).status_code == 201
+    moved_file = client.post(
+        f"{base}/moves",
+        headers=device_headers,
+        json={
+            "source_path": "Фото/Лето 2026/море.txt",
+            "destination_path": "Фото/Лето 2026/море-final.txt",
+            "kind": "file",
+        },
+    )
+    assert moved_file.status_code == 200
+    moved_directory = client.post(
+        f"{base}/moves",
+        headers=device_headers,
+        json={
+            "source_path": "Фото",
+            "destination_path": "Архив",
+            "kind": "directory",
+        },
+    )
+    assert moved_directory.status_code == 200
+    assert client.get(
+        f"{base}/files/Архив/Лето%202026/море-final.txt", headers=device_headers
+    ).content == b"sea"
+    root_entries = client.get(f"{base}/entries", headers=device_headers).json()
+    assert len(root_entries) == 1
+    assert root_entries[0]["name"] == "Архив"
+    assert root_entries[0]["type"] == "directory"
+
+    assert client.delete(f"{base}/directories/Архив", headers=device_headers).status_code == 409
+    assert client.delete(
+        f"{base}/files/Архив/Лето%202026/море-final.txt", headers=device_headers
+    ).status_code == 200
+    assert client.delete(
+        f"{base}/directories/Архив/Лето%202026", headers=device_headers
+    ).status_code == 200
+    assert client.delete(f"{base}/directories/Архив", headers=device_headers).status_code == 200
+
+    assert client.put(
+        f"{base}/files/blocked", headers=device_headers, content=b"file"
+    ).status_code == 201
+    assert client.post(
+        f"{base}/directories",
+        headers=device_headers,
+        json={"logical_path": "blocked/child"},
+    ).status_code == 409
+    assert client.put(
+        f"{base}/files/blocked/child.txt", headers=device_headers, content=b"no"
+    ).status_code == 409
+
+
 def test_upload_limit_is_enforced_without_partial_file(tmp_path) -> None:
     app, client, _, device_headers, _, space, _ = provision_trusted_device(tmp_path)
     response = client.put(

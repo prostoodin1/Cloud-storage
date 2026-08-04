@@ -150,6 +150,16 @@ class CreateResumableUploadRequest(BaseModel):
     sha256: str | None = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
 
 
+class CreateDirectoryRequest(BaseModel):
+    logical_path: str = Field(min_length=1, max_length=1024)
+
+
+class MoveEntryRequest(BaseModel):
+    source_path: str = Field(min_length=1, max_length=1024)
+    destination_path: str = Field(min_length=1, max_length=1024)
+    kind: str = Field(pattern="^(file|directory)$")
+
+
 class SyncStorageRootsRequest(BaseModel):
     roots: list[StorageRootRequest] = Field(max_length=128)
 
@@ -309,6 +319,9 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             return True
         patterns = (
             r"/v1/spaces/[^/]+/entries",
+            r"/v1/spaces/[^/]+/directories",
+            r"/v1/spaces/[^/]+/directories/.+",
+            r"/v1/spaces/[^/]+/moves",
             r"/v1/spaces/[^/]+/uploads",
             r"/v1/spaces/[^/]+/files/.+",
             r"/v1/uploads/[^/]+",
@@ -1349,6 +1362,44 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         directory: str = Query(default="", max_length=1024),
     ):
         return runtime.storage.list_entries(space_id, device.user_id, directory)
+
+    @app.post(
+        "/v1/spaces/{space_id}/directories",
+        tags=["files"],
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_directory(
+        space_id: str,
+        body: CreateDirectoryRequest,
+        device: DeviceRecord = Depends(require_device),  # noqa: B008
+    ):
+        return runtime.storage.create_directory(space_id, device.user_id, body.logical_path)
+
+    @app.delete("/v1/spaces/{space_id}/directories/{logical_path:path}", tags=["files"])
+    def delete_directory(
+        space_id: str,
+        logical_path: Annotated[str, Path(min_length=1, max_length=1024)],
+        device: DeviceRecord = Depends(require_device),  # noqa: B008
+    ):
+        return {
+            "deleted": runtime.storage.delete_directory(
+                space_id, device.user_id, logical_path
+            )
+        }
+
+    @app.post("/v1/spaces/{space_id}/moves", tags=["files"])
+    def move_entry(
+        space_id: str,
+        body: MoveEntryRequest,
+        device: DeviceRecord = Depends(require_device),  # noqa: B008
+    ):
+        return runtime.storage.move_entry(
+            space_id,
+            device.user_id,
+            body.source_path,
+            body.destination_path,
+            body.kind,
+        )
 
     @app.post(
         "/v1/spaces/{space_id}/uploads",

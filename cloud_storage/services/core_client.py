@@ -450,6 +450,31 @@ class CoreSupervisor:
         if current:
             return current
         self.config.ensure_directories()
+        self.config.persist()
+        if self._windows_service_installed():
+            try:
+                completed = subprocess.run(
+                    ["sc.exe", "start", "CloudStorageServerCore"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                    check=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise CoreUnavailable("Windows service could not be started") from exc
+            if completed.returncode not in {0, 1056}:
+                raise CoreUnavailable(
+                    f"Windows service start failed with code {completed.returncode}"
+                )
+            deadline = time.monotonic() + timeout_seconds
+            while time.monotonic() < deadline:
+                health = self.client.try_health(timeout=0.4)
+                if health:
+                    return health
+                time.sleep(0.15)
+            raise CoreUnavailable("Windows service did not become ready in time")
         command = self._core_command()
         environment = os.environ.copy()
         environment["CLOUD_STORAGE_CORE_DATA_DIR"] = str(self.config.data_directory)
@@ -534,3 +559,21 @@ class CoreSupervisor:
                 raise CoreUnavailable("CloudStorageServerCore executable is missing")
             return [str(executable)]
         return [sys.executable, "-m", "cloud_storage.core"]
+
+    @staticmethod
+    def _windows_service_installed() -> bool:
+        if os.name != "nt" or not getattr(sys, "frozen", False):
+            return False
+        try:
+            result = subprocess.run(
+                ["sc.exe", "query", "CloudStorageServerCore"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False

@@ -44,6 +44,7 @@ from cloud_storage.client.api_client import (
     TransferInterrupted,
 )
 from cloud_storage.client.discovery import DiscoveredServer, discover_servers
+from cloud_storage.client.drive import DriveManager, wait_for_drive
 from cloud_storage.client.integration import (
     autostart_enabled,
     integrate_file_manager,
@@ -62,6 +63,7 @@ from cloud_storage.help.knowledge import KnowledgeBase
 from cloud_storage.help.page import HelpPage
 from cloud_storage.pairing import parse_pairing_uri
 from cloud_storage.ui.theme import create_app_icon
+from cloud_storage.ui.update_page import UpdatePage
 from cloud_storage.ui.widgets import clear_layout, format_bytes, make_header
 
 
@@ -112,6 +114,7 @@ class ClientWindow(QMainWindow):
         self.knowledge = KnowledgeBase(self.store.data_directory / "knowledge.db")
         self.transfer_store = TransferStore(self.store.data_directory / "transfers.db")
         self.offline_store = OfflineStore(self.store.data_directory / "offline.db")
+        self.drive_manager = DriveManager(self.store.data_directory)
         self.transfer_store.recover_interrupted()
         self.token = self.vault.load()
         self.remote_session = self.session_vault.load()
@@ -149,7 +152,12 @@ class ClientWindow(QMainWindow):
         self.transfer_timer.setInterval(500)
         self.transfer_timer.timeout.connect(self._transfer_tick)
         self.transfer_timer.start()
+        self.drive_timer = QTimer(self)
+        self.drive_timer.setInterval(5_000)
+        self.drive_timer.timeout.connect(self._reconcile_drives)
+        self.drive_timer.start()
         QTimer.singleShot(100, self.refresh_connection)
+        QTimer.singleShot(250, self._reconcile_drives)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -186,6 +194,7 @@ class ClientWindow(QMainWindow):
         self.files_page = self._make_files_page()
         self.transfers_page = self._make_transfers_page()
         self.offline_page = self._make_offline_page()
+        self.update_page = UpdatePage("client", self.store.data_directory)
         self.help_page = HelpPage(self.knowledge, "client")
         self.nav_buttons: list[QPushButton] = []
         for label, page in (
@@ -193,6 +202,7 @@ class ClientWindow(QMainWindow):
             ("▣   Мои файлы", self.files_page),
             ("⇅   Передачи", self.transfers_page),
             ("◫   Офлайн", self.offline_page),
+            ("↻   Обновления", self.update_page),
             ("?   Помощь", self.help_page),
         ):
             button = QPushButton(label)
@@ -449,6 +459,39 @@ class ClientWindow(QMainWindow):
         self.integration_status.setWordWrap(True)
         card_layout.addWidget(self.integration_status)
         layout.addWidget(card)
+
+        drive_card = QFrame()
+        drive_card.setProperty("card", True)
+        drive_layout = QVBoxLayout(drive_card)
+        drive_title = QLabel("Диск в Проводнике Windows")
+        drive_title.setStyleSheet("font-weight: 700; font-size: 17px;")
+        drive_description = QLabel(
+            "Файлы видны как обычный диск, скачиваются при открытии и отправляются на сервер "
+            "после сохранения. Для каждого сервера используется отдельная буква."
+        )
+        drive_description.setProperty("muted", True)
+        drive_description.setWordWrap(True)
+        drive_controls = QHBoxLayout()
+        self.drive_enabled_checkbox = QCheckBox("Подключать автоматически")
+        self.drive_enabled_checkbox.toggled.connect(self._drive_settings_changed)
+        self.drive_letter_selector = QComboBox()
+        for letter in "STUVWXYZRQPONMLKJIHGFED":
+            self.drive_letter_selector.addItem(f"Диск {letter}:", letter)
+        self.drive_letter_selector.currentIndexChanged.connect(self._drive_settings_changed)
+        self.drive_open_button = QPushButton("Открыть диск")
+        self.drive_open_button.clicked.connect(self.open_windows_drive)
+        drive_controls.addWidget(self.drive_enabled_checkbox)
+        drive_controls.addWidget(self.drive_letter_selector)
+        drive_controls.addWidget(self.drive_open_button)
+        drive_controls.addStretch()
+        self.drive_status = QLabel("Диск ещё не подключён")
+        self.drive_status.setProperty("muted", True)
+        self.drive_status.setWordWrap(True)
+        drive_layout.addWidget(drive_title)
+        drive_layout.addWidget(drive_description)
+        drive_layout.addLayout(drive_controls)
+        drive_layout.addWidget(self.drive_status)
+        layout.addWidget(drive_card)
         self.offline_summary = QLabel("Индекс офлайн-файлов пуст")
         self.offline_summary.setProperty("muted", True)
         layout.addWidget(self.offline_summary)
@@ -496,6 +539,17 @@ class ClientWindow(QMainWindow):
         self.device_name.setText(self.profile.device_name or platform.node() or "Мой компьютер")
         self.username.setText(self.profile.username)
         self.cache_path.setText(self.profile.download_directory)
+        self.drive_enabled_checkbox.blockSignals(True)
+        self.drive_enabled_checkbox.setChecked(self.profile.drive_enabled)
+        self.drive_enabled_checkbox.blockSignals(False)
+        self.drive_letter_selector.blockSignals(True)
+        index = self.drive_letter_selector.findData(self.profile.drive_letter)
+        self.drive_letter_selector.setCurrentIndex(max(0, index))
+        self.drive_letter_selector.blockSignals(False)
+        supported = platform.system() == "Windows"
+        self.drive_enabled_checkbox.setEnabled(supported)
+        self.drive_letter_selector.setEnabled(supported and self.profile.drive_enabled)
+        self.drive_open_button.setEnabled(False)
         self.close_to_tray_checkbox.blockSignals(True)
         self.close_to_tray_checkbox.setChecked(self.profile.close_to_tray)
         self.close_to_tray_checkbox.blockSignals(False)
@@ -581,6 +635,8 @@ class ClientWindow(QMainWindow):
                     "paused",
                     "Профиль сервера удалён — передача приостановлена",
                 )
+        removed_profile_id = self.profile.profile_id
+        self.drive_manager.stop(removed_profile_id)
         self.vault.clear()
         self.session_vault.clear()
         profile = self.store.remove_profile(self.profile.profile_id)
@@ -821,6 +877,7 @@ class ClientWindow(QMainWindow):
         if status == "trusted":
             self._set_spaces(payload.get("spaces", []))
             self._start_queued_transfers()
+        self._reconcile_drives()
 
     def _connection_refresh_failed(self, message: str) -> None:
         self._connection_check_running = False
@@ -894,6 +951,7 @@ class ClientWindow(QMainWindow):
                     "Подключение удалено — продолжение приостановлено",
                 )
         self.vault.clear()
+        self.drive_manager.stop(self.profile.profile_id)
         self.session_vault.clear()
         self.token = None
         self.remote_session = None
@@ -920,6 +978,10 @@ class ClientWindow(QMainWindow):
         self.space_selector.setCurrentIndex(selected if spaces else -1)
         self.space_selector.blockSignals(False)
         if spaces:
+            selected_space = str(self.space_selector.itemData(selected) or "")
+            if selected_space and self.profile.last_space_id != selected_space:
+                self.profile.last_space_id = selected_space
+                self.store.save(self.profile)
             self.current_directory = ""
             self.refresh_entries()
         else:
@@ -933,6 +995,7 @@ class ClientWindow(QMainWindow):
         self.store.save(self.profile)
         self.current_directory = ""
         self.refresh_entries()
+        self._reconcile_drives()
 
     def refresh_entries(self) -> None:
         if not self.api or not self.space_selector.currentData():
@@ -1492,6 +1555,54 @@ class ClientWindow(QMainWindow):
         self.profile.close_to_tray = enabled
         self.store.save(self.profile)
 
+    def _drive_settings_changed(self) -> None:
+        self.profile.drive_enabled = self.drive_enabled_checkbox.isChecked()
+        selected = str(self.drive_letter_selector.currentData() or "S")
+        self.profile.drive_letter = selected
+        self.drive_letter_selector.setEnabled(
+            platform.system() == "Windows" and self.profile.drive_enabled
+        )
+        try:
+            self.store.save(self.profile)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Диск не настроен", str(exc))
+            return
+        self._reconcile_drives()
+
+    def _reconcile_drives(self) -> None:
+        if platform.system() != "Windows":
+            self.drive_status.setText("Диски с буквами поддерживаются только в Windows.")
+            self.drive_open_button.setEnabled(False)
+            return
+        statuses = self.drive_manager.reconcile(self.store.list_profiles())
+        status = statuses.get(self.profile.profile_id)
+        if status is None:
+            self.drive_status.setText("Диск отключён в настройках.")
+            self.drive_open_button.setEnabled(False)
+            return
+        labels = {
+            "ready": "Подключён",
+            "starting": "Запускается",
+            "offline": "Сервер недоступен",
+            "error": "Ошибка",
+            "stopped": "Отключён",
+        }
+        label = labels.get(status.state, status.state)
+        detail = f" · {status.detail}" if status.detail else ""
+        self.drive_status.setText(f"{status.drive_letter}: · {label}{detail}")
+        self.drive_open_button.setEnabled(status.state == "ready")
+
+    def open_windows_drive(self) -> None:
+        letter = self.profile.drive_letter.upper().rstrip(":")
+        if not wait_for_drive(letter, timeout_seconds=1):
+            QMessageBox.information(
+                self,
+                "Диск ещё не готов",
+                "Подключение ещё запускается или сервер недоступен.",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(f"{letter}:\\"))
+
     def _setup_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
             self.close_to_tray_checkbox.setEnabled(False)
@@ -1838,6 +1949,8 @@ class ClientWindow(QMainWindow):
         self._shutdown_prepared = True
         self.reconnect_timer.stop()
         self.transfer_timer.stop()
+        self.drive_timer.stop()
+        self.drive_manager.stop_all()
         for transfer_id in tuple(self._active_transfer_ids):
             try:
                 self.transfer_store.set_status(

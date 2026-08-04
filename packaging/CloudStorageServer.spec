@@ -28,6 +28,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    uac_admin=True,
     icon=str(project_root / "assets" / "cloud-storage.ico"),
 )
 coll = COLLECT(

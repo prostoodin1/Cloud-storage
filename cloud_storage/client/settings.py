@@ -23,6 +23,8 @@ class ClientProfile:
     download_directory: str = ""
     last_space_id: str = ""
     close_to_tray: bool = True
+    drive_enabled: bool = True
+    drive_letter: str = "S"
 
     @classmethod
     def from_dict(cls, value: dict | None) -> ClientProfile:
@@ -72,6 +74,7 @@ class ClientSettingsStore:
             profile_id=uuid.uuid4().hex,
             server_name="Новый сервер",
             download_directory=str(default_download_directory()),
+            drive_letter=_next_drive_letter({item.drive_letter for item in profiles}),
         )
         profiles.append(profile)
         self._write_document(profiles, profile.profile_id)
@@ -148,6 +151,7 @@ class ClientSettingsStore:
     def _normalize_profiles(self, profiles: list[ClientProfile]) -> list[ClientProfile]:
         result: list[ClientProfile] = []
         identifiers: set[str] = set()
+        drive_letters: set[str] = set()
         for profile in profiles:
             candidate = re.sub(r"[^a-zA-Z0-9_-]", "", profile.profile_id)[:64]
             if not candidate or candidate in identifiers:
@@ -155,6 +159,11 @@ class ClientSettingsStore:
             profile.profile_id = candidate
             if not profile.download_directory:
                 profile.download_directory = str(default_download_directory())
+            letter = profile.drive_letter.strip().upper().rstrip(":")
+            if not re.fullmatch(r"[D-Z]", letter) or letter in drive_letters:
+                letter = _next_drive_letter(drive_letters)
+            profile.drive_letter = letter
+            drive_letters.add(letter)
             identifiers.add(candidate)
             result.append(profile)
         if not result:
@@ -178,7 +187,7 @@ class ClientSettingsStore:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
                 json.dump(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "active_profile_id": active_profile_id,
                         "profiles": [asdict(item) for item in profiles],
                     },
@@ -327,3 +336,9 @@ def default_download_directory() -> Path:
     downloads = Path.home() / "Downloads"
     base = downloads if downloads.is_dir() else Path.home()
     return base / "Cloud Storage"
+
+
+def _next_drive_letter(used: set[str]) -> str:
+    normalized = {value.strip().upper().rstrip(":") for value in used}
+    preferred = "STUVWXYZRQPONMLKJIHGFED"
+    return next((letter for letter in preferred if letter not in normalized), "S")

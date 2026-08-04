@@ -90,6 +90,15 @@ CREATE TABLE IF NOT EXISTS files (
     UNIQUE(space_id, logical_path)
 );
 
+CREATE TABLE IF NOT EXISTS directories (
+    space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    logical_path TEXT NOT NULL,
+    created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL,
+    modified_at TEXT NOT NULL,
+    PRIMARY KEY(space_id, logical_path)
+);
+
 CREATE TABLE IF NOT EXISTS file_versions (
     id TEXT PRIMARY KEY,
     file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -336,6 +345,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_invitations_user ON invitations(user_id);
 CREATE INDEX IF NOT EXISTS idx_files_space_path ON files(space_id, logical_path);
+CREATE INDEX IF NOT EXISTS idx_directories_space_path ON directories(space_id, logical_path);
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_user ON upload_sessions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_expiry ON upload_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_maintenance_jobs_status ON maintenance_jobs(status, created_at);
@@ -426,6 +436,10 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(9, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
             connection.commit()
 

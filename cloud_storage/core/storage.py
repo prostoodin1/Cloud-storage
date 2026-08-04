@@ -434,6 +434,7 @@ class StorageService:
         self._require_server_writable()
         space = self.repository.require_space_permission(space_id, user_id, write=True)
         logical_path = normalize_logical_path(logical_path)
+        self._require_file_path_available(space_id, logical_path)
         existing = self.find_file(space_id, logical_path, include_deleted=True)
         existing_size = existing.size_bytes if existing and not existing.deleted_at else 0
         used = self.space_usage(space_id)
@@ -470,6 +471,7 @@ class StorageService:
         self._require_server_writable()
         space = self.repository.require_space_permission(space_id, user_id, write=True)
         logical_path = normalize_logical_path(logical_path)
+        self._require_file_path_available(space_id, logical_path)
         if expected_size < 0 or expected_size > self.config.max_upload_bytes:
             raise StorageCapacityError("upload exceeds configured size limit")
         expected_sha256 = (expected_sha256 or "").strip().casefold() or None
@@ -784,6 +786,15 @@ class StorageService:
         else:
             prefix = ""
         with self.database.connection() as connection:
+            directory_rows = connection.execute(
+                """
+                SELECT logical_path, modified_at
+                FROM directories
+                WHERE space_id = ? AND logical_path LIKE ? ESCAPE '\\'
+                ORDER BY logical_path
+                """,
+                (space_id, self._like_prefix(prefix) + "%"),
+            ).fetchall()
             rows = connection.execute(
                 """
                 SELECT id, logical_path, size_bytes, sha256, content_type, version, modified_at
@@ -794,6 +805,14 @@ class StorageService:
                 (space_id, self._like_prefix(prefix) + "%"),
             ).fetchall()
         entries: dict[str, dict[str, Any]] = {}
+        for row in directory_rows:
+            remainder = row["logical_path"][len(prefix) :]
+            name, separator, _ = remainder.partition("/")
+            if not name:
+                continue
+            item = entries.setdefault(name, {"name": name, "type": "directory"})
+            if not separator:
+                item["modified_at"] = row["modified_at"]
         for row in rows:
             remainder = row["logical_path"][len(prefix) :]
             name, separator, _ = remainder.partition("/")
@@ -811,6 +830,227 @@ class StorageService:
                     "modified_at": row["modified_at"],
                 }
         return list(entries.values())
+
+    def create_directory(self, space_id: str, user_id: str, logical_path: str) -> dict[str, Any]:
+        self._require_server_writable()
+        self.repository.require_space_permission(space_id, user_id, write=True)
+        logical_path = normalize_logical_path(logical_path)
+        parts = PurePosixPath(logical_path).parts
+        prefixes = ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
+        now = utc_text()
+        with self.database.transaction() as connection:
+            placeholders = ",".join("?" for _ in prefixes)
+            file_collision = connection.execute(
+                "SELECT logical_path FROM files "
+                f"WHERE space_id = ? AND deleted_at IS NULL AND logical_path IN ({placeholders}) "
+                "LIMIT 1",
+                (space_id, *prefixes),
+            ).fetchone()
+            if file_collision is not None:
+                raise ConflictError("a file already occupies part of this directory path")
+            for index in range(1, len(parts) + 1):
+                current = "/".join(parts[:index])
+                connection.execute(
+                    """
+                    INSERT INTO directories(space_id, logical_path, created_by, created_at, modified_at)
+                    VALUES(?, ?, ?, ?, ?)
+                    ON CONFLICT(space_id, logical_path) DO NOTHING
+                    """,
+                    (space_id, current, user_id, now, now),
+                )
+        self.repository.record_audit(
+            actor_type="user",
+            actor_id=user_id,
+            action="directory.created",
+            target_type="directory",
+            target_id=f"{space_id}:{logical_path}",
+            detail=f"Создан каталог: {logical_path}",
+        )
+        return {"path": logical_path, "type": "directory", "modified_at": now}
+
+    def delete_directory(self, space_id: str, user_id: str, logical_path: str) -> bool:
+        self._require_server_writable()
+        self.repository.require_space_permission(space_id, user_id, write=True)
+        logical_path = normalize_logical_path(logical_path)
+        prefix = logical_path + "/"
+        with self.database.transaction() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM directories WHERE space_id = ? AND logical_path = ?",
+                (space_id, logical_path),
+            ).fetchone()
+            if existing is None:
+                raise NotFoundError("directory not found")
+            child = connection.execute(
+                """
+                SELECT 1 FROM directories
+                WHERE space_id = ? AND logical_path LIKE ? ESCAPE '\\' LIMIT 1
+                """,
+                (space_id, self._like_prefix(prefix) + "%"),
+            ).fetchone()
+            file_child = connection.execute(
+                """
+                SELECT 1 FROM files
+                WHERE space_id = ? AND deleted_at IS NULL
+                  AND logical_path LIKE ? ESCAPE '\\' LIMIT 1
+                """,
+                (space_id, self._like_prefix(prefix) + "%"),
+            ).fetchone()
+            if child is not None or file_child is not None:
+                raise ConflictError("directory is not empty")
+            connection.execute(
+                "DELETE FROM directories WHERE space_id = ? AND logical_path = ?",
+                (space_id, logical_path),
+            )
+        self.repository.record_audit(
+            actor_type="user",
+            actor_id=user_id,
+            action="directory.deleted",
+            target_type="directory",
+            target_id=f"{space_id}:{logical_path}",
+            detail=f"Удалён пустой каталог: {logical_path}",
+        )
+        return True
+
+    def move_entry(
+        self,
+        space_id: str,
+        user_id: str,
+        source_path: str,
+        destination_path: str,
+        kind: str,
+    ) -> dict[str, Any]:
+        self._require_server_writable()
+        self.repository.require_space_permission(space_id, user_id, write=True)
+        source_path = normalize_logical_path(source_path)
+        destination_path = normalize_logical_path(destination_path)
+        if source_path == destination_path:
+            return {"source_path": source_path, "destination_path": destination_path, "type": kind}
+        if kind not in {"file", "directory"}:
+            raise ValueError("entry type must be file or directory")
+        if kind == "directory" and destination_path.startswith(source_path + "/"):
+            raise ConflictError("directory cannot be moved into itself")
+        now = utc_text()
+        with self.database.transaction() as connection:
+            self._require_destination_available(connection, space_id, destination_path)
+            if kind == "file":
+                changed = connection.execute(
+                    """
+                    UPDATE files SET logical_path = ?, modified_at = ?
+                    WHERE space_id = ? AND logical_path = ? AND deleted_at IS NULL
+                    """,
+                    (destination_path, now, space_id, source_path),
+                )
+                if changed.rowcount != 1:
+                    raise NotFoundError("file not found")
+            else:
+                directory = connection.execute(
+                    "SELECT 1 FROM directories WHERE space_id = ? AND logical_path = ?",
+                    (space_id, source_path),
+                ).fetchone()
+                if directory is None:
+                    raise NotFoundError("directory not found")
+                source_prefix = source_path + "/"
+                destination_prefix = destination_path + "/"
+                nested_directories = connection.execute(
+                    """
+                    SELECT logical_path FROM directories
+                    WHERE space_id = ? AND logical_path LIKE ? ESCAPE '\\'
+                    """,
+                    (space_id, self._like_prefix(source_prefix) + "%"),
+                ).fetchall()
+                nested_files = connection.execute(
+                    """
+                    SELECT logical_path FROM files
+                    WHERE space_id = ? AND deleted_at IS NULL
+                      AND logical_path LIKE ? ESCAPE '\\'
+                    """,
+                    (space_id, self._like_prefix(source_prefix) + "%"),
+                ).fetchall()
+                destinations = [
+                    destination_prefix + row["logical_path"][len(source_prefix) :]
+                    for row in [*nested_directories, *nested_files]
+                ]
+                for target in destinations:
+                    self._require_destination_available(connection, space_id, target)
+                connection.execute(
+                    "UPDATE directories SET logical_path = ?, modified_at = ? "
+                    "WHERE space_id = ? AND logical_path = ?",
+                    (destination_path, now, space_id, source_path),
+                )
+                for row in sorted(nested_directories, key=lambda item: len(item["logical_path"])):
+                    target = destination_prefix + row["logical_path"][len(source_prefix) :]
+                    connection.execute(
+                        "UPDATE directories SET logical_path = ?, modified_at = ? "
+                        "WHERE space_id = ? AND logical_path = ?",
+                        (target, now, space_id, row["logical_path"]),
+                    )
+                for row in nested_files:
+                    target = destination_prefix + row["logical_path"][len(source_prefix) :]
+                    connection.execute(
+                        "UPDATE files SET logical_path = ?, modified_at = ? "
+                        "WHERE space_id = ? AND logical_path = ? AND deleted_at IS NULL",
+                        (target, now, space_id, row["logical_path"]),
+                    )
+        self.repository.record_audit(
+            actor_type="user",
+            actor_id=user_id,
+            action=f"{kind}.moved",
+            target_type=kind,
+            target_id=f"{space_id}:{destination_path}",
+            detail=f"Перемещено: {source_path} → {destination_path}",
+        )
+        return {"source_path": source_path, "destination_path": destination_path, "type": kind}
+
+    def _require_file_path_available(self, space_id: str, logical_path: str) -> None:
+        parts = PurePosixPath(logical_path).parts
+        parents = ["/".join(parts[:index]) for index in range(1, len(parts))]
+        with self.database.connection() as connection:
+            collision = connection.execute(
+                "SELECT 1 FROM directories WHERE space_id = ? AND logical_path = ?",
+                (space_id, logical_path),
+            ).fetchone()
+            file_parent = None
+            if parents:
+                placeholders = ",".join("?" for _ in parents)
+                file_parent = connection.execute(
+                    "SELECT 1 FROM files "
+                    f"WHERE space_id = ? AND deleted_at IS NULL "
+                    f"AND logical_path IN ({placeholders}) LIMIT 1",
+                    (space_id, *parents),
+                ).fetchone()
+        if collision is not None:
+            raise ConflictError("a directory already exists at this path")
+        if file_parent is not None:
+            raise ConflictError("a file already occupies part of this path")
+
+    @staticmethod
+    def _require_destination_available(
+        connection: sqlite3.Connection, space_id: str, logical_path: str
+    ) -> None:
+        parts = PurePosixPath(logical_path).parts
+        parents = ["/".join(parts[:index]) for index in range(1, len(parts))]
+        file_row = connection.execute(
+            "SELECT 1 FROM files "
+            "WHERE space_id = ? AND logical_path = ? AND deleted_at IS NULL",
+            (space_id, logical_path),
+        ).fetchone()
+        directory_row = connection.execute(
+            "SELECT 1 FROM directories WHERE space_id = ? AND logical_path = ?",
+            (space_id, logical_path),
+        ).fetchone()
+        file_parent = None
+        if parents:
+            placeholders = ",".join("?" for _ in parents)
+            file_parent = connection.execute(
+                "SELECT 1 FROM files "
+                f"WHERE space_id = ? AND deleted_at IS NULL "
+                f"AND logical_path IN ({placeholders}) LIMIT 1",
+                (space_id, *parents),
+            ).fetchone()
+        if file_row is not None or directory_row is not None:
+            raise ConflictError("destination path already exists")
+        if file_parent is not None:
+            raise ConflictError("a file already occupies part of the destination path")
 
     def resolve_download(
         self, space_id: str, user_id: str, logical_path: str

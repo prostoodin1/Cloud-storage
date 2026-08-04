@@ -239,6 +239,102 @@ def test_zrok_gateway_requires_account_login_and_hides_manager_api(tmp_path) -> 
     assert app.state.runtime.tunnels.status("zrok")["installed"] is False
 
 
+def test_zrok_gateway_allows_password_request_for_a_new_device(tmp_path) -> None:
+    config = CoreConfig(
+        data_directory=tmp_path,
+        zrok_enabled=True,
+        zrok_port=18768,
+        zrok_executable="missing-zrok-for-test",
+    )
+    app = create_app(config)
+    manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
+
+    with TestClient(app) as manager, TestClient(
+        app, base_url="http://127.0.0.1:18768"
+    ) as internet:
+        manager.post(
+            "/v1/admin/users",
+            headers=manager_headers,
+            json={
+                "username": "mobileqa",
+                "display_name": "Mobile QA",
+                "quota_gib": 1,
+                "password": "mobile qa secure password",
+            },
+        ).raise_for_status()
+        requested = internet.post(
+            "/v1/auth/device-login",
+            json={
+                "username": "mobileqa",
+                "password": "mobile qa secure password",
+                "device_name": "QA Phone",
+                "platform": "Android",
+            },
+        )
+        hidden = internet.get("/v1/admin/devices", headers=manager_headers)
+
+    assert requested.status_code == 201
+    assert requested.json()["device"]["status"] == "pending"
+    assert hidden.status_code == 404
+
+
+def test_zrok_mobile_admin_control_requires_confirmed_device_and_session(tmp_path) -> None:
+    config = CoreConfig(
+        data_directory=tmp_path,
+        zrok_enabled=True,
+        zrok_port=18768,
+        zrok_executable="missing-zrok-for-test",
+    )
+    app = create_app(config)
+    manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
+    with TestClient(app) as manager, TestClient(
+        app, base_url="http://127.0.0.1:18768"
+    ) as internet:
+        manager.post(
+            "/v1/admin/users",
+            headers=manager_headers,
+            json={
+                "username": "phoneadmin",
+                "display_name": "Phone Admin",
+                "quota_gib": 1,
+                "role": "admin",
+                "password": "phone admin secure password",
+            },
+        ).raise_for_status()
+        phone = internet.post(
+            "/v1/auth/device-login",
+            json={
+                "username": "phoneadmin",
+                "password": "phone admin secure password",
+                "device_name": "Admin iPhone",
+                "platform": "iOS",
+            },
+        ).json()
+        manager.post(
+            f"/v1/admin/devices/{phone['device']['id']}/approve",
+            headers=manager_headers,
+        ).raise_for_status()
+        device_headers = {"Authorization": f"Bearer {phone['device_token']}"}
+        assert internet.get("/v1/mobile/admin/overview", headers=device_headers).status_code == 403
+        session = internet.post(
+            "/v1/remote/session",
+            headers=device_headers,
+            json={
+                "username": "phoneadmin",
+                "password": "phone admin secure password",
+            },
+        ).json()["session_token"]
+        overview = internet.get(
+            "/v1/mobile/admin/overview",
+            headers={**device_headers, "X-Cloud-Remote-Session": session},
+        )
+        hidden_manager = internet.get("/v1/admin/summary", headers=manager_headers)
+
+    assert overview.status_code == 200
+    assert overview.json()["server_mode"]["mode"] == "normal"
+    assert hidden_manager.status_code == 404
+
+
 def test_zrok_process_environment_does_not_inherit_unrelated_secrets(monkeypatch) -> None:
     monkeypatch.setenv("UNRELATED_API_SECRET", "must-not-leak")
     monkeypatch.setenv("ZROK_API_ENDPOINT", "https://zrok.example")

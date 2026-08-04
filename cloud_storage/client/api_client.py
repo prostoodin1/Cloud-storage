@@ -91,6 +91,25 @@ class ClientApi:
             timeout=10.0,
         )
 
+    def login_new_device(
+        self,
+        username: str,
+        password: str,
+        device_name: str,
+        platform: str,
+    ) -> dict[str, Any]:
+        return self._json_request(
+            "/v1/auth/device-login",
+            method="POST",
+            payload={
+                "username": username,
+                "password": password,
+                "device_name": device_name,
+                "platform": platform,
+            },
+            timeout=10.0,
+        )
+
     def pairing_status(self) -> dict[str, Any]:
         return self._json_request("/v1/pairing/status")
 

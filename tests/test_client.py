@@ -124,6 +124,7 @@ def test_desktop_client_window_smoke(tmp_path) -> None:
     assert window.help_page.article_list.count() > 0
     assert window.discover_button.text() == "Найти в сети"
     assert window.remote_login_button.text() == "Войти через интернет"
+    assert window.account_login_button.text() == "Войти по логину"
     assert window.server_selector.count() == 1
     assert window.nav_buttons[1].isEnabled() is False
     window.add_server()

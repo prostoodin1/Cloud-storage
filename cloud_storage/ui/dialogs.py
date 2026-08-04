@@ -383,7 +383,8 @@ class CreateUserDialog(QDialog):
         title = QLabel("Создать личное пространство")
         title.setObjectName("PageTitle")
         description = QLabel(
-            "После создания менеджер выдаст одноразовый код подключения на 15 минут."
+            "Задайте постоянный логин и пароль. На новых компьютерах пользователь сможет "
+            "войти с ними, но каждое новое устройство всё равно потребует подтверждения."
         )
         description.setProperty("muted", True)
         description.setWordWrap(True)
@@ -394,6 +395,12 @@ class CreateUserDialog(QDialog):
         self.username.setPlaceholderText("ivan")
         self.display_name = QLineEdit()
         self.display_name.setPlaceholderText("Иван")
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password.setPlaceholderText("Минимум 10 символов")
+        self.password_confirmation = QLineEdit()
+        self.password_confirmation.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_confirmation.setPlaceholderText("Повторите пароль")
         self.quota = QSpinBox()
         self.quota.setRange(1, 1_000_000)
         self.quota.setValue(100)
@@ -401,6 +408,8 @@ class CreateUserDialog(QDialog):
         self.admin = QCheckBox("Администратор сервера")
         form.addRow("Логин", self.username)
         form.addRow("Имя", self.display_name)
+        form.addRow("Пароль", self.password)
+        form.addRow("Повтор пароля", self.password_confirmation)
         form.addRow("Личное хранилище", self.quota)
         form.addRow("", self.admin)
         layout.addLayout(form)
@@ -430,15 +439,87 @@ class CreateUserDialog(QDialog):
                 "Введите логин длиной минимум 3 символа и отображаемое имя.",
             )
             return
+        if len(self.password.text()) < 10:
+            QMessageBox.warning(
+                self,
+                "Слишком короткий пароль",
+                "Пароль должен содержать минимум 10 символов.",
+            )
+            return
+        if self.password.text() != self.password_confirmation.text():
+            QMessageBox.warning(
+                self,
+                "Пароли не совпадают",
+                "Повторно введите одинаковый пароль в оба поля.",
+            )
+            return
         self.accept()
 
     def values(self) -> dict[str, object]:
         return {
             "username": self.username.text().strip(),
             "display_name": self.display_name.text().strip(),
+            "password": self.password.text(),
             "quota_gib": self.quota.value(),
             "role": "admin" if self.admin.isChecked() else "member",
         }
+
+
+class PasswordDialog(QDialog):
+    def __init__(self, display_name: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Новый пароль")
+        self.setMinimumWidth(440)
+        layout = QVBoxLayout(self)
+        title = QLabel(f"Изменить пароль · {display_name}")
+        title.setObjectName("PageTitle")
+        description = QLabel(
+            "Новый пароль сразу начнёт действовать для входа на других устройствах. "
+            "Текущие интернет-сессии будут отозваны, а уже подтверждённые устройства останутся подключёнными."
+        )
+        description.setProperty("muted", True)
+        description.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(description)
+        form = QFormLayout()
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password.setPlaceholderText("Минимум 10 символов")
+        self.confirmation = QLineEdit()
+        self.confirmation.setEchoMode(QLineEdit.EchoMode.Password)
+        self.confirmation.setPlaceholderText("Повторите пароль")
+        form.addRow("Новый пароль", self.password)
+        form.addRow("Повтор пароля", self.confirmation)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить пароль")
+        buttons.button(QDialogButtonBox.StandardButton.Save).setProperty("primary", True)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        buttons.accepted.connect(self._validate)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _validate(self) -> None:
+        if len(self.password.text()) < 10:
+            QMessageBox.warning(
+                self,
+                "Слишком короткий пароль",
+                "Пароль должен содержать минимум 10 символов.",
+            )
+            return
+        if self.password.text() != self.confirmation.text():
+            QMessageBox.warning(
+                self,
+                "Пароли не совпадают",
+                "Повторно введите одинаковый пароль в оба поля.",
+            )
+            return
+        self.accept()
+
+    def value(self) -> str:
+        return self.password.text()
 
 
 class InvitationDialog(QDialog):

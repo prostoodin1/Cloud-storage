@@ -405,6 +405,7 @@ class SettingsPage(QWidget):
     core_refresh_requested = Signal()
     add_user_requested = Signal()
     invitation_requested = Signal(str, str)
+    reset_password_requested = Signal(str, str)
     approve_device_requested = Signal(str)
     revoke_device_requested = Signal(str)
     migration_requested = Signal(str, str)
@@ -776,12 +777,20 @@ class SettingsPage(QWidget):
                 title.setStyleSheet("font-weight: 700; font-size: 16px;")
                 quota = user["quota_bytes"] / 1024**3
                 detail = QLabel(
-                    f"@{user['username']} · {'Администратор' if user['role'] == 'admin' else 'Пользователь'} · {quota:.0f} ГБ"
+                    f"@{user['username']} · {'Администратор' if user['role'] == 'admin' else 'Пользователь'} · "
+                    f"{quota:.0f} ГБ · {'пароль установлен' if user.get('has_password') else 'пароль не задан'}"
                 )
                 detail.setProperty("muted", True)
                 text.addWidget(title)
                 text.addWidget(detail)
                 row.addLayout(text, 1)
+                password = QPushButton("Сменить пароль")
+                password.clicked.connect(
+                    lambda checked=False, user_id=user["id"], name=user["display_name"]: (
+                        self.reset_password_requested.emit(user_id, name)
+                    )
+                )
+                row.addWidget(password)
                 invite = QPushButton("Код подключения")
                 invite.clicked.connect(
                     lambda checked=False, user_id=user["id"], name=user["display_name"]: (
@@ -1741,7 +1750,9 @@ class SettingsPage(QWidget):
             layout.addWidget(mode_card)
         elif name == "Пользователи":
             top = QHBoxLayout()
-            description = QLabel("Личные пространства, квоты и одноразовые приглашения.")
+            description = QLabel(
+                "Личные пространства, постоянные логины и пароли, квоты и резервные одноразовые приглашения."
+            )
             description.setProperty("muted", True)
             top.addWidget(description, 1)
             add = QPushButton("Добавить пользователя")
@@ -1762,7 +1773,7 @@ class SettingsPage(QWidget):
             layout.addLayout(self.trusted_device_rows)
         elif name == "Подключение устройств":
             description = QLabel(
-                "Устройства, которые ввели одноразовый код, остаются заблокированными до подтверждения."
+                "Новые компьютеры и телефоны после входа по логину или коду остаются заблокированными до подтверждения."
             )
             description.setProperty("muted", True)
             description.setWordWrap(True)

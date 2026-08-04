@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT NOT NULL UNIQUE COLLATE NOCASE,
     display_name TEXT NOT NULL,
     password_hash TEXT,
+    password_version INTEGER NOT NULL DEFAULT 0 CHECK(password_version >= 0),
     role TEXT NOT NULL CHECK(role IN ('admin', 'member')),
     quota_bytes INTEGER NOT NULL CHECK(quota_bytes > 0),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
@@ -453,6 +454,14 @@ class Database:
             connection.execute(
                 "UPDATE upload_sessions SET staging_path = '' WHERE staging_path IS NULL"
             )
+            user_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()
+            }
+            if "password_version" not in user_columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN password_version INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK(password_version >= 0)"
+                )
             self._upgrade_automation_schema(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO automation_settings(id, enabled, interval_seconds, updated_at) "
@@ -514,6 +523,10 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(12, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(13, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
             connection.commit()
 

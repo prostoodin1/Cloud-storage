@@ -98,6 +98,7 @@ class CredentialService:
         user_id: str,
         device_id: str,
         *,
+        password_version: int = 0,
         ttl_seconds: int = 24 * 60 * 60,
     ) -> tuple[str, int]:
         now = int(time.time())
@@ -108,6 +109,7 @@ class CredentialService:
                     "v": 1,
                     "uid": user_id,
                     "did": device_id,
+                    "pv": password_version,
                     "iat": now,
                     "exp": expires_at,
                     "nonce": secrets.token_urlsafe(12),
@@ -125,6 +127,7 @@ class CredentialService:
         *,
         user_id: str,
         device_id: str,
+        password_version: int = 0,
     ) -> None:
         if not token.startswith("css_") or len(token) > 4096:
             raise InvalidCredential("internet login is required")
@@ -142,6 +145,7 @@ class CredentialService:
                 claims.get("v") == 1
                 and claims.get("uid") == user_id
                 and claims.get("did") == device_id
+                and int(claims.get("pv", 0)) == password_version
                 and int(claims.get("exp", 0)) > int(time.time())
                 and int(claims.get("iat", 0)) <= int(time.time()) + 60
             )

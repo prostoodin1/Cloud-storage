@@ -83,6 +83,152 @@ def test_health_and_manager_authorization(tmp_path) -> None:
     assert allowed.json()["users"] == 0
 
 
+def test_account_password_registers_each_new_device_for_approval(tmp_path) -> None:
+    _, client, manager_headers = build_client(tmp_path)
+    created = client.post(
+        "/v1/admin/users",
+        headers=manager_headers,
+        json={
+            "username": "family",
+            "display_name": "Семья",
+            "quota_gib": 20,
+            "password": "family cloud password 2026",
+        },
+    )
+    assert created.status_code == 201
+    user = created.json()["user"]
+    assert user["has_password"] is True
+
+    wrong = client.post(
+        "/v1/auth/device-login",
+        json={
+            "username": "family",
+            "password": "wrong password value",
+            "device_name": "Family laptop",
+            "platform": "Windows",
+        },
+    )
+    assert wrong.status_code == 403
+    assert client.get("/v1/admin/devices", headers=manager_headers).json() == []
+
+    logged_in = client.post(
+        "/v1/auth/device-login",
+        json={
+            "username": "family",
+            "password": "family cloud password 2026",
+            "device_name": "Family laptop",
+            "platform": "Windows",
+        },
+    )
+    assert logged_in.status_code == 201
+    body = logged_in.json()
+    assert body["device"]["status"] == "pending"
+    headers = {"Authorization": f"Bearer {body['device_token']}"}
+    assert client.get("/v1/pairing/status", headers=headers).json()["status"] == "pending"
+    assert client.get("/v1/spaces", headers=headers).status_code == 403
+
+    client.post(
+        f"/v1/admin/devices/{body['device']['id']}/approve",
+        headers=manager_headers,
+    ).raise_for_status()
+    spaces = client.get("/v1/spaces", headers=headers)
+    assert spaces.status_code == 200
+    assert spaces.json()[0]["name"] == "Мои файлы"
+
+
+def test_manager_password_reset_replaces_password_for_future_devices(tmp_path) -> None:
+    _, client, manager_headers = build_client(tmp_path)
+    created = client.post(
+        "/v1/admin/users",
+        headers=manager_headers,
+        json={
+            "username": "resetme",
+            "display_name": "Reset Me",
+            "quota_gib": 1,
+            "password": "original secure password",
+        },
+    ).json()
+    user_id = created["user"]["id"]
+
+    reset = client.put(
+        f"/v1/admin/users/{user_id}/password",
+        headers=manager_headers,
+        json={"password": "replacement secure password"},
+    )
+    assert reset.status_code == 200
+    assert reset.json()["has_password"] is True
+    common = {"username": "resetme", "device_name": "Phone", "platform": "Android"}
+    assert client.post(
+        "/v1/auth/device-login",
+        json={**common, "password": "original secure password"},
+    ).status_code == 403
+    assert client.post(
+        "/v1/auth/device-login",
+        json={**common, "password": "replacement secure password"},
+    ).status_code == 201
+
+
+def test_confirmed_admin_phone_can_monitor_and_approve_devices(tmp_path) -> None:
+    _, client, manager_headers = build_client(tmp_path)
+    admin = client.post(
+        "/v1/admin/users",
+        headers=manager_headers,
+        json={
+            "username": "owner",
+            "display_name": "Owner",
+            "quota_gib": 1,
+            "role": "admin",
+            "password": "owner secure mobile password",
+        },
+    ).json()["user"]
+    member = client.post(
+        "/v1/admin/users",
+        headers=manager_headers,
+        json={
+            "username": "member",
+            "display_name": "Member",
+            "quota_gib": 1,
+            "password": "member secure mobile password",
+        },
+    ).json()["user"]
+    admin_phone = client.post(
+        "/v1/auth/device-login",
+        json={
+            "username": "owner",
+            "password": "owner secure mobile password",
+            "device_name": "Owner phone",
+            "platform": "Android",
+        },
+    ).json()
+    member_phone = client.post(
+        "/v1/auth/device-login",
+        json={
+            "username": "member",
+            "password": "member secure mobile password",
+            "device_name": "Member phone",
+            "platform": "iOS",
+        },
+    ).json()
+    client.post(
+        f"/v1/admin/devices/{admin_phone['device']['id']}/approve",
+        headers=manager_headers,
+    ).raise_for_status()
+    admin_headers = {"Authorization": f"Bearer {admin_phone['device_token']}"}
+    overview = client.get("/v1/mobile/admin/overview", headers=admin_headers)
+    assert overview.status_code == 200
+    assert overview.json()["summary"]["users"] == 2
+    assert {item["id"] for item in overview.json()["users"]} == {admin["id"], member["id"]}
+
+    approved = client.post(
+        f"/v1/mobile/admin/devices/{member_phone['device']['id']}/approve",
+        headers=admin_headers,
+    )
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "trusted"
+    member_headers = {"Authorization": f"Bearer {member_phone['device_token']}"}
+    assert client.get("/v1/mobile/admin/overview", headers=member_headers).status_code == 403
+
+
 def test_tunnel_registry_is_builtin_and_restart_is_manager_only(tmp_path) -> None:
     config = CoreConfig(
         data_directory=tmp_path,

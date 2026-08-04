@@ -39,6 +39,7 @@ class UserRecord:
     role: str
     quota_bytes: int
     enabled: bool
+    has_password: bool
     created_at: str
 
 
@@ -96,6 +97,7 @@ class CoreRepository:
         display_name: str,
         quota_bytes: int,
         role: str = "member",
+        password: str | None = None,
     ) -> tuple[UserRecord, SpaceRecord]:
         username = self.credentials.validate_username(username)
         display_name = display_name.strip()
@@ -105,6 +107,8 @@ class CoreRepository:
             raise InvalidCredential("invalid user role")
         if quota_bytes < 1024**3:
             raise InvalidCredential("quota must be at least 1 GiB")
+        password_hash = self.credentials.hash_password(password) if password is not None else None
+        password_version = 1 if password_hash else 0
         user_id = str(uuid.uuid4())
         space_id = str(uuid.uuid4())
         created = utc_text()
@@ -113,11 +117,20 @@ class CoreRepository:
                 connection.execute(
                     """
                     INSERT INTO users(
-                        id, username, display_name, password_hash, role,
+                        id, username, display_name, password_hash, password_version, role,
                         quota_bytes, enabled, created_at
-                    ) VALUES(?, ?, ?, NULL, ?, ?, 1, ?)
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, 1, ?)
                     """,
-                    (user_id, username, display_name, role, quota_bytes, created),
+                    (
+                        user_id,
+                        username,
+                        display_name,
+                        password_hash,
+                        password_version,
+                        role,
+                        quota_bytes,
+                        created,
+                    ),
                 )
                 connection.execute(
                     """
@@ -150,7 +163,8 @@ class CoreRepository:
         with self.database.connection() as connection:
             rows = connection.execute(
                 """
-                SELECT id, username, display_name, role, quota_bytes, enabled, created_at
+                SELECT id, username, display_name, role, quota_bytes, enabled,
+                       password_hash IS NOT NULL AS has_password, created_at
                 FROM users ORDER BY display_name COLLATE NOCASE
                 """
             ).fetchall()
@@ -160,7 +174,8 @@ class CoreRepository:
         with self.database.connection() as connection:
             row = connection.execute(
                 """
-                SELECT id, username, display_name, role, quota_bytes, enabled, created_at
+                SELECT id, username, display_name, role, quota_bytes, enabled,
+                       password_hash IS NOT NULL AS has_password, created_at
                 FROM users WHERE id = ?
                 """,
                 (user_id,),
@@ -175,7 +190,7 @@ class CoreRepository:
             row = connection.execute(
                 """
                 SELECT id, username, display_name, password_hash, role,
-                       quota_bytes, enabled, created_at
+                       quota_bytes, enabled, password_hash IS NOT NULL AS has_password, created_at
                 FROM users WHERE username = ? COLLATE NOCASE
                 """,
                 (username,),
@@ -188,6 +203,39 @@ class CoreRepository:
         ):
             raise PermissionDeniedError("invalid username or password")
         return self._user(row)
+
+    def user_password_version(self, user_id: str) -> int:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT password_version FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("user not found")
+        return int(row["password_version"])
+
+    def set_user_password(self, user_id: str, password: str) -> UserRecord:
+        password_hash = self.credentials.hash_password(password)
+        with self.database.transaction() as connection:
+            changed = connection.execute(
+                """
+                UPDATE users
+                SET password_hash = ?, password_version = password_version + 1
+                WHERE id = ?
+                """,
+                (password_hash, user_id),
+            )
+            if changed.rowcount != 1:
+                raise NotFoundError("user not found")
+            self._audit_tx(
+                connection,
+                actor_type="manager",
+                actor_id=None,
+                action="user.password.changed",
+                target_type="user",
+                target_id=user_id,
+                detail="Пароль пользователя изменён; активные интернет-сессии отозваны",
+            )
+        return self.get_user(user_id)
 
     def create_invitation(self, user_id: str, ttl_seconds: int) -> tuple[str, str, str]:
         self.get_user(user_id)
@@ -272,7 +320,11 @@ class CoreRepository:
             else:
                 password_hash = self.credentials.hash_password(password)
                 connection.execute(
-                    "UPDATE users SET password_hash = ? WHERE id = ?",
+                    """
+                    UPDATE users
+                    SET password_hash = ?, password_version = password_version + 1
+                    WHERE id = ?
+                    """,
                     (password_hash, invitation["user_id"]),
                 )
             updated = connection.execute(
@@ -310,6 +362,65 @@ class CoreRepository:
                 remote_address=remote_address,
             )
         return PairingResult(device=self.get_device(device_id), device_token=token)
+
+    def request_device_login(
+        self,
+        username: str,
+        password: str,
+        device_name: str,
+        platform: str,
+        remote_address: str | None,
+    ) -> PairingResult:
+        user = self.authenticate_user_password(username, password)
+        device_name, platform = self._validate_device_identity(device_name, platform)
+        token = self.credentials.generate_device_token()
+        token_hash = self.credentials.device_token_hash(token)
+        device_id = str(uuid.uuid4())
+        created = utc_text()
+        with self.database.transaction() as connection:
+            pending = connection.execute(
+                "SELECT count(*) FROM devices WHERE user_id = ? AND status = 'pending'",
+                (user.id,),
+            ).fetchone()[0]
+            if pending >= 10:
+                raise ConflictError("too many devices are waiting for approval")
+            connection.execute(
+                """
+                UPDATE devices SET status = 'revoked'
+                WHERE user_id = ? AND name = ? COLLATE NOCASE
+                      AND platform = ? COLLATE NOCASE AND status = 'pending'
+                """,
+                (user.id, device_name, platform),
+            )
+            connection.execute(
+                """
+                INSERT INTO devices(
+                    id, user_id, name, platform, token_hash, status, created_at
+                ) VALUES(?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (device_id, user.id, device_name, platform, token_hash, created),
+            )
+            self._audit_tx(
+                connection,
+                actor_type="device",
+                actor_id=device_id,
+                action="device.login.requested",
+                target_type="device",
+                target_id=device_id,
+                detail=f"Запрошен вход нового устройства {device_name} по логину и паролю",
+                remote_address=remote_address,
+            )
+        return PairingResult(device=self.get_device(device_id), device_token=token)
+
+    @staticmethod
+    def _validate_device_identity(device_name: str, platform: str) -> tuple[str, str]:
+        device_name = device_name.strip()
+        platform = platform.strip()
+        if not device_name or len(device_name) > 100:
+            raise InvalidCredential("device name must contain 1-100 characters")
+        if not platform or len(platform) > 50:
+            raise InvalidCredential("platform must contain 1-50 characters")
+        return device_name, platform
 
     def cancel_invitation(self, invitation_id: str) -> bool:
         with self.database.transaction() as connection:
@@ -493,6 +604,7 @@ class CoreRepository:
             role=row["role"],
             quota_bytes=row["quota_bytes"],
             enabled=bool(row["enabled"]),
+            has_password=bool(row["has_password"]),
             created_at=row["created_at"],
         )
 

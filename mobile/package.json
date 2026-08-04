@@ -1,0 +1,36 @@
+{
+  "name": "cloud-storage-mobile",
+  "version": "0.8.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "typecheck": "tsc --noEmit",
+    "doctor": "expo-doctor",
+    "prebuild": "expo prebuild"
+  },
+  "dependencies": {
+    "expo": "~57.0.10",
+    "expo-background-task": "~57.0.7",
+    "expo-device": "~57.0.1",
+    "expo-document-picker": "~57.0.1",
+    "expo-file-system": "~57.0.1",
+    "expo-image-picker": "~57.0.7",
+    "expo-secure-store": "~57.0.1",
+    "expo-sharing": "~57.0.8",
+    "expo-splash-screen": "~57.0.5",
+    "expo-status-bar": "~57.0.1",
+    "expo-system-ui": "~57.0.2",
+    "expo-task-manager": "~57.0.7",
+    "react": "19.2.3",
+    "react-native": "0.86.2"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "expo-doctor": "^1.20.1",
+    "typescript": "~6.0.3"
+  },
+  "packageManager": "pnpm@11.9.0"
+}

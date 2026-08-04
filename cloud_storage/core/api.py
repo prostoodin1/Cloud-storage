@@ -64,6 +64,11 @@ class CreateUserRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
     quota_gib: int = Field(default=100, ge=1, le=1_000_000)
     role: str = Field(default="member", pattern="^(admin|member)$")
+    password: SecretStr | None = None
+
+
+class SetUserPasswordRequest(BaseModel):
+    password: SecretStr
 
 
 class CreateInvitationRequest(BaseModel):
@@ -73,6 +78,13 @@ class CreateInvitationRequest(BaseModel):
 
 class RedeemInvitationRequest(BaseModel):
     code: str = Field(min_length=8, max_length=16)
+    password: SecretStr
+    device_name: str = Field(min_length=1, max_length=100)
+    platform: str = Field(min_length=1, max_length=50)
+
+
+class DeviceLoginRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
     password: SecretStr
     device_name: str = Field(min_length=1, max_length=100)
     platform: str = Field(min_length=1, max_length=50)
@@ -334,10 +346,13 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     def remote_client_path_allowed(path: str) -> bool:
         if path in {
             "/v1/health",
+            "/v1/auth/device-login",
             "/v1/pairing/redeem",
             "/v1/pairing/status",
             "/v1/remote/session",
             "/v1/spaces",
+            "/v1/mobile/admin/overview",
+            "/v1/mobile/admin/server-mode",
         }:
             return True
         patterns = (
@@ -349,6 +364,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             r"/v1/spaces/[^/]+/files/.+",
             r"/v1/uploads/[^/]+",
             r"/v1/uploads/[^/]+/complete",
+            r"/v1/mobile/admin/devices/[^/]+/(approve|revoke)",
         )
         return any(re.fullmatch(pattern, path) for pattern in patterns)
 
@@ -411,6 +427,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                     "/v1/admin/automation",
                     "/v1/admin/notifications",
                     "/v1/admin/integrations",
+                    "/v1/mobile/admin/server-mode",
                 )
             )
             and request.url.path != "/v1/admin/shutdown"
@@ -476,6 +493,9 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                     remote_session or "",
                     user_id=device.user_id,
                     device_id=device.id,
+                    password_version=runtime.repository.user_password_version(
+                        device.user_id
+                    ),
                 )
             return device
         except (InvalidCredential, PermissionDeniedError) as exc:
@@ -492,6 +512,14 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             )
         except (InvalidCredential, PermissionDeniedError) as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    def require_mobile_admin(
+        device: DeviceRecord = Depends(require_device),  # noqa: B008
+    ) -> DeviceRecord:
+        user = runtime.repository.get_user(device.user_id)
+        if user.role != "admin" or not user.enabled:
+            raise HTTPException(status_code=403, detail="administrator role is required")
+        return device
 
     @app.exception_handler(NotFoundError)
     async def not_found_handler(request: Request, exc: NotFoundError) -> JSONResponse:
@@ -1315,8 +1343,22 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             display_name=body.display_name,
             quota_bytes=body.quota_gib * 1024**3,
             role=body.role,
+            password=(body.password.get_secret_value() if body.password is not None else None),
         )
         return {"user": asdict(user), "personal_space": asdict(space)}
+
+    @app.put(
+        "/v1/admin/users/{user_id}/password",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def set_user_password(user_id: str, body: SetUserPasswordRequest) -> dict[str, Any]:
+        return asdict(
+            runtime.repository.set_user_password(
+                user_id,
+                body.password.get_secret_value(),
+            )
+        )
 
     @app.post(
         "/v1/admin/invitations",
@@ -1367,6 +1409,62 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     def list_audit(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:
         return runtime.repository.recent_audit(limit)
 
+    @app.get(
+        "/v1/mobile/admin/overview",
+        tags=["mobile-control"],
+        dependencies=[Depends(require_mobile_admin)],
+    )
+    def mobile_admin_overview() -> dict[str, Any]:
+        diagnostics = runtime.diagnostics.overview()
+        zrok = runtime.tunnels.status("zrok")
+        return {
+            "summary": runtime.repository.summary(),
+            "server_mode": runtime.recovery.server_mode(),
+            "diagnostics": {
+                "status": diagnostics["status"],
+                "active_warning_count": diagnostics["active_warning_count"],
+                "active_critical_count": diagnostics["active_critical_count"],
+                "latest_scan": diagnostics["latest_scan"],
+            },
+            "transfers": runtime.storage.transfer_overview(limit=20)["counts"],
+            "zrok": {
+                "enabled": bool(zrok.get("enabled")),
+                "state": str(zrok.get("state") or "disabled"),
+                "public_url": str(zrok.get("public_url") or ""),
+            },
+            "users": [asdict(item) for item in runtime.repository.list_users()],
+            "devices": [asdict(item) for item in runtime.repository.list_devices()],
+        }
+
+    @app.post(
+        "/v1/mobile/admin/devices/{device_id}/approve",
+        tags=["mobile-control"],
+        dependencies=[Depends(require_mobile_admin)],
+    )
+    def mobile_approve_device(device_id: str) -> dict[str, Any]:
+        return asdict(runtime.repository.set_device_status(device_id, "trusted"))
+
+    @app.post(
+        "/v1/mobile/admin/devices/{device_id}/revoke",
+        tags=["mobile-control"],
+        dependencies=[Depends(require_mobile_admin)],
+    )
+    def mobile_revoke_device(device_id: str) -> dict[str, Any]:
+        return asdict(runtime.repository.set_device_status(device_id, "revoked"))
+
+    @app.put(
+        "/v1/mobile/admin/server-mode",
+        tags=["mobile-control"],
+        dependencies=[Depends(require_mobile_admin)],
+    )
+    def mobile_set_server_mode(body: SetServerModeRequest) -> dict[str, Any]:
+        if body.mode == "read_only" and not body.confirmed:
+            raise HTTPException(
+                status_code=400,
+                detail="explicit confirmation is required for emergency read-only mode",
+            )
+        return runtime.recovery.set_server_mode(body.mode, body.reason)
+
     @app.post("/v1/admin/shutdown", tags=["manager"], dependencies=[Depends(require_manager)])
     def shutdown(background: BackgroundTasks) -> dict[str, bool]:
         callback = app.state.shutdown_callback
@@ -1387,6 +1485,30 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             device_name=body.device_name,
             platform=body.platform,
             remote_address=remote,
+        )
+        return {
+            "device": asdict(result.device),
+            "device_token": result.device_token,
+            "message": "Ожидается подтверждение администратора",
+        }
+
+    @app.post(
+        "/v1/auth/device-login",
+        tags=["pairing"],
+        status_code=status.HTTP_201_CREATED,
+    )
+    def login_new_device(body: DeviceLoginRequest, request: Request) -> dict[str, Any]:
+        remote_address = request.client.host if request.client else "unknown"
+        limiter_key = f"{remote_address}:{body.username.strip().casefold()}"
+        limiter = remote_login_limiter if request.state.external_request else pairing_limiter
+        if not limiter.allow(limiter_key):
+            raise HTTPException(status_code=429, detail="too many account login attempts")
+        result = runtime.repository.request_device_login(
+            username=body.username,
+            password=body.password.get_secret_value(),
+            device_name=body.device_name,
+            platform=body.platform,
+            remote_address=remote_address,
         )
         return {
             "device": asdict(result.device),
@@ -1419,6 +1541,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         token, expires_at = runtime.repository.credentials.issue_remote_session(
             user.id,
             device.id,
+            password_version=runtime.repository.user_password_version(user.id),
         )
         runtime.repository.record_audit(
             actor_type="device",

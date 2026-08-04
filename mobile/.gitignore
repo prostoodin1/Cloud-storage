@@ -1,0 +1,13 @@
+node_modules/
+.expo/
+dist/
+dist-*/
+android/
+ios/
+*.jks
+*.keystore
+*.mobileprovision
+*.p12
+*.key
+*.pem
+expo-env.d.ts

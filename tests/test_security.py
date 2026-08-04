@@ -33,19 +33,30 @@ def test_security_policy_rejects_files_outside_storage(tmp_path) -> None:
 def test_remote_session_is_signed_bound_and_expires(monkeypatch) -> None:
     credentials = CredentialService.from_secret("11" * 48)
     token, expires_at = credentials.issue_remote_session(
-        "user-1", "device-1", ttl_seconds=300
+        "user-1", "device-1", password_version=4, ttl_seconds=300
     )
 
-    credentials.verify_remote_session(token, user_id="user-1", device_id="device-1")
+    credentials.verify_remote_session(
+        token, user_id="user-1", device_id="device-1", password_version=4
+    )
     with pytest.raises(InvalidCredential):
-        credentials.verify_remote_session(token, user_id="user-1", device_id="device-2")
+        credentials.verify_remote_session(
+            token, user_id="user-1", device_id="device-1", password_version=5
+        )
+    with pytest.raises(InvalidCredential):
+        credentials.verify_remote_session(
+            token, user_id="user-1", device_id="device-2", password_version=4
+        )
     with pytest.raises(InvalidCredential):
         credentials.verify_remote_session(
             token[:-1] + ("0" if token[-1] != "0" else "1"),
             user_id="user-1",
             device_id="device-1",
+            password_version=4,
         )
 
     monkeypatch.setattr("cloud_storage.core.security.time.time", lambda: expires_at + 1)
     with pytest.raises(InvalidCredential):
-        credentials.verify_remote_session(token, user_id="user-1", device_id="device-1")
+        credentials.verify_remote_session(
+            token, user_id="user-1", device_id="device-1", password_version=4
+        )

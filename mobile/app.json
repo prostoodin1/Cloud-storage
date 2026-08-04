@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "Cloud Storage",
+    "slug": "cloud-storage-mobile",
+    "scheme": "cloudstorage",
+    "version": "0.8.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.cloudstorage.mobile",
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Cloud Storage защищает токены подключения в системном хранилище.",
+        "NSPhotoLibraryUsageDescription": "Cloud Storage выбирает фотографии только для загрузки в ваше личное хранилище."
+      }
+    },
+    "android": {
+      "package": "com.cloudstorage.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#e2383f",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": true
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-document-picker",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 220,
+          "resizeMode": "contain",
+          "backgroundColor": "#0d0f12"
+        }
+      ],
+      [
+        "expo-file-system",
+        {
+          "supportsOpeningDocumentsInPlace": true,
+          "enableFileSharing": true
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Cloud Storage выбирает фотографии только для загрузки в ваше личное хранилище.",
+          "microphonePermission": false
+        }
+      ]
+    ]
+  }
+}

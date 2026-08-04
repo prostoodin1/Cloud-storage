@@ -386,7 +386,12 @@ class CoreClient:
         return self._manager_request("/v1/admin/users")
 
     def create_user(
-        self, username: str, display_name: str, quota_gib: int, role: str = "member"
+        self,
+        username: str,
+        display_name: str,
+        quota_gib: int,
+        role: str = "member",
+        password: str | None = None,
     ) -> dict[str, Any]:
         return self._manager_request(
             "/v1/admin/users",
@@ -396,7 +401,15 @@ class CoreClient:
                 "display_name": display_name,
                 "quota_gib": quota_gib,
                 "role": role,
+                "password": password,
             },
+        )
+
+    def set_user_password(self, user_id: str, password: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/users/{user_id}/password",
+            method="PUT",
+            payload={"password": password},
         )
 
     def create_invitation(self, user_id: str, ttl_seconds: int = 900) -> dict[str, Any]:

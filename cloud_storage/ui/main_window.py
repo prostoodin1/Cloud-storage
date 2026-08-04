@@ -44,6 +44,7 @@ from cloud_storage.ui.dialogs import (
     CreateUserDialog,
     DiskDetailDialog,
     InvitationDialog,
+    PasswordDialog,
     SetupDialog,
 )
 from cloud_storage.ui.pages import DashboardPage, DisksPage, SettingsPage
@@ -238,6 +239,7 @@ class MainWindow(QMainWindow):
         self.settings_page.core_refresh_requested.connect(self.refresh_core)
         self.settings_page.add_user_requested.connect(self.add_user)
         self.settings_page.invitation_requested.connect(self.create_invitation)
+        self.settings_page.reset_password_requested.connect(self.reset_user_password)
         self.settings_page.approve_device_requested.connect(self.approve_device)
         self.settings_page.revoke_device_requested.connect(self.revoke_device)
         self.settings_page.migration_requested.connect(self.start_migration)
@@ -524,6 +526,23 @@ class MainWindow(QMainWindow):
             invitation["code"],
             invitation["expires_at"],
         )
+
+    def reset_user_password(self, user_id: str, display_name: str) -> None:
+        dialog = PasswordDialog(display_name, self)
+        if not dialog.exec():
+            return
+        try:
+            self.core_client.set_user_password(user_id, dialog.value())
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Пароль не изменён", self._core_error_text(exc))
+            return
+        self.audit.record("core.user.password.changed", f"Изменён пароль пользователя {display_name}")
+        QMessageBox.information(
+            self,
+            "Пароль изменён",
+            "Новый пароль сохранён. Активные интернет-сессии отозваны.",
+        )
+        self.refresh_core()
 
     def _show_invitation(
         self, invitation_id: str, display_name: str, code: str, expires_at: str

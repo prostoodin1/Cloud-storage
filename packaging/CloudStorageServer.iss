@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.7.3"
+#define AppVersion "0.8.0"
 #define AppPublisher "Cloud Storage"
 
 [Setup]

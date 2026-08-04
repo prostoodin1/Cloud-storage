@@ -220,7 +220,7 @@ class ClientWindow(QMainWindow):
         state_layout = QVBoxLayout(state_card)
         self.sidebar_state = QLabel("НЕ ПОДКЛЮЧЕНО")
         self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #949ca8;")
-        self.sidebar_server = QLabel("Укажите сервер и код")
+        self.sidebar_server = QLabel("Укажите сервер и войдите")
         self.sidebar_server.setWordWrap(True)
         self.sidebar_server.setProperty("muted", True)
         state_layout.addWidget(self.sidebar_state)
@@ -242,7 +242,7 @@ class ClientWindow(QMainWindow):
         layout.addWidget(
             make_header(
                 "Подключение",
-                "Введите адрес сервера и одноразовый код, созданный администратором.",
+                "На новом компьютере войдите по постоянному логину и паролю. Одноразовый код остаётся запасным способом подключения.",
             )
         )
 
@@ -252,7 +252,8 @@ class ClientWindow(QMainWindow):
         self.connection_title = QLabel("Клиент не подключён")
         self.connection_title.setStyleSheet("font-weight: 700; font-size: 18px;")
         self.connection_detail = QLabel(
-            "Найдите сервер в домашней сети или вставьте полное приглашение администратора. "
+            "Найдите сервер в домашней сети, затем войдите по логину и паролю. "
+            "Для первого подключения можно вставить полное приглашение администратора. "
             "Для сервера на этом же компьютере можно использовать http://127.0.0.1:8765."
         )
         self.connection_detail.setWordWrap(True)
@@ -304,17 +305,23 @@ class ClientWindow(QMainWindow):
         form.addRow("Пароль", self.password)
         form.addRow("Название устройства", self.device_name)
         card_layout.addLayout(form)
-        controls = QHBoxLayout()
-        self.connect_button = QPushButton("Подключить устройство")
-        self.connect_button.setProperty("primary", True)
+        enrollment_controls = QHBoxLayout()
+        self.account_login_button = QPushButton("Войти по логину")
+        self.account_login_button.setProperty("primary", True)
+        self.account_login_button.clicked.connect(self.login_new_device)
+        self.connect_button = QPushButton("Подключиться по коду")
         self.connect_button.clicked.connect(self.connect_device)
+        enrollment_controls.addWidget(self.account_login_button)
+        enrollment_controls.addWidget(self.connect_button)
+        enrollment_controls.addStretch()
+        card_layout.addLayout(enrollment_controls)
+        controls = QHBoxLayout()
         self.status_button = QPushButton("Проверить подтверждение")
         self.status_button.clicked.connect(self.refresh_connection)
         self.remote_login_button = QPushButton("Войти через интернет")
         self.remote_login_button.clicked.connect(self.login_remote)
         self.forget_button = QPushButton("Забыть подключение")
         self.forget_button.clicked.connect(self.forget_connection)
-        controls.addWidget(self.connect_button)
         controls.addWidget(self.status_button)
         controls.addWidget(self.remote_login_button)
         controls.addWidget(self.forget_button)
@@ -606,6 +613,7 @@ class ClientWindow(QMainWindow):
         self.password.clear()
         self.pairing_code.clear()
         self.connect_button.setEnabled(True)
+        self.account_login_button.setEnabled(True)
         self._set_spaces([])
         self._load_profile()
         if self.token:
@@ -701,6 +709,38 @@ class ClientWindow(QMainWindow):
             lambda message: self._connection_failed_for(profile_id, message),
         )
 
+    def login_new_device(self) -> None:
+        username = self.username.text().strip().casefold()
+        password = self.password.text()
+        device_name = self.device_name.text().strip()
+        if len(username) < 3 or len(password) < 10 or not device_name:
+            QMessageBox.warning(
+                self,
+                "Проверьте данные",
+                "Нужны логин, пароль минимум из 10 символов и название устройства.",
+            )
+            return
+        try:
+            server_url = validate_server_url(self.server_url.text())
+            api = ClientApi(server_url, certificate_fingerprint=self.fingerprint.text())
+        except ValueError as exc:
+            QMessageBox.warning(self, "Неверные параметры подключения", str(exc))
+            return
+        self.account_login_button.setEnabled(False)
+        self.connection_detail.setText("Проверяем логин и отправляем запрос на подтверждение устройства…")
+        profile_id = self.profile.profile_id
+
+        def login() -> dict[str, Any]:
+            health = api.health()
+            result = api.login_new_device(username, password, device_name, platform.system())
+            return {"health": health, "pairing": result, "profile_id": profile_id}
+
+        self._start_task(
+            login,
+            self._pairing_complete,
+            lambda message: self._connection_failed_for(profile_id, message),
+        )
+
     def _pairing_complete(self, result: object) -> None:
         payload = result if isinstance(result, dict) else {}
         if payload.get("profile_id") != self.profile.profile_id:
@@ -712,6 +752,7 @@ class ClientWindow(QMainWindow):
             self.vault.store(token)
         except (OSError, ValueError) as exc:
             self.connect_button.setEnabled(True)
+            self.account_login_button.setEnabled(True)
             QMessageBox.critical(self, "Токен не сохранён", str(exc))
             return
         self.token = token
@@ -728,6 +769,7 @@ class ClientWindow(QMainWindow):
         self.password.clear()
         self.pairing_code.clear()
         self.connect_button.setEnabled(True)
+        self.account_login_button.setEnabled(True)
         self.status_button.setEnabled(True)
         self.forget_button.setEnabled(True)
         self.remote_login_button.setEnabled(True)
@@ -818,7 +860,7 @@ class ClientWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Сначала подключите устройство",
-                "Для интернет-входа сначала нужен одноразовый код и подтверждение администратора.",
+                "Сначала войдите по логину или одноразовому коду и дождитесь подтверждения администратора.",
             )
             return
         username = self.username.text().strip().casefold()
@@ -903,6 +945,7 @@ class ClientWindow(QMainWindow):
 
     def _connection_failed(self, message: str) -> None:
         self.connect_button.setEnabled(True)
+        self.account_login_button.setEnabled(True)
         self._set_connection_state("disconnected", message)
         QMessageBox.warning(self, "Подключение не выполнено", message)
 
@@ -942,7 +985,7 @@ class ClientWindow(QMainWindow):
                 self.connection_detail.setText(detail)
             self.sidebar_state.setText("НЕ ПОДКЛЮЧЕНО")
             self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #949ca8;")
-            self.sidebar_server.setText("Укажите сервер и код")
+            self.sidebar_server.setText("Укажите сервер и войдите")
             self.nav_buttons[1].setEnabled(False)
 
     def forget_connection(self) -> None:

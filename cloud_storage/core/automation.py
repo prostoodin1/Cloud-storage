@@ -7,11 +7,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from cloud_storage.core.backup_automation import BackupAutomationService
 from cloud_storage.core.database import Database
 from cloud_storage.core.diagnostics import DiagnosticsService
 from cloud_storage.core.notifications import NotificationService
 from cloud_storage.core.recovery import RecoveryService
 from cloud_storage.core.repository import ConflictError, CoreRepository, NotFoundError, utc_text
+from cloud_storage.core.storage import StorageService
 from cloud_storage.core.tunnels import TunnelProviderRegistry
 
 TRIGGER_TYPES = {
@@ -19,9 +21,40 @@ TRIGGER_TYPES = {
     "diagnostic_critical",
     "storage_low",
     "backup_failed",
+    "restore_failed",
+    "mirror_degraded",
+    "maintenance_failed",
+    "pending_device",
     "tunnel_offline",
+    "scheduled",
 }
-ACTION_TYPES = {"notify", "quick_scan", "read_only"}
+ACTION_TYPES = {
+    "notify",
+    "quick_scan",
+    "full_scan",
+    "read_only",
+    "run_backup",
+    "reconcile_mirrors",
+    "restart_tunnel",
+}
+ACTION_TYPES_BY_TRIGGER = {
+    "diagnostic_warning": {"notify", "quick_scan", "full_scan"},
+    "diagnostic_critical": {"notify", "quick_scan", "full_scan", "read_only"},
+    "storage_low": {"notify", "quick_scan"},
+    "backup_failed": {"notify", "quick_scan", "full_scan"},
+    "restore_failed": {"notify", "quick_scan", "full_scan"},
+    "mirror_degraded": {"notify", "quick_scan", "full_scan", "reconcile_mirrors"},
+    "maintenance_failed": {"notify", "quick_scan", "full_scan"},
+    "pending_device": {"notify"},
+    "tunnel_offline": {"notify", "restart_tunnel"},
+    "scheduled": {
+        "notify",
+        "quick_scan",
+        "full_scan",
+        "run_backup",
+        "reconcile_mirrors",
+    },
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,17 +79,24 @@ class AutomationService:
     recovery: RecoveryService
     tunnels: TunnelProviderRegistry
     notifications: NotificationService
+    storage: StorageService
+    backup_automation: BackupAutomationService
     scheduler_interval_seconds: int = 60
+    scheduler_enabled: bool = field(default=True, init=False)
     _evaluation_lock: threading.Lock = field(init=False, repr=False)
     _scheduler_guard: threading.Lock = field(init=False, repr=False)
     _scheduler_stop: threading.Event = field(init=False, repr=False)
+    _scheduler_wake: threading.Event = field(init=False, repr=False)
     _scheduler_thread: threading.Thread | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.scheduler_interval_seconds = max(10, self.scheduler_interval_seconds)
+        settings = self.settings()
+        self.scheduler_enabled = bool(settings["enabled"])
+        self.scheduler_interval_seconds = int(settings["interval_seconds"])
         self._evaluation_lock = threading.Lock()
         self._scheduler_guard = threading.Lock()
         self._scheduler_stop = threading.Event()
+        self._scheduler_wake = threading.Event()
         self._scheduler_thread: threading.Thread | None = None
         self._seed_system_rules()
 
@@ -91,6 +131,34 @@ class AutomationService:
                 "notify",
                 1800,
             ),
+            (
+                "system-restore-alert",
+                "Ошибки восстановления",
+                "restore_failed",
+                "notify",
+                3600,
+            ),
+            (
+                "system-mirror-alert",
+                "Зеркало требует восстановления",
+                "mirror_degraded",
+                "notify",
+                3600,
+            ),
+            (
+                "system-maintenance-alert",
+                "Ошибка обслуживания диска",
+                "maintenance_failed",
+                "notify",
+                3600,
+            ),
+            (
+                "system-pending-device-alert",
+                "Новое устройство ожидает подтверждения",
+                "pending_device",
+                "notify",
+                900,
+            ),
         )
         with self.database.transaction() as connection:
             for rule_id, name, trigger_type, action_type, cooldown in rules:
@@ -109,6 +177,7 @@ class AutomationService:
             if self._scheduler_thread is not None and self._scheduler_thread.is_alive():
                 return
             self._scheduler_stop.clear()
+            self._scheduler_wake.clear()
             self._scheduler_thread = threading.Thread(
                 target=self._scheduler_loop,
                 name="cloud-storage-automation",
@@ -121,17 +190,25 @@ class AutomationService:
             thread = self._scheduler_thread
             self._scheduler_thread = None
             self._scheduler_stop.set()
+            self._scheduler_wake.set()
         if thread is not None:
             thread.join(timeout=5)
 
     def _scheduler_loop(self) -> None:
-        if self._scheduler_stop.wait(2):
+        if self._scheduler_wake.wait(2) and self._scheduler_stop.is_set():
             return
+        self._scheduler_wake.clear()
         self._evaluate_safely()
-        while not self._scheduler_stop.wait(self.scheduler_interval_seconds):
+        while not self._scheduler_stop.is_set():
+            self._scheduler_wake.wait(self.scheduler_interval_seconds)
+            self._scheduler_wake.clear()
+            if self._scheduler_stop.is_set():
+                return
             self._evaluate_safely()
 
     def _evaluate_safely(self) -> None:
+        if not self.scheduler_enabled:
+            return
         try:
             self.evaluate(trigger_source="scheduler")
         except Exception:
@@ -286,11 +363,83 @@ class AutomationService:
                     and self._scheduler_thread.is_alive()
                 ),
                 "interval_seconds": self.scheduler_interval_seconds,
+                "enabled": self.scheduler_enabled,
             },
             "supported_triggers": sorted(TRIGGER_TYPES),
             "supported_actions": sorted(ACTION_TYPES),
+            "action_types_by_trigger": {
+                key: sorted(value) for key, value in ACTION_TYPES_BY_TRIGGER.items()
+            },
             "rules": rules,
             "runs": self.list_runs(50),
+        }
+
+    def settings(self) -> dict[str, Any]:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT enabled, interval_seconds, updated_at FROM automation_settings WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return {"enabled": True, "interval_seconds": 60, "updated_at": ""}
+        return {
+            "enabled": bool(row["enabled"]),
+            "interval_seconds": int(row["interval_seconds"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def set_settings(self, *, enabled: bool, interval_seconds: int) -> dict[str, Any]:
+        if not 10 <= interval_seconds <= 3600:
+            raise ValueError("automation interval must be between 10 and 3600 seconds")
+        now = utc_text()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO automation_settings(id, enabled, interval_seconds, updated_at)
+                VALUES(1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled,
+                    interval_seconds = excluded.interval_seconds,
+                    updated_at = excluded.updated_at
+                """,
+                (int(enabled), interval_seconds, now),
+            )
+            self.repository._audit_tx(
+                connection,
+                actor_type="manager",
+                actor_id=None,
+                action="automation.settings.updated",
+                target_type="automation",
+                target_id="scheduler",
+                detail=(
+                    f"Автоматическое выполнение {'включено' if enabled else 'выключено'}; "
+                    f"проверка каждые {interval_seconds} сек"
+                ),
+            )
+        self.scheduler_enabled = enabled
+        self.scheduler_interval_seconds = interval_seconds
+        self._scheduler_wake.set()
+        return self.settings()
+
+    def preview(self, rule_id: str | None = None) -> dict[str, Any]:
+        rules = [self.get_rule(rule_id)] if rule_id else self.list_rules()
+        result = []
+        for rule in rules:
+            condition = self._matching_condition(rule.trigger_type)
+            remaining = self._cooldown_remaining_seconds(rule)
+            result.append(
+                {
+                    "rule_id": rule.id,
+                    "rule_name": rule.name,
+                    "enabled": rule.enabled,
+                    "matched": condition is not None,
+                    "condition": condition,
+                    "cooldown_remaining_seconds": remaining,
+                    "would_run": bool(rule.enabled and condition is not None and remaining == 0),
+                }
+            )
+        return {
+            "matched_rules": sum(bool(item["matched"]) for item in result),
+            "ready_rules": sum(bool(item["would_run"]) for item in result),
+            "rules": result,
         }
 
     def evaluate(self, *, trigger_source: str = "manager") -> list[dict[str, Any]]:
@@ -312,6 +461,25 @@ class AutomationService:
             self._evaluation_lock.release()
 
     def _matching_condition(self, trigger_type: str) -> dict[str, Any] | None:
+        if trigger_type == "scheduled":
+            return {
+                "severity": "info",
+                "summary": "Наступило время планового запуска",
+                "detail": "Интервал правила истёк",
+            }
+        if trigger_type == "mirror_degraded":
+            degraded = sum(
+                int(item.get("degraded_files", 0))
+                for item in self.storage.mirror_overview()
+                if item.get("write_enabled")
+            )
+            if degraded:
+                return {
+                    "severity": "warning",
+                    "summary": "Зеркало содержит неполные или устаревшие копии",
+                    "detail": f"Требуют восстановления объектов: {degraded}",
+                }
+            return None
         if trigger_type == "tunnel_offline":
             offline = []
             for provider_id, provider in self.tunnels.providers.items():
@@ -353,6 +521,21 @@ class AutomationService:
                 "(SELECT count(*) FROM backup_verifications WHERE status = 'failed')",
                 "warning",
                 "Ошибка резервного копирования или проверки",
+            ),
+            "restore_failed": (
+                "SELECT count(*) FROM restore_jobs WHERE status = 'failed'",
+                "warning",
+                "Ошибка проверяемого восстановления",
+            ),
+            "maintenance_failed": (
+                "SELECT count(*) FROM maintenance_jobs WHERE status = 'failed'",
+                "warning",
+                "Ошибка обслуживания или переноса диска",
+            ),
+            "pending_device": (
+                "SELECT count(*) FROM devices WHERE status = 'pending'",
+                "info",
+                "Устройство ожидает подтверждения администратора",
             ),
         }
         query, severity, summary = queries[trigger_type]
@@ -396,6 +579,15 @@ class AutomationService:
                     daemon=True,
                 ).start()
                 result = f"diagnostic_scan:{scan.id}"
+            elif rule.action_type == "full_scan":
+                scan = self.diagnostics.create_scan("full", source="monitor")
+                threading.Thread(
+                    target=self.diagnostics.run_scan_safely,
+                    args=(scan.id,),
+                    name="cloud-storage-automation-full-scan",
+                    daemon=True,
+                ).start()
+                result = f"diagnostic_scan:{scan.id}"
             elif rule.action_type == "read_only":
                 state = self.recovery.server_mode()
                 if state["mode"] == "read_only":
@@ -407,7 +599,63 @@ class AutomationService:
                         f"Автоматизация «{rule.name}»: {condition['summary']}",
                     )
                     result = f"server_mode:{changed['mode']}"
-        except (ConflictError, OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+            elif rule.action_type == "run_backup":
+                policies = [
+                    item for item in self.backup_automation.list_policies() if item.enabled
+                ]
+                if not policies:
+                    status = "skipped"
+                    result = "no_enabled_backup_policy"
+                else:
+                    policy = min(
+                        policies,
+                        key=lambda item: (item.last_run_at or "", item.target_root_id),
+                    )
+                    job = self.backup_automation.queue_policy_run(policy.target_root_id)
+                    threading.Thread(
+                        target=self.backup_automation.run_backup_pipeline,
+                        args=(job.id,),
+                        name="cloud-storage-automation-backup",
+                        daemon=True,
+                    ).start()
+                    result = f"backup_job:{job.id}"
+            elif rule.action_type == "reconcile_mirrors":
+                mirrors = [
+                    item
+                    for item in self.storage.mirror_overview()
+                    if item.get("write_enabled")
+                ]
+                if not mirrors:
+                    status = "skipped"
+                    result = "no_writable_mirror"
+                else:
+                    target = max(
+                        mirrors,
+                        key=lambda item: int(item.get("degraded_files", 0)),
+                    )
+                    job = self.storage.create_mirror_job(str(target["root_id"]))
+                    threading.Thread(
+                        target=self.storage.run_mirror_job,
+                        args=(job.id,),
+                        name="cloud-storage-automation-mirror",
+                        daemon=True,
+                    ).start()
+                    result = f"mirror_job:{job.id}"
+            elif rule.action_type == "restart_tunnel":
+                candidates = [
+                    provider_id
+                    for provider_id, provider in self.tunnels.providers.items()
+                    if provider.status().get("enabled")
+                    and provider.status().get("state") != "online"
+                ]
+                if not candidates:
+                    status = "skipped"
+                    result = "no_offline_tunnel"
+                else:
+                    provider_id = sorted(candidates)[0]
+                    tunnel_state = self.tunnels.restart(provider_id)
+                    result = f"tunnel:{provider_id}:{tunnel_state.get('state', 'starting')}"
+        except (ConflictError, KeyError, OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
             status = "failed"
             error = str(exc)[:1000]
         completed_at = utc_text()
@@ -457,20 +705,25 @@ class AutomationService:
             raise ValueError("unsupported automation action")
         if not 60 <= cooldown_seconds <= 604800:
             raise ValueError("automation cooldown must be between 60 and 604800 seconds")
-        if action_type == "read_only" and trigger_type != "diagnostic_critical":
-            raise ValueError("automatic read-only mode requires a critical diagnostic trigger")
+        if action_type not in ACTION_TYPES_BY_TRIGGER[trigger_type]:
+            raise ValueError("automation action is not safe for the selected trigger")
 
     @staticmethod
     def _cooldown_active(rule: AutomationRuleRecord) -> bool:
+        return AutomationService._cooldown_remaining_seconds(rule) > 0
+
+    @staticmethod
+    def _cooldown_remaining_seconds(rule: AutomationRuleRecord) -> int:
         if not rule.last_triggered_at:
-            return False
+            return 0
         try:
             last = datetime.fromisoformat(rule.last_triggered_at)
         except ValueError:
-            return False
+            return 0
         if last.tzinfo is None:
             last = last.replace(tzinfo=UTC)
-        return datetime.now(UTC) < last + timedelta(seconds=rule.cooldown_seconds)
+        remaining = last + timedelta(seconds=rule.cooldown_seconds) - datetime.now(UTC)
+        return max(0, int(remaining.total_seconds()))
 
     @staticmethod
     def _rule(row: sqlite3.Row) -> AutomationRuleRecord:

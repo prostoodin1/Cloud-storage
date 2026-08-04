@@ -125,11 +125,25 @@ class AutomationRuleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     enabled: bool = True
     trigger_type: str = Field(
-        pattern="^(diagnostic_warning|diagnostic_critical|storage_low|backup_failed|tunnel_offline)$"
+        pattern=(
+            "^(diagnostic_warning|diagnostic_critical|storage_low|backup_failed|"
+            "restore_failed|mirror_degraded|maintenance_failed|pending_device|"
+            "tunnel_offline|scheduled)$"
+        )
     )
-    action_type: str = Field(pattern="^(notify|quick_scan|read_only)$")
+    action_type: str = Field(
+        pattern=(
+            "^(notify|quick_scan|full_scan|read_only|run_backup|"
+            "reconcile_mirrors|restart_tunnel)$"
+        )
+    )
     cooldown_minutes: int = Field(default=60, ge=1, le=10080)
     confirmed: bool = False
+
+
+class AutomationSettingsRequest(BaseModel):
+    enabled: bool = True
+    interval_seconds: int = Field(default=60, ge=10, le=3600)
 
 
 class CreateRestoreRequest(BaseModel):
@@ -235,6 +249,8 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         recovery,
         tunnels,
         notifications,
+        storage,
+        backup_automation,
     )
     support = SupportBundleService(
         config,
@@ -626,6 +642,33 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     )
     def automation_overview() -> dict[str, Any]:
         return runtime.automation.overview()
+
+    @app.put(
+        "/v1/admin/automation/settings",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def update_automation_settings(body: AutomationSettingsRequest) -> dict[str, Any]:
+        return runtime.automation.set_settings(
+            enabled=body.enabled,
+            interval_seconds=body.interval_seconds,
+        )
+
+    @app.get(
+        "/v1/admin/automation/preview",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def preview_automation() -> dict[str, Any]:
+        return runtime.automation.preview()
+
+    @app.get(
+        "/v1/admin/automation/rules/{rule_id}/preview",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def preview_automation_rule(rule_id: str) -> dict[str, Any]:
+        return runtime.automation.preview(rule_id)
 
     @app.post(
         "/v1/admin/automation/rules",

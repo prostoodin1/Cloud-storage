@@ -30,6 +30,64 @@ from cloud_storage.services.disk_service import evaluate_status
 from cloud_storage.ui.theme import COLORS
 from cloud_storage.ui.widgets import DiskCard, StatCard, clear_layout, format_bytes, make_header
 
+AUTOMATION_TRIGGER_LABELS = {
+    "diagnostic_warning": "предупреждение диагностики",
+    "diagnostic_critical": "критический инцидент",
+    "storage_low": "нехватка места",
+    "backup_failed": "ошибка резервной копии",
+    "restore_failed": "ошибка восстановления",
+    "mirror_degraded": "зеркало требует восстановления",
+    "maintenance_failed": "ошибка обслуживания диска",
+    "pending_device": "устройство ожидает подтверждения",
+    "tunnel_offline": "сбой интернет-шлюза",
+    "scheduled": "наступило время планового запуска",
+}
+AUTOMATION_ACTION_LABELS = {
+    "notify": "создать уведомление",
+    "quick_scan": "запустить быструю проверку",
+    "full_scan": "запустить полную проверку SHA-256",
+    "read_only": "включить режим только чтения",
+    "run_backup": "создать и проверить резервную копию",
+    "reconcile_mirrors": "проверить и восстановить зеркало",
+    "restart_tunnel": "перезапустить интернет-шлюз",
+}
+AUTOMATION_ACTIONS_BY_TRIGGER = {
+    "diagnostic_warning": ("notify", "quick_scan", "full_scan"),
+    "diagnostic_critical": ("notify", "quick_scan", "full_scan", "read_only"),
+    "storage_low": ("notify", "quick_scan"),
+    "backup_failed": ("notify", "quick_scan", "full_scan"),
+    "restore_failed": ("notify", "quick_scan", "full_scan"),
+    "mirror_degraded": ("notify", "quick_scan", "full_scan", "reconcile_mirrors"),
+    "maintenance_failed": ("notify", "quick_scan", "full_scan"),
+    "pending_device": ("notify",),
+    "tunnel_offline": ("notify", "restart_tunnel"),
+    "scheduled": ("notify", "quick_scan", "full_scan", "run_backup", "reconcile_mirrors"),
+}
+
+
+def format_automation_result(value: object) -> str:
+    text = str(value or "")
+    labels = {
+        "server_already_read_only": "сервер уже работает только на чтение",
+        "no_enabled_backup_policy": "нет включённой политики резервирования",
+        "no_writable_mirror": "нет доступного зеркального диска",
+        "no_offline_tunnel": "интернет-шлюз уже работает или выключен",
+    }
+    if text in labels:
+        return labels[text]
+    prefixes = {
+        "notification:": "уведомление создано",
+        "diagnostic_scan:": "диагностическая проверка запущена",
+        "server_mode:": "защитный режим сервера изменён",
+        "backup_job:": "резервная копия поставлена в очередь",
+        "mirror_job:": "восстановление зеркала поставлено в очередь",
+        "tunnel:": "перезапуск интернет-шлюза запущен",
+    }
+    for prefix, label in prefixes.items():
+        if text.startswith(prefix):
+            return label
+    return text
+
 
 def _scroll_page(content: QWidget) -> QScrollArea:
     area = QScrollArea()
@@ -372,6 +430,9 @@ class SettingsPage(QWidget):
     automation_rule_update_requested = Signal(str, dict)
     automation_rule_delete_requested = Signal(str)
     automation_evaluate_requested = Signal()
+    automation_preview_requested = Signal()
+    automation_rule_preview_requested = Signal(str)
+    automation_settings_requested = Signal(dict)
     notification_acknowledge_requested = Signal(str)
     integration_test_requested = Signal(str)
     server_read_only_requested = Signal()
@@ -522,6 +583,12 @@ class SettingsPage(QWidget):
         self.automation_cooldown: QSpinBox | None = None
         self.automation_create_button: QPushButton | None = None
         self.automation_evaluate_button: QPushButton | None = None
+        self.automation_preview_button: QPushButton | None = None
+        self.automation_scheduler_enabled: QCheckBox | None = None
+        self.automation_scheduler_interval: QSpinBox | None = None
+        self.automation_scheduler_status: QLabel | None = None
+        self.automation_settings_button: QPushButton | None = None
+        self.automation_rule_hint: QLabel | None = None
         self.automation_rule_rows: QVBoxLayout | None = None
         self.automation_run_rows: QVBoxLayout | None = None
         self.notification_rows: QVBoxLayout | None = None
@@ -1135,10 +1202,42 @@ class SettingsPage(QWidget):
             self.mirror_job_rows.addWidget(card)
 
     def _update_automation(self, automation: dict, online: bool) -> None:
+        scheduler = automation.get("scheduler") or {}
+        if self.automation_scheduler_enabled is not None:
+            self.automation_scheduler_enabled.blockSignals(True)
+            self.automation_scheduler_enabled.setChecked(
+                bool(scheduler.get("enabled", True))
+            )
+            self.automation_scheduler_enabled.setEnabled(online)
+            self.automation_scheduler_enabled.blockSignals(False)
+        if self.automation_scheduler_interval is not None:
+            self.automation_scheduler_interval.blockSignals(True)
+            self.automation_scheduler_interval.setValue(
+                int(scheduler.get("interval_seconds", 60))
+            )
+            self.automation_scheduler_interval.setEnabled(online)
+            self.automation_scheduler_interval.blockSignals(False)
+        if self.automation_scheduler_status is not None:
+            if not online:
+                status = "Core выключен — правила сохранены, но не выполняются."
+            elif not scheduler.get("enabled", True):
+                status = "Автоматическое выполнение приостановлено администратором."
+            elif scheduler.get("running"):
+                status = (
+                    "Планировщик работает · следующая проверка не позднее чем через "
+                    f"{int(scheduler.get('interval_seconds', 60))} сек."
+                )
+            else:
+                status = "Планировщик запускается вместе с Core."
+            self.automation_scheduler_status.setText(status)
         if self.automation_create_button is not None:
             self.automation_create_button.setEnabled(online)
         if self.automation_evaluate_button is not None:
             self.automation_evaluate_button.setEnabled(online)
+        if self.automation_preview_button is not None:
+            self.automation_preview_button.setEnabled(online)
+        if self.automation_settings_button is not None:
+            self.automation_settings_button.setEnabled(online)
         if self.automation_rule_rows is not None:
             clear_layout(self.automation_rule_rows)
             rules = list(automation.get("rules") or [])
@@ -1149,18 +1248,6 @@ class SettingsPage(QWidget):
                 )
             elif not rules:
                 self._add_muted(self.automation_rule_rows, "Правил автоматизации пока нет.")
-            trigger_labels = {
-                "diagnostic_warning": "предупреждение диагностики",
-                "diagnostic_critical": "критический инцидент",
-                "storage_low": "нехватка места",
-                "backup_failed": "ошибка резервной копии",
-                "tunnel_offline": "сбой интернет-шлюза",
-            }
-            action_labels = {
-                "notify": "создать уведомление",
-                "quick_scan": "запустить быструю проверку",
-                "read_only": "включить режим только чтения",
-            }
             for rule in rules:
                 card = QFrame()
                 card.setProperty("card", True)
@@ -1172,8 +1259,8 @@ class SettingsPage(QWidget):
                 )
                 title.setStyleSheet("font-weight: 700;")
                 detail = QLabel(
-                    f"Если: {trigger_labels.get(rule.get('trigger_type'), rule.get('trigger_type'))} · "
-                    f"то: {action_labels.get(rule.get('action_type'), rule.get('action_type'))} · "
+                    f"Если: {AUTOMATION_TRIGGER_LABELS.get(rule.get('trigger_type'), rule.get('trigger_type'))} · "
+                    f"то: {AUTOMATION_ACTION_LABELS.get(rule.get('action_type'), rule.get('action_type'))} · "
                     f"не чаще {max(1, int(rule.get('cooldown_seconds', 60)) // 60)} мин"
                 )
                 detail.setWordWrap(True)
@@ -1185,6 +1272,13 @@ class SettingsPage(QWidget):
                     last.setProperty("muted", True)
                     box.addWidget(last)
                 controls = QHBoxLayout()
+                preview = QPushButton("Проверить условие")
+                preview.clicked.connect(
+                    lambda _checked=False, rule_id=str(rule["id"]): (
+                        self.automation_rule_preview_requested.emit(rule_id)
+                    )
+                )
+                controls.addWidget(preview)
                 toggle = QPushButton("Выключить" if rule.get("enabled") else "Включить")
                 update_payload = {
                     "name": str(rule.get("name", "Правило")),
@@ -1228,7 +1322,7 @@ class SettingsPage(QWidget):
             label = QLabel(
                 f"{run.get('created_at', '—')} · {run.get('rule_name', 'Правило')} · "
                 f"{status_labels.get(run.get('status'), run.get('status'))} · "
-                f"{run.get('action_result') or run.get('error') or run.get('condition_summary', '')}"
+                f"{format_automation_result(run.get('action_result')) or run.get('error') or run.get('condition_summary', '')}"
             )
             label.setWordWrap(True)
             label.setProperty("muted", True)
@@ -1963,13 +2057,40 @@ class SettingsPage(QWidget):
             layout.addWidget(open_updates)
         elif name == "Автоматизация":
             description = QLabel(
-                "Правила работают внутри Core, сохраняются в SQLite и переживают перезапуск. "
-                "Cooldown защищает от повторяющихся действий. Системные правила можно выключить, "
-                "но нельзя удалить."
+                "Правила работают внутри Core и переживают закрытие Manager и перезапуск Windows. "
+                "Доступны события диагностики, дисков, копий, устройств и расписание. Действия "
+                "ограничены безопасным встроенным списком: произвольные команды и скрипты запрещены."
             )
             description.setWordWrap(True)
             description.setProperty("muted", True)
             layout.addWidget(description)
+            scheduler = QFrame()
+            scheduler.setProperty("card", True)
+            scheduler_box = QVBoxLayout(scheduler)
+            scheduler_title = QLabel("Движок автоматизации")
+            scheduler_title.setObjectName("SectionTitle")
+            self.automation_scheduler_enabled = QCheckBox(
+                "Автоматически проверять и выполнять включённые правила"
+            )
+            scheduler_form = QFormLayout()
+            self.automation_scheduler_interval = QSpinBox()
+            self.automation_scheduler_interval.setRange(10, 3600)
+            self.automation_scheduler_interval.setValue(60)
+            self.automation_scheduler_interval.setSuffix(" сек")
+            scheduler_form.addRow("Проверять каждые", self.automation_scheduler_interval)
+            self.automation_scheduler_status = QLabel("Состояние Core пока неизвестно")
+            self.automation_scheduler_status.setWordWrap(True)
+            self.automation_scheduler_status.setProperty("muted", True)
+            self.automation_settings_button = QPushButton("Сохранить режим выполнения")
+            self.automation_settings_button.clicked.connect(
+                self._emit_automation_settings
+            )
+            scheduler_box.addWidget(scheduler_title)
+            scheduler_box.addWidget(self.automation_scheduler_enabled)
+            scheduler_box.addLayout(scheduler_form)
+            scheduler_box.addWidget(self.automation_scheduler_status)
+            scheduler_box.addWidget(self.automation_settings_button)
+            layout.addWidget(scheduler)
             rule_form = QFormLayout()
             self.automation_rule_name = QLineEdit()
             self.automation_rule_name.setMaxLength(120)
@@ -1981,17 +2102,19 @@ class SettingsPage(QWidget):
                 ("Критический инцидент", "diagnostic_critical"),
                 ("Нехватка места", "storage_low"),
                 ("Ошибка резервной копии", "backup_failed"),
+                ("Ошибка восстановления", "restore_failed"),
+                ("Зеркало требует восстановления", "mirror_degraded"),
+                ("Ошибка обслуживания диска", "maintenance_failed"),
+                ("Новое устройство ожидает подтверждения", "pending_device"),
                 ("Сбой интернет-шлюза", "tunnel_offline"),
+                ("По расписанию", "scheduled"),
             ):
                 self.automation_trigger.addItem(label, value)
+            self.automation_trigger.currentIndexChanged.connect(
+                self._automation_trigger_changed
+            )
             rule_form.addRow("Если", self.automation_trigger)
             self.automation_action = QComboBox()
-            for label, value in (
-                ("Создать уведомление", "notify"),
-                ("Запустить быструю проверку", "quick_scan"),
-                ("Включить режим только чтения", "read_only"),
-            ):
-                self.automation_action.addItem(label, value)
             rule_form.addRow("То", self.automation_action)
             self.automation_cooldown = QSpinBox()
             self.automation_cooldown.setRange(1, 10080)
@@ -1999,15 +2122,25 @@ class SettingsPage(QWidget):
             self.automation_cooldown.setSuffix(" мин")
             rule_form.addRow("Не чаще", self.automation_cooldown)
             layout.addLayout(rule_form)
+            self.automation_rule_hint = QLabel()
+            self.automation_rule_hint.setWordWrap(True)
+            self.automation_rule_hint.setProperty("emptyState", True)
+            layout.addWidget(self.automation_rule_hint)
+            self._automation_trigger_changed()
             rule_controls = QHBoxLayout()
             self.automation_create_button = QPushButton("Добавить постоянное правило")
             self.automation_create_button.setProperty("primary", True)
             self.automation_create_button.clicked.connect(self._emit_automation_rule)
-            self.automation_evaluate_button = QPushButton("Проверить правила сейчас")
+            self.automation_preview_button = QPushButton("Проверить без запуска")
+            self.automation_preview_button.clicked.connect(
+                self.automation_preview_requested
+            )
+            self.automation_evaluate_button = QPushButton("Выполнить совпавшие сейчас")
             self.automation_evaluate_button.clicked.connect(
                 self.automation_evaluate_requested
             )
             rule_controls.addWidget(self.automation_create_button)
+            rule_controls.addWidget(self.automation_preview_button)
             rule_controls.addWidget(self.automation_evaluate_button)
             rule_controls.addStretch()
             layout.addLayout(rule_controls)
@@ -2259,6 +2392,75 @@ class SettingsPage(QWidget):
                 "cooldown_minutes": self.automation_cooldown.value(),
             }
         )
+
+    def _automation_trigger_changed(self) -> None:
+        if self.automation_trigger is None or self.automation_action is None:
+            return
+        trigger = str(self.automation_trigger.currentData())
+        previous = self.automation_action.currentData()
+        self.automation_action.blockSignals(True)
+        self.automation_action.clear()
+        for action in AUTOMATION_ACTIONS_BY_TRIGGER.get(trigger, ("notify",)):
+            self.automation_action.addItem(AUTOMATION_ACTION_LABELS[action].capitalize(), action)
+        previous_index = self.automation_action.findData(previous)
+        self.automation_action.setCurrentIndex(max(0, previous_index))
+        self.automation_action.blockSignals(False)
+        if self.automation_rule_hint is not None:
+            if trigger == "scheduled":
+                if self.automation_cooldown is not None and self.automation_cooldown.value() == 60:
+                    self.automation_cooldown.setValue(1440)
+                text = (
+                    "Для расписания поле «Не чаще» является интервалом: 1440 минут — ежедневно, "
+                    "10080 минут — еженедельно. Первый запуск произойдёт при ближайшей проверке Core."
+                )
+            elif trigger == "pending_device":
+                text = (
+                    "Для ожидающего устройства разрешено только уведомление: подтверждение всегда "
+                    "выполняет администратор вручную."
+                )
+            else:
+                text = (
+                    "Список действий уже отфильтрован по безопасности. Cooldown не позволит "
+                    "повторять одно действие чаще указанного интервала."
+                )
+            self.automation_rule_hint.setText(text)
+
+    def _emit_automation_settings(self) -> None:
+        if (
+            self.automation_scheduler_enabled is None
+            or self.automation_scheduler_interval is None
+        ):
+            return
+        self.automation_settings_requested.emit(
+            {
+                "enabled": self.automation_scheduler_enabled.isChecked(),
+                "interval_seconds": self.automation_scheduler_interval.value(),
+            }
+        )
+
+    def show_automation_preview(self, result: dict, *, rule_name: str = "") -> None:
+        if self.automation_scheduler_status is None:
+            return
+        rules = list(result.get("rules") or [])
+        if rule_name and rules:
+            item = rules[0]
+            if item.get("matched"):
+                cooldown = int(item.get("cooldown_remaining_seconds", 0))
+                suffix = (
+                    f"; cooldown ещё {cooldown} сек"
+                    if cooldown
+                    else "; действие готово к запуску"
+                )
+                text = f"Условие правила «{rule_name}» совпало{suffix}. Действие не запускалось."
+            else:
+                text = f"Условие правила «{rule_name}» сейчас не совпадает. Действие не запускалось."
+        else:
+            text = (
+                f"Проверено правил: {len(rules)} · условия совпали: "
+                f"{int(result.get('matched_rules', 0))} · готовы к запуску: "
+                f"{int(result.get('ready_rules', 0))}. Действия не запускались."
+            )
+        self.automation_scheduler_status.setText(text)
 
     @staticmethod
     def _add_muted(layout: QVBoxLayout, text: str) -> None:

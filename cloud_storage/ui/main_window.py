@@ -267,6 +267,15 @@ class MainWindow(QMainWindow):
         self.settings_page.automation_evaluate_requested.connect(
             self.evaluate_automation
         )
+        self.settings_page.automation_preview_requested.connect(
+            self.preview_automation
+        )
+        self.settings_page.automation_rule_preview_requested.connect(
+            self.preview_automation_rule
+        )
+        self.settings_page.automation_settings_requested.connect(
+            self.update_automation_settings
+        )
         self.settings_page.notification_acknowledge_requested.connect(
             self.acknowledge_notification
         )
@@ -980,6 +989,14 @@ class MainWindow(QMainWindow):
         self.refresh_core()
 
     def evaluate_automation(self) -> None:
+        response = QMessageBox.question(
+            self,
+            "Выполнить совпавшие правила?",
+            "Core повторно проверит все условия и сразу запустит готовые действия. "
+            "Резервирование, полная диагностика и восстановление зеркала могут занять время.",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
         try:
             result = self.core_client.evaluate_automation()
         except (CoreApiError, CoreUnavailable) as exc:
@@ -991,6 +1008,40 @@ class MainWindow(QMainWindow):
             "Проверка завершена",
             f"Сработало правил: {result.get('matched_rules', 0)}.",
         )
+
+    def preview_automation(self) -> None:
+        try:
+            result = self.core_client.preview_automation()
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Условия не проверены", self._core_error_text(exc))
+            return
+        self.settings_page.show_automation_preview(result)
+
+    def preview_automation_rule(self, rule_id: str) -> None:
+        try:
+            result = self.core_client.preview_automation_rule(rule_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Условие не проверено", self._core_error_text(exc))
+            return
+        rule_name = next(
+            (
+                str(item.get("name", "Правило"))
+                for item in (self.core_automation.get("rules") or [])
+                if item.get("id") == rule_id
+            ),
+            "Правило",
+        )
+        self.settings_page.show_automation_preview(result, rule_name=rule_name)
+
+    def update_automation_settings(self, values: dict) -> None:
+        try:
+            self.core_client.update_automation_settings(values)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(
+                self, "Режим не сохранён", self._core_error_text(exc)
+            )
+            return
+        self.refresh_core()
 
     def acknowledge_notification(self, notification_id: str) -> None:
         try:

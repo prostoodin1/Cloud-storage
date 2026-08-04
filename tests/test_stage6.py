@@ -91,7 +91,7 @@ def test_builtin_integrations_and_notification_inbox_are_persistent(tmp_path) ->
 def test_automation_rules_cooldown_persistence_and_read_only_action(tmp_path) -> None:
     app, client, headers = _manager_client(tmp_path)
     initial = client.get("/v1/admin/automation", headers=headers).json()
-    assert len(initial["rules"]) == 4
+    assert len(initial["rules"]) == 8
     assert all(rule["system_rule"] for rule in initial["rules"])
 
     created = client.post(

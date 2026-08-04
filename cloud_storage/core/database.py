@@ -308,9 +308,13 @@ CREATE TABLE IF NOT EXISTS automation_rules (
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     trigger_type TEXT NOT NULL CHECK(trigger_type IN (
         'diagnostic_warning', 'diagnostic_critical', 'storage_low',
-        'backup_failed', 'tunnel_offline'
+        'backup_failed', 'restore_failed', 'mirror_degraded',
+        'maintenance_failed', 'pending_device', 'tunnel_offline', 'scheduled'
     )),
-    action_type TEXT NOT NULL CHECK(action_type IN ('notify', 'quick_scan', 'read_only')),
+    action_type TEXT NOT NULL CHECK(action_type IN (
+        'notify', 'quick_scan', 'full_scan', 'read_only', 'run_backup',
+        'reconcile_mirrors', 'restart_tunnel'
+    )),
     cooldown_seconds INTEGER NOT NULL DEFAULT 3600 CHECK(cooldown_seconds BETWEEN 60 AND 604800),
     system_rule INTEGER NOT NULL DEFAULT 0 CHECK(system_rule IN (0, 1)),
     last_triggered_at TEXT,
@@ -328,6 +332,13 @@ CREATE TABLE IF NOT EXISTS automation_runs (
     error TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     completed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS automation_settings (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    interval_seconds INTEGER NOT NULL DEFAULT 60 CHECK(interval_seconds BETWEEN 10 AND 3600),
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -397,6 +408,11 @@ class Database:
             }
             if "pruned_at" not in backup_columns:
                 connection.execute("ALTER TABLE backup_jobs ADD COLUMN pruned_at TEXT")
+            self._upgrade_automation_schema(connection)
+            connection.execute(
+                "INSERT OR IGNORE INTO automation_settings(id, enabled, interval_seconds, updated_at) "
+                "VALUES(1, 1, 60, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
@@ -441,7 +457,74 @@ class Database:
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(11, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
             connection.commit()
+
+    @staticmethod
+    def _upgrade_automation_schema(connection: sqlite3.Connection) -> None:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'automation_rules'"
+        ).fetchone()
+        if row is None or "scheduled" in str(row["sql"]):
+            return
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            connection.executescript(
+                """
+                BEGIN IMMEDIATE;
+                ALTER TABLE automation_runs RENAME TO automation_runs_legacy;
+                ALTER TABLE automation_rules RENAME TO automation_rules_legacy;
+                CREATE TABLE automation_rules (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+                    trigger_type TEXT NOT NULL CHECK(trigger_type IN (
+                        'diagnostic_warning', 'diagnostic_critical', 'storage_low',
+                        'backup_failed', 'restore_failed', 'mirror_degraded',
+                        'maintenance_failed', 'pending_device', 'tunnel_offline', 'scheduled'
+                    )),
+                    action_type TEXT NOT NULL CHECK(action_type IN (
+                        'notify', 'quick_scan', 'full_scan', 'read_only', 'run_backup',
+                        'reconcile_mirrors', 'restart_tunnel'
+                    )),
+                    cooldown_seconds INTEGER NOT NULL DEFAULT 3600
+                        CHECK(cooldown_seconds BETWEEN 60 AND 604800),
+                    system_rule INTEGER NOT NULL DEFAULT 0 CHECK(system_rule IN (0, 1)),
+                    last_triggered_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE automation_runs (
+                    id TEXT PRIMARY KEY,
+                    rule_id TEXT NOT NULL REFERENCES automation_rules(id) ON DELETE CASCADE,
+                    trigger_source TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('completed', 'failed', 'skipped')),
+                    condition_summary TEXT NOT NULL,
+                    action_result TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL
+                );
+                INSERT INTO automation_rules SELECT * FROM automation_rules_legacy;
+                INSERT INTO automation_runs SELECT * FROM automation_runs_legacy;
+                DROP TABLE automation_runs_legacy;
+                DROP TABLE automation_rules_legacy;
+                CREATE INDEX IF NOT EXISTS idx_automation_rules_enabled
+                    ON automation_rules(enabled, trigger_type);
+                CREATE INDEX IF NOT EXISTS idx_automation_runs_created
+                    ON automation_runs(created_at DESC);
+                COMMIT;
+                """
+            )
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)

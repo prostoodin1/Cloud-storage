@@ -311,7 +311,7 @@ def test_live_https_listener_pinning_discovery_and_local_admin_boundary(tmp_path
 
         local_client = CoreClient(config)
         assert local_client.summary()["users"] == 0
-        assert len(local_client.automation()["rules"]) == 4
+        assert len(local_client.automation()["rules"]) == 8
         assert local_client.integrations()["policy"]["built_in_only"] is True
         tested_inbox = local_client.test_integration("manager-inbox")
         notifications = local_client.list_notifications()

@@ -88,6 +88,21 @@ class CoreClient:
     def automation(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/automation")
 
+    def update_automation_settings(self, values: dict[str, Any]) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/automation/settings",
+            method="PUT",
+            payload=values,
+        )
+
+    def preview_automation(self) -> dict[str, Any]:
+        return self._manager_request("/v1/admin/automation/preview")
+
+    def preview_automation_rule(self, rule_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/automation/rules/{rule_id}/preview"
+        )
+
     def create_automation_rule(self, values: dict[str, Any]) -> dict[str, Any]:
         return self._manager_request(
             "/v1/admin/automation/rules",

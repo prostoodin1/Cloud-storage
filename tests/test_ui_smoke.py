@@ -46,6 +46,16 @@ def test_main_window_smoke(tmp_path) -> None:
     assert window.settings_page.support_bundle_button is not None
     assert window.settings_page.automation_create_button is not None
     assert window.settings_page.automation_rule_rows is not None
+    assert window.settings_page.automation_scheduler_enabled is not None
+    assert window.settings_page.automation_scheduler_interval is not None
+    assert window.settings_page.automation_preview_button is not None
+    scheduled = window.settings_page.automation_trigger.findData("scheduled")
+    window.settings_page.automation_trigger.setCurrentIndex(scheduled)
+    available_actions = {
+        window.settings_page.automation_action.itemData(index)
+        for index in range(window.settings_page.automation_action.count())
+    }
+    assert {"run_backup", "reconcile_mirrors", "full_scan"} <= available_actions
     assert window.settings_page.notification_rows is not None
     assert window.settings_page.integration_rows is not None
     assert len(window.disks) == 1

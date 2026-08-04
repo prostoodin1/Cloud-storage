@@ -230,6 +230,32 @@ class CoreClient:
     def list_storage_roots(self) -> list[dict[str, Any]]:
         return self._manager_request("/v1/admin/storage-roots")
 
+    def transfers(self, limit: int = 100) -> dict[str, Any]:
+        safe_limit = max(1, min(int(limit), 500))
+        return self._manager_request(f"/v1/admin/transfers?limit={safe_limit}")
+
+    def update_transfer_settings(
+        self,
+        *,
+        staging_enabled: bool,
+        staging_path: str,
+    ) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/transfers/settings",
+            method="PUT",
+            payload={
+                "staging_enabled": staging_enabled,
+                "staging_path": staging_path,
+            },
+        )
+
+    def retry_transfer(self, transfer_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/transfers/{transfer_id}/retry",
+            method="POST",
+            timeout=120.0,
+        )
+
     def list_maintenance_jobs(self) -> list[dict[str, Any]]:
         return self._manager_request("/v1/admin/maintenance/jobs")
 

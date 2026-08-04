@@ -47,6 +47,7 @@ from cloud_storage.ui.dialogs import (
     SetupDialog,
 )
 from cloud_storage.ui.pages import DashboardPage, DisksPage, SettingsPage
+from cloud_storage.ui.transfer_page import TransfersPage
 from cloud_storage.ui.update_page import UpdatePage
 
 
@@ -106,6 +107,12 @@ class MainWindow(QMainWindow):
         self.core_automation: dict = {"rules": [], "runs": []}
         self.core_notifications: list[dict] = []
         self.core_integrations: dict = {"plugins": []}
+        self.core_transfers: dict = {
+            "settings": {},
+            "inbound": [],
+            "outbound": [],
+            "counts": {},
+        }
         self.core_server_mode: dict = {
             "mode": "normal",
             "reason": "",
@@ -161,6 +168,8 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.dashboard_page = DashboardPage()
         self.disks_page = DisksPage()
+        self.receive_page = TransfersPage("inbound")
+        self.send_page = TransfersPage("outbound")
         self.settings_page = SettingsPage()
         self.update_page = UpdatePage(
             "server",
@@ -171,6 +180,8 @@ class MainWindow(QMainWindow):
         for label, page in (
             ("⌂   Основная", self.dashboard_page),
             ("▣   Диски", self.disks_page),
+            ("↓   Приём", self.receive_page),
+            ("↑   Отправка", self.send_page),
             ("⚙   Настройки", self.settings_page),
             ("↻   Обновления", self.update_page),
             ("?   Помощь", self.help_page),
@@ -213,6 +224,12 @@ class MainWindow(QMainWindow):
         self.disks_page.configure_first_requested.connect(self.configure_first_unconfigured)
         self.disks_page.remind_later_requested.connect(self.hide_disk_reminder)
         self.disks_page.ignore_unconfigured_requested.connect(self.ignore_unconfigured)
+        self.receive_page.refresh_requested.connect(self.refresh_core)
+        self.receive_page.retry_requested.connect(self.retry_transfer)
+        self.receive_page.configure_cache_requested.connect(
+            lambda: self._show_page(self.disks_page)
+        )
+        self.send_page.refresh_requested.connect(self.refresh_core)
         self.settings_page.save_requested.connect(self.save_general_settings)
         self.settings_page.advanced_mode_changed.connect(self.save_advanced_mode)
         self.settings_page.refresh_requested.connect(self.refresh_disks)
@@ -362,6 +379,8 @@ class MainWindow(QMainWindow):
             self.core_notifications,
             self.core_integrations,
         )
+        self.receive_page.update_data(self.core_transfers, online=self.core_health is not None)
+        self.send_page.update_data(self.core_transfers, online=self.core_health is not None)
         unconfigured = sum(
             item.available
             and self.settings.configuration_for(item.id).role == DiskRole.UNCONFIGURED
@@ -369,6 +388,15 @@ class MainWindow(QMainWindow):
         )
         self._nav_buttons[1].setText(
             f"▣   Диски   • {unconfigured}" if unconfigured else "▣   Диски"
+        )
+        counts = self.core_transfers.get("counts", {})
+        inbound_active = int(counts.get("inbound_active", 0))
+        outbound_active = int(counts.get("outbound_active", 0))
+        self._nav_buttons[2].setText(
+            f"↓   Приём   • {inbound_active}" if inbound_active else "↓   Приём"
+        )
+        self._nav_buttons[3].setText(
+            f"↑   Отправка   • {outbound_active}" if outbound_active else "↑   Отправка"
         )
 
     def _refresh_core_state(self) -> None:
@@ -388,6 +416,12 @@ class MainWindow(QMainWindow):
         self.core_automation = {"rules": [], "runs": []}
         self.core_notifications = []
         self.core_integrations = {"plugins": []}
+        self.core_transfers = {
+            "settings": {},
+            "inbound": [],
+            "outbound": [],
+            "counts": {},
+        }
         self.core_server_mode = {"mode": "normal", "reason": "", "changed_at": ""}
         if not self.core_health:
             return
@@ -407,6 +441,7 @@ class MainWindow(QMainWindow):
             self.core_automation = self.core_client.automation()
             self.core_notifications = self.core_client.list_notifications(limit=100)
             self.core_integrations = self.core_client.integrations()
+            self.core_transfers = self.core_client.transfers(limit=100)
             self.core_server_mode = self.core_client.server_mode()
         except (CoreApiError, CoreUnavailable) as exc:
             self.audit.record(
@@ -569,6 +604,22 @@ class MainWindow(QMainWindow):
         self.audit.record(
             "core.storage.migration.started",
             f"Запущен перенос {source_root_id} → {target_root_id}; задание {job['id']}",
+        )
+        self.refresh_core()
+
+    def retry_transfer(self, transfer_id: str) -> None:
+        try:
+            self.core_client.retry_transfer(transfer_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(
+                self,
+                "Перенос не запущен",
+                self._core_error_text(exc),
+            )
+            return
+        self.audit.record(
+            "core.transfer.retry",
+            f"Повторно запущен перенос принятого файла на HDD: {transfer_id}",
         )
         self.refresh_core()
 
@@ -1171,6 +1222,31 @@ class MainWindow(QMainWindow):
             )
         try:
             self.core_storage_roots = self.core_client.sync_storage_roots(roots)
+            cache_candidates = []
+            for disk in self.disks:
+                config = self.settings.configuration_for(disk.id)
+                if (
+                    disk.available
+                    and config.role == DiskRole.CACHE
+                    and config.mode == DiskMode.ACTIVE
+                    and not config.read_only
+                ):
+                    directory_name = (
+                        "CloudStorageCache"
+                        if disk.mountpoint.endswith("\\")
+                        else ".cloud-storage-cache"
+                    )
+                    cache_candidates.append(
+                        (
+                            config.write_priority,
+                            str(Path(disk.mountpoint) / directory_name),
+                        )
+                    )
+            cache_candidates.sort(reverse=True)
+            self.core_client.update_transfer_settings(
+                staging_enabled=bool(cache_candidates),
+                staging_path=cache_candidates[0][1] if cache_candidates else "",
+            )
         except (CoreApiError, CoreUnavailable, OSError) as exc:
             self.audit.record(
                 "core.storage.sync.failed",

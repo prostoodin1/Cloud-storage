@@ -32,7 +32,9 @@ def test_main_window_smoke(tmp_path) -> None:
     window.refresh_disks()
     app.processEvents()
 
-    assert window.stack.count() == 5
+    assert window.stack.count() == 7
+    assert window.receive_page.direction == "inbound"
+    assert window.send_page.direction == "outbound"
     assert window.help_page.article_list.count() > 0
     assert window.settings_page.lan_port.value() == 8766
     assert window.settings_page.remote_port.value() == 8767

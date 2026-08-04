@@ -86,7 +86,15 @@ def main() -> int:
         window.show()
         app.processEvents()
 
-        main_names = ["Основная", "Диски", "Настройки", "Обновления", "Помощь"]
+        main_names = [
+            "Основная",
+            "Диски",
+            "Приём",
+            "Отправка",
+            "Настройки",
+            "Обновления",
+            "Помощь",
+        ]
         main_captures: list[tuple[str, QPixmap]] = []
         for index, title in enumerate(main_names):
             window.stack.setCurrentIndex(index)

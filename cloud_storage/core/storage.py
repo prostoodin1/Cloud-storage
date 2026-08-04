@@ -9,6 +9,7 @@ import stat
 import threading
 import unicodedata
 import uuid
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
@@ -87,6 +88,7 @@ class ResumableUploadRecord:
     storage_root_id: str
     logical_path: str
     temporary_path: str
+    staging_path: str
     expected_size: int
     expected_sha256: str | None
     received_bytes: int
@@ -96,6 +98,30 @@ class ResumableUploadRecord:
     created_at: str
     updated_at: str
     expires_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class TransferRecord:
+    id: str
+    direction: str
+    status: str
+    file_id: str
+    space_id: str
+    user_id: str
+    logical_path: str
+    content_type: str
+    total_bytes: int
+    network_bytes: int
+    storage_bytes: int
+    sha256: str
+    staging_path: str
+    temporary_path: str
+    storage_root_id: str
+    object_path: str
+    error: str
+    created_at: str
+    updated_at: str
+    completed_at: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +230,7 @@ class UploadSession:
         logical_path: str,
         content_type: str,
         maximum_bytes: int,
+        expected_size: int | None,
     ) -> None:
         self.service = service
         self.root = root
@@ -213,17 +240,44 @@ class UploadSession:
         self.content_type = content_type
         self.maximum_bytes = maximum_bytes
         self.file_id = str(uuid.uuid4())
+        self.transfer_id = self.file_id
         self.object_relative = (
             Path("objects") / space_id / self.file_id[:2] / f"{self.file_id}.blob"
         )
         self.final_path = root.path / self.object_relative
-        staging = root.path / ".staging"
-        staging.mkdir(parents=True, exist_ok=True)
-        self.temporary_path = staging / f"{self.file_id}.part"
+        self.staging_root = service._select_staging_path(
+            expected_size or min(maximum_bytes, 64 * 1024**2), root
+        )
+        staging_directory = (
+            self.staging_root / ".staging"
+            if self.staging_root == root.path
+            else self.staging_root / "incoming"
+        )
+        staging_directory.mkdir(parents=True, exist_ok=True)
+        self.temporary_path = staging_directory / f"{self.file_id}.part"
+        self.temporary_relative = self.temporary_path.relative_to(self.staging_root)
         self._handle: BinaryIO = self.temporary_path.open("xb")
         self._hash = hashlib.sha256()
         self._size = 0
         self._finished = False
+        try:
+            self.service._create_inbound_transfer(
+                transfer_id=self.transfer_id,
+                file_id=self.file_id,
+                space_id=self.space_id,
+                user_id=self.user_id,
+                logical_path=self.logical_path,
+                content_type=self.content_type,
+                total_bytes=expected_size or 0,
+                staging_path=self.staging_root,
+                temporary_path=self.temporary_relative,
+                storage_root_id=self.root.id,
+                object_path=self.object_relative,
+            )
+        except Exception:
+            self._handle.close()
+            self.temporary_path.unlink(missing_ok=True)
+            raise
 
     def write(self, chunk: bytes) -> None:
         if self._finished:
@@ -235,6 +289,7 @@ class UploadSession:
         self._handle.write(chunk)
         self._hash.update(chunk)
         self._size += len(chunk)
+        self.service._update_transfer_network(self.transfer_id, self._size)
 
     def commit(self) -> FileRecord:
         if self._finished:
@@ -242,34 +297,25 @@ class UploadSession:
         self._handle.flush()
         os.fsync(self._handle.fileno())
         self._handle.close()
-        self.final_path.parent.mkdir(parents=True, exist_ok=True)
+        digest = self._hash.hexdigest()
+        self._finished = True
         try:
-            os.replace(self.temporary_path, self.final_path)
-            make_managed_file_inert(self.final_path, self.root.path)
-            record = self.service._commit_upload(
-                file_id=self.file_id,
-                root=self.root,
-                space_id=self.space_id,
-                user_id=self.user_id,
-                logical_path=self.logical_path,
-                object_path=self.object_relative.as_posix(),
-                size_bytes=self._size,
-                sha256=self._hash.hexdigest(),
-                content_type=self.content_type,
+            self.service._prepare_inbound_move(
+                self.transfer_id,
+                total_bytes=self._size,
+                sha256=digest,
             )
-        except Exception:
-            self.final_path.unlink(missing_ok=True)
+            return self.service._finalize_inbound_transfer(self.transfer_id)
+        except Exception as exc:
+            self.service._fail_transfer(self.transfer_id, str(exc))
             raise
-        finally:
-            self._finished = True
-            self.temporary_path.unlink(missing_ok=True)
-        return record
 
     def abort(self) -> None:
         if self._finished:
             return
         self._handle.close()
         self.temporary_path.unlink(missing_ok=True)
+        self.service._cancel_transfer(self.transfer_id, "Приём файла прерван")
         self._finished = True
 
     def __enter__(self) -> UploadSession:
@@ -294,6 +340,8 @@ class StorageService:
         self._resumable_locks_guard = threading.Lock()
         self._maintenance_locks: dict[str, threading.Lock] = {}
         self._maintenance_locks_guard = threading.Lock()
+        self._transfer_locks: dict[str, threading.RLock] = {}
+        self._transfer_locks_guard = threading.Lock()
 
     def sync_managed_roots(self, requests: list[ManagedRootRequest]) -> list[StorageRootRecord]:
         prepared: list[ManagedRootRequest] = []
@@ -456,6 +504,7 @@ class StorageService:
             logical_path=logical_path,
             content_type=sanitize_content_type(content_type),
             maximum_bytes=maximum,
+            expected_size=expected_size,
         )
 
     def create_resumable_upload(
@@ -490,8 +539,18 @@ class StorageService:
             raise StorageCapacityError("upload exceeds personal storage quota")
         root = self._select_root(expected_size)
         upload_id = str(uuid.uuid4())
-        temporary_relative = Path(".staging") / f"{upload_id}.resume"
-        temporary_path = root.path / temporary_relative
+        object_relative = (
+            Path("objects") / space_id / upload_id[:2] / f"{upload_id}.blob"
+        )
+        staging_root = self._select_staging_path(expected_size, root)
+        staging_directory = (
+            staging_root / ".staging"
+            if staging_root == root.path
+            else staging_root / "incoming"
+        )
+        staging_directory.mkdir(parents=True, exist_ok=True)
+        temporary_path = staging_directory / f"{upload_id}.resume"
+        temporary_relative = temporary_path.relative_to(staging_root)
         now = utc_now()
         try:
             with temporary_path.open("xb") as handle:
@@ -502,9 +561,10 @@ class StorageService:
                     """
                     INSERT INTO upload_sessions(
                         id, space_id, user_id, storage_root_id, logical_path,
-                        temporary_path, expected_size, expected_sha256, received_bytes,
+                        temporary_path, staging_path, expected_size,
+                        expected_sha256, received_bytes,
                         content_type, status, result_file_id, created_at, updated_at, expires_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'active', NULL, ?, ?, ?)
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'active', NULL, ?, ?, ?)
                     """,
                     (
                         upload_id,
@@ -513,6 +573,7 @@ class StorageService:
                         root.id,
                         logical_path,
                         temporary_relative.as_posix(),
+                        str(staging_root),
                         expected_size,
                         expected_sha256,
                         sanitize_content_type(content_type),
@@ -520,6 +581,23 @@ class StorageService:
                         utc_text(now),
                         utc_text(now + timedelta(hours=24)),
                     ),
+                )
+                self._insert_transfer_tx(
+                    connection,
+                    transfer_id=upload_id,
+                    direction="inbound",
+                    status="receiving",
+                    file_id=upload_id,
+                    space_id=space_id,
+                    user_id=user_id,
+                    logical_path=logical_path,
+                    content_type=sanitize_content_type(content_type),
+                    total_bytes=expected_size,
+                    staging_path=staging_root,
+                    temporary_path=temporary_relative,
+                    storage_root_id=root.id,
+                    object_path=object_relative,
+                    now=utc_text(now),
                 )
         except Exception:
             temporary_path.unlink(missing_ok=True)
@@ -601,6 +679,10 @@ class StorageService:
                 )
                 if updated.rowcount != 1:
                     raise ConflictError("upload session changed concurrently")
+                connection.execute(
+                    "UPDATE transfer_jobs SET network_bytes = ?, updated_at = ? WHERE id = ?",
+                    (offset + len(payload), utc_text(now), upload_id),
+                )
         return self.get_resumable_upload(upload_id, user_id)
 
     def complete_resumable_upload(
@@ -621,33 +703,20 @@ class StorageService:
                     f"upload is incomplete; expected {record.expected_size}, "
                     f"received {record.received_bytes}"
                 )
-            root = self._root_by_id(record.storage_root_id)
             temporary_path = self._resumable_path(record)
             digest = self._file_sha256(temporary_path)
             if record.expected_sha256 and digest != record.expected_sha256:
+                self._fail_transfer(upload_id, "SHA-256 принятого файла не совпадает")
                 raise ConflictError("uploaded file SHA-256 does not match")
-            object_relative = (
-                Path("objects") / record.space_id / record.id[:2] / f"{record.id}.blob"
-            )
-            final_path = root.path / object_relative
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(temporary_path, final_path)
             try:
-                make_managed_file_inert(final_path, root.path)
-                result = self._commit_upload(
-                    file_id=record.id,
-                    root=root,
-                    space_id=record.space_id,
-                    user_id=user_id,
-                    logical_path=record.logical_path,
-                    object_path=object_relative.as_posix(),
-                    size_bytes=record.expected_size,
+                self._prepare_inbound_move(
+                    upload_id,
+                    total_bytes=record.expected_size,
                     sha256=digest,
-                    content_type=record.content_type,
                 )
-            except Exception:
-                self._make_staging_file_writable(final_path)
-                os.replace(final_path, temporary_path)
+                result = self._finalize_inbound_transfer(upload_id)
+            except Exception as exc:
+                self._fail_transfer(upload_id, str(exc))
                 raise
             with self.database.transaction() as connection:
                 connection.execute(
@@ -680,6 +749,7 @@ class StorageService:
                     self._resumable_path(record).unlink(missing_ok=True)
                 except NotFoundError:
                     pass
+                self._cancel_transfer(upload_id, "Загрузка отменена клиентом")
             with self.database.transaction() as connection:
                 connection.execute("DELETE FROM upload_sessions WHERE id = ?", (upload_id,))
         return True
@@ -695,6 +765,531 @@ class StorageService:
             if self.cancel_resumable_upload(row["id"], row["user_id"]):
                 cleaned += 1
         return cleaned
+
+    def set_transfer_settings(self, *, staging_enabled: bool, staging_path: str) -> dict[str, Any]:
+        prepared_path = ""
+        if staging_enabled:
+            candidate = Path(staging_path).expanduser()
+            if not candidate.is_absolute() or candidate.name not in {
+                "CloudStorageCache",
+                ".cloud-storage-cache",
+            }:
+                raise InvalidStorageRoot(
+                    "staging path must be an absolute CloudStorageCache directory"
+                )
+            parent = candidate.parent.resolve(strict=True)
+            candidate = parent / candidate.name
+            self._initialize_staging_root(candidate)
+            prepared_path = str(candidate)
+        now = utc_text()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE transfer_settings
+                SET staging_enabled = ?, staging_path = ?, updated_at = ?
+                WHERE id = 1
+                """,
+                (int(staging_enabled), prepared_path, now),
+            )
+            self.repository._audit_tx(
+                connection,
+                actor_type="manager",
+                actor_id=None,
+                action="transfers.staging.updated",
+                target_type="transfer_settings",
+                target_id="1",
+                detail=(
+                    f"SSD staging включён: {prepared_path}"
+                    if staging_enabled
+                    else "SSD staging выключен; используется staging целевого диска"
+                ),
+            )
+        return self.transfer_settings()
+
+    def transfer_settings(self) -> dict[str, Any]:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM transfer_settings WHERE id = 1"
+            ).fetchone()
+        enabled = bool(row["staging_enabled"]) if row else False
+        path_text = str(row["staging_path"]) if row else ""
+        available = False
+        total_bytes = 0
+        free_bytes = 0
+        if enabled and path_text:
+            try:
+                path = Path(path_text).resolve(strict=True)
+                usage = shutil.disk_usage(path)
+                available = path.is_dir() and not path.is_symlink()
+                total_bytes = usage.total
+                free_bytes = usage.free
+            except OSError:
+                available = False
+        return {
+            "staging_enabled": enabled,
+            "staging_path": path_text,
+            "available": available,
+            "total_bytes": total_bytes,
+            "free_bytes": free_bytes,
+            "updated_at": str(row["updated_at"]) if row else "",
+        }
+
+    def transfer_overview(self, *, limit: int = 100) -> dict[str, Any]:
+        inbound = self.list_transfers("inbound", limit=limit)
+        outbound = self.list_transfers("outbound", limit=limit)
+        active_statuses = {"receiving", "moving", "sending"}
+        return {
+            "settings": self.transfer_settings(),
+            "inbound": [self.transfer_to_dict(item) for item in inbound],
+            "outbound": [self.transfer_to_dict(item) for item in outbound],
+            "counts": {
+                "inbound_active": sum(item.status in active_statuses for item in inbound),
+                "outbound_active": sum(item.status in active_statuses for item in outbound),
+                "failed": sum(item.status == "failed" for item in (*inbound, *outbound)),
+            },
+        }
+
+    def list_transfers(self, direction: str, *, limit: int = 100) -> list[TransferRecord]:
+        if direction not in {"inbound", "outbound"}:
+            raise ValueError("unknown transfer direction")
+        safe_limit = max(1, min(int(limit), 500))
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM transfer_jobs
+                WHERE direction = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (direction, safe_limit),
+            ).fetchall()
+        return [self._transfer(row) for row in rows]
+
+    def get_transfer(self, transfer_id: str) -> TransferRecord:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM transfer_jobs WHERE id = ?", (transfer_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("transfer not found")
+        return self._transfer(row)
+
+    def retry_transfer(self, transfer_id: str) -> dict[str, Any]:
+        transfer = self.get_transfer(transfer_id)
+        if transfer.direction != "inbound" or transfer.status not in {"failed", "moving"}:
+            raise ConflictError("only a failed inbound SSD-to-storage move can be retried")
+        if transfer.network_bytes != transfer.total_bytes or not transfer.sha256:
+            raise ConflictError("the incoming file was not received completely")
+        self._finalize_inbound_transfer(transfer_id)
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE upload_sessions
+                SET status = 'completed', result_file_id = ?, updated_at = ?, expires_at = ?
+                WHERE id = ?
+                """,
+                (
+                    transfer.file_id,
+                    utc_text(),
+                    utc_text(utc_now() + timedelta(hours=24)),
+                    transfer_id,
+                ),
+            )
+        return self.transfer_to_dict(self.get_transfer(transfer_id))
+
+    def queue_transfer_retry(self, transfer_id: str) -> dict[str, Any]:
+        transfer = self.get_transfer(transfer_id)
+        if transfer.direction != "inbound" or transfer.status != "failed":
+            raise ConflictError("only a failed inbound SSD-to-storage move can be retried")
+        if transfer.network_bytes != transfer.total_bytes or not transfer.sha256:
+            raise ConflictError("the incoming file was not received completely")
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE transfer_jobs SET status = 'moving', storage_bytes = 0,
+                    error = '', updated_at = ? WHERE id = ? AND status = 'failed'
+                """,
+                (utc_text(), transfer_id),
+            )
+        return self.transfer_to_dict(self.get_transfer(transfer_id))
+
+    def recover_interrupted_transfers(self) -> None:
+        now = utc_text()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE transfer_jobs
+                SET status = 'failed', error = 'Core перезапущен во время отправки; клиент может скачать файл повторно',
+                    updated_at = ?
+                WHERE status = 'sending'
+                """,
+                (now,),
+            )
+            connection.execute(
+                """
+                UPDATE transfer_jobs
+                SET status = 'failed', error = 'Core перезапущен во время переноса с SSD; нажмите «Повторить перенос»',
+                    updated_at = ?
+                WHERE status = 'moving'
+                """,
+                (now,),
+            )
+            connection.execute(
+                """
+                UPDATE transfer_jobs
+                SET status = 'failed', error = 'Непотоковый приём прерван; отправьте файл повторно',
+                    updated_at = ?
+                WHERE status = 'receiving'
+                  AND id NOT IN (
+                      SELECT id FROM upload_sessions WHERE status = 'active'
+                  )
+                """,
+                (now,),
+            )
+
+    def stream_download(
+        self,
+        record: FileRecord,
+        physical_path: Path,
+        user_id: str,
+    ) -> tuple[str, Iterator[bytes]]:
+        transfer_id = str(uuid.uuid4())
+        now = utc_text()
+        with self.database.transaction() as connection:
+            self._insert_transfer_tx(
+                connection,
+                transfer_id=transfer_id,
+                direction="outbound",
+                status="sending",
+                file_id=record.id,
+                space_id=record.space_id,
+                user_id=user_id,
+                logical_path=record.logical_path,
+                content_type=record.content_type,
+                total_bytes=record.size_bytes,
+                staging_path=Path(),
+                temporary_path=Path(),
+                storage_root_id=record.storage_root_id,
+                object_path=Path(record.object_path),
+                now=now,
+            )
+
+        def iterator() -> Iterator[bytes]:
+            sent = 0
+            try:
+                with physical_path.open("rb") as handle:
+                    while chunk := handle.read(4 * 1024 * 1024):
+                        sent += len(chunk)
+                        self._update_transfer_network(transfer_id, sent)
+                        yield chunk
+                with self.database.transaction() as connection:
+                    connection.execute(
+                        """
+                        UPDATE transfer_jobs
+                        SET status = 'completed', network_bytes = total_bytes,
+                            error = '', updated_at = ?, completed_at = ?
+                        WHERE id = ?
+                        """,
+                        (utc_text(), utc_text(), transfer_id),
+                    )
+            except BaseException as exc:
+                self._fail_transfer(
+                    transfer_id,
+                    str(exc) or "Отправка прервана клиентом",
+                )
+                raise
+
+        return transfer_id, iterator()
+
+    def _select_staging_path(
+        self,
+        expected_size: int,
+        destination_root: StorageRootRecord,
+    ) -> Path:
+        settings = self.transfer_settings()
+        if not settings["staging_enabled"] or not settings["available"]:
+            return destination_root.path
+        candidate = Path(str(settings["staging_path"]))
+        try:
+            resolved = candidate.resolve(strict=True)
+            usage = shutil.disk_usage(resolved)
+        except OSError:
+            return destination_root.path
+        reserve = max(1024**3, int(usage.total * 0.02))
+        if usage.free - max(0, expected_size) < reserve:
+            return destination_root.path
+        return resolved
+
+    @staticmethod
+    def _initialize_staging_root(path: Path) -> None:
+        marker = path / ".cloud-storage-cache.json"
+        if path.exists() and not path.is_dir():
+            raise InvalidStorageRoot("staging path is not a directory")
+        if path.exists() and not marker.exists() and any(path.iterdir()):
+            raise InvalidStorageRoot(
+                "refusing to adopt a non-empty staging directory without a marker"
+            )
+        path.mkdir(parents=False, exist_ok=True)
+        if marker.exists():
+            try:
+                value = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                raise InvalidStorageRoot("staging marker is damaged") from exc
+            if value.get("schema_version") != 1:
+                raise InvalidStorageRoot("staging marker version is unsupported")
+        else:
+            temporary = marker.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(
+                    {"schema_version": 1, "created_at": utc_text()},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(temporary, marker)
+        (path / "incoming").mkdir(exist_ok=True)
+        if os.name != "nt":
+            path.chmod(0o700)
+
+    def _create_inbound_transfer(
+        self,
+        *,
+        transfer_id: str,
+        file_id: str,
+        space_id: str,
+        user_id: str,
+        logical_path: str,
+        content_type: str,
+        total_bytes: int,
+        staging_path: Path,
+        temporary_path: Path,
+        storage_root_id: str,
+        object_path: Path,
+    ) -> None:
+        with self.database.transaction() as connection:
+            self._insert_transfer_tx(
+                connection,
+                transfer_id=transfer_id,
+                direction="inbound",
+                status="receiving",
+                file_id=file_id,
+                space_id=space_id,
+                user_id=user_id,
+                logical_path=logical_path,
+                content_type=content_type,
+                total_bytes=total_bytes,
+                staging_path=staging_path,
+                temporary_path=temporary_path,
+                storage_root_id=storage_root_id,
+                object_path=object_path,
+                now=utc_text(),
+            )
+
+    @staticmethod
+    def _insert_transfer_tx(
+        connection: sqlite3.Connection,
+        *,
+        transfer_id: str,
+        direction: str,
+        status: str,
+        file_id: str,
+        space_id: str,
+        user_id: str,
+        logical_path: str,
+        content_type: str,
+        total_bytes: int,
+        staging_path: Path,
+        temporary_path: Path,
+        storage_root_id: str,
+        object_path: Path,
+        now: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO transfer_jobs(
+                id, direction, status, file_id, space_id, user_id, logical_path,
+                content_type, total_bytes, network_bytes, storage_bytes, sha256,
+                staging_path, temporary_path, storage_root_id, object_path,
+                error, created_at, updated_at, completed_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '', ?, ?, ?, ?, '', ?, ?, NULL)
+            """,
+            (
+                transfer_id,
+                direction,
+                status,
+                file_id,
+                space_id,
+                user_id,
+                logical_path,
+                content_type,
+                max(0, total_bytes),
+                str(staging_path) if str(staging_path) != "." else "",
+                temporary_path.as_posix() if str(temporary_path) != "." else "",
+                storage_root_id,
+                object_path.as_posix() if str(object_path) != "." else "",
+                now,
+                now,
+            ),
+        )
+
+    def _update_transfer_network(self, transfer_id: str, transferred: int) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE transfer_jobs
+                SET network_bytes = ?, updated_at = ?
+                WHERE id = ? AND status IN ('receiving', 'sending')
+                """,
+                (max(0, transferred), utc_text(), transfer_id),
+            )
+
+    def _prepare_inbound_move(
+        self,
+        transfer_id: str,
+        *,
+        total_bytes: int,
+        sha256: str,
+    ) -> None:
+        with self.database.transaction() as connection:
+            updated = connection.execute(
+                """
+                UPDATE transfer_jobs
+                SET status = 'moving', total_bytes = ?, network_bytes = ?,
+                    storage_bytes = 0, sha256 = ?, error = '', updated_at = ?
+                WHERE id = ? AND direction = 'inbound'
+                  AND status IN ('receiving', 'failed', 'moving')
+                """,
+                (total_bytes, total_bytes, sha256, utc_text(), transfer_id),
+            )
+            if updated.rowcount != 1:
+                raise ConflictError("incoming transfer state changed concurrently")
+
+    def _finalize_inbound_transfer(self, transfer_id: str) -> FileRecord:
+        with self._transfer_lock(transfer_id):
+            transfer = self.get_transfer(transfer_id)
+            if transfer.direction != "inbound" or transfer.status not in {"moving", "failed"}:
+                raise ConflictError("incoming transfer is not ready for storage")
+            if transfer.network_bytes != transfer.total_bytes or not transfer.sha256:
+                raise ConflictError("incoming transfer is incomplete")
+            with self.database.transaction() as connection:
+                connection.execute(
+                    """
+                    UPDATE transfer_jobs
+                    SET status = 'moving', storage_bytes = 0, error = '', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (utc_text(), transfer_id),
+                )
+            source = self._transfer_staging_file(transfer)
+            root = self._root_by_id(transfer.storage_root_id)
+            object_relative = Path(transfer.object_path)
+            final_path = (root.path / object_relative).resolve()
+            if root.path not in final_path.parents:
+                raise PermissionDeniedError("destination failed containment validation")
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            same_root = Path(transfer.staging_path).resolve() == root.path.resolve()
+            destination_staging = root.path / ".staging" / f"{transfer.file_id}.incoming"
+            destination_staging.unlink(missing_ok=True)
+            try:
+                if same_root:
+                    os.replace(source, final_path)
+                    self._update_transfer_storage(transfer_id, transfer.total_bytes)
+                else:
+                    digest = hashlib.sha256()
+                    copied = 0
+                    with source.open("rb") as reader, destination_staging.open("xb") as writer:
+                        while chunk := reader.read(4 * 1024 * 1024):
+                            writer.write(chunk)
+                            digest.update(chunk)
+                            copied += len(chunk)
+                            self._update_transfer_storage(transfer_id, copied)
+                        writer.flush()
+                        os.fsync(writer.fileno())
+                    if copied != transfer.total_bytes or digest.hexdigest() != transfer.sha256:
+                        raise ConflictError("SSD-to-storage verification failed")
+                    os.replace(destination_staging, final_path)
+                make_managed_file_inert(final_path, root.path)
+                result = self._commit_upload(
+                    file_id=transfer.file_id,
+                    root=root,
+                    space_id=transfer.space_id,
+                    user_id=transfer.user_id,
+                    logical_path=transfer.logical_path,
+                    object_path=transfer.object_path,
+                    size_bytes=transfer.total_bytes,
+                    sha256=transfer.sha256,
+                    content_type=transfer.content_type,
+                )
+            except Exception as exc:
+                destination_staging.unlink(missing_ok=True)
+                if final_path.exists():
+                    self._make_staging_file_writable(final_path)
+                    if same_root and not source.exists():
+                        os.replace(final_path, source)
+                    else:
+                        final_path.unlink(missing_ok=True)
+                self._fail_transfer(transfer_id, str(exc))
+                raise
+            if not same_root:
+                source.unlink(missing_ok=True)
+            now = utc_text()
+            with self.database.transaction() as connection:
+                connection.execute(
+                    """
+                    UPDATE transfer_jobs
+                    SET status = 'completed', network_bytes = total_bytes,
+                        storage_bytes = total_bytes, error = '', updated_at = ?, completed_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, transfer_id),
+                )
+            return result
+
+    def _transfer_staging_file(self, transfer: TransferRecord) -> Path:
+        try:
+            root = Path(transfer.staging_path).resolve(strict=True)
+            path = (root / transfer.temporary_path).resolve(strict=True)
+        except OSError as exc:
+            raise NotFoundError("staged upload data is unavailable") from exc
+        if root not in path.parents or not path.is_file() or path.is_symlink():
+            raise PermissionDeniedError("staged upload failed containment validation")
+        return path
+
+    def _update_transfer_storage(self, transfer_id: str, transferred: int) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE transfer_jobs SET storage_bytes = ?, updated_at = ?
+                WHERE id = ? AND status = 'moving'
+                """,
+                (max(0, transferred), utc_text(), transfer_id),
+            )
+
+    def _fail_transfer(self, transfer_id: str, error: str) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE transfer_jobs SET status = 'failed', error = ?, updated_at = ?
+                WHERE id = ? AND status != 'completed'
+                """,
+                ((error or "Неизвестная ошибка")[:1000], utc_text(), transfer_id),
+            )
+
+    def _cancel_transfer(self, transfer_id: str, reason: str) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE transfer_jobs SET status = 'cancelled', error = ?,
+                    updated_at = ?, completed_at = ?
+                WHERE id = ? AND status NOT IN ('completed', 'cancelled')
+                """,
+                (reason[:1000], utc_text(), utc_text(), transfer_id),
+            )
+
+    def _transfer_lock(self, transfer_id: str) -> threading.RLock:
+        with self._transfer_locks_guard:
+            return self._transfer_locks.setdefault(transfer_id, threading.RLock())
 
     def _require_server_writable(self) -> None:
         with self.database.connection() as connection:
@@ -2303,12 +2898,17 @@ class StorageService:
         return root
 
     def _resumable_path(self, record: ResumableUploadRecord) -> Path:
-        root = self._root_by_id(record.storage_root_id)
+        storage_root = self._root_by_id(record.storage_root_id)
+        root = (
+            Path(record.staging_path).resolve(strict=True)
+            if record.staging_path
+            else storage_root.path
+        )
         try:
-            path = (root.path / record.temporary_path).resolve(strict=True)
+            path = (root / record.temporary_path).resolve(strict=True)
         except OSError as exc:
             raise NotFoundError("partial upload data is unavailable") from exc
-        if root.path not in path.parents or not path.is_file() or path.is_symlink():
+        if root not in path.parents or not path.is_file() or path.is_symlink():
             raise PermissionDeniedError("partial upload failed containment validation")
         return path
 
@@ -2374,6 +2974,11 @@ class StorageService:
         return ResumableUploadRecord(**fields)
 
     @staticmethod
+    def _transfer(row: sqlite3.Row) -> TransferRecord:
+        fields = {key: row[key] for key in TransferRecord.__dataclass_fields__}
+        return TransferRecord(**fields)
+
+    @staticmethod
     def to_dict(record: FileRecord) -> dict[str, Any]:
         return asdict(record)
 
@@ -2392,4 +2997,27 @@ class StorageService:
             "created_at": record.created_at,
             "updated_at": record.updated_at,
             "expires_at": record.expires_at,
+        }
+
+    @staticmethod
+    def transfer_to_dict(record: TransferRecord) -> dict[str, Any]:
+        if record.status == "moving":
+            progress_bytes = record.storage_bytes
+        else:
+            progress_bytes = record.network_bytes
+        progress_percent = (
+            min(100.0, progress_bytes / record.total_bytes * 100)
+            if record.total_bytes
+            else 0.0
+        )
+        return {
+            **asdict(record),
+            "progress_bytes": progress_bytes,
+            "progress_percent": round(progress_percent, 1),
+            "retryable": (
+                record.direction == "inbound"
+                and record.status == "failed"
+                and record.network_bytes == record.total_bytes
+                and bool(record.sha256)
+            ),
         }

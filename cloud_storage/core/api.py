@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path as FileSystemPath
 from pathlib import PurePosixPath
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import (
     BackgroundTasks,
@@ -24,7 +25,7 @@ from fastapi import (
     Request,
     status,
 )
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -178,6 +179,11 @@ class SyncStorageRootsRequest(BaseModel):
     roots: list[StorageRootRequest] = Field(max_length=128)
 
 
+class TransferSettingsRequest(BaseModel):
+    staging_enabled: bool = False
+    staging_path: str = Field(default="", max_length=2048)
+
+
 @dataclass(slots=True)
 class CoreRuntime:
     config: CoreConfig
@@ -227,6 +233,7 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
     repository.initialize_default_storage(config.default_storage_root)
     storage = StorageService(config, database, repository)
     storage.cleanup_expired_uploads()
+    storage.recover_interrupted_transfers()
     storage.recover_interrupted_maintenance()
     backup_automation = BackupAutomationService(database, repository, storage)
     backup_automation.recover_interrupted_verifications()
@@ -949,6 +956,40 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         ]
 
     @app.get(
+        "/v1/admin/transfers",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def transfer_overview(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return runtime.storage.transfer_overview(limit=limit)
+
+    @app.put(
+        "/v1/admin/transfers/settings",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def update_transfer_settings(body: TransferSettingsRequest) -> dict[str, Any]:
+        return runtime.storage.set_transfer_settings(
+            staging_enabled=body.staging_enabled,
+            staging_path=body.staging_path,
+        )
+
+    @app.post(
+        "/v1/admin/transfers/{transfer_id}/retry",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def retry_transfer(
+        transfer_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        queued = runtime.storage.queue_transfer_retry(transfer_id)
+        background_tasks.add_task(runtime.storage.retry_transfer, transfer_id)
+        return queued
+
+    @app.get(
         "/v1/admin/maintenance/jobs",
         tags=["manager"],
         dependencies=[Depends(require_manager)],
@@ -1571,12 +1612,19 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             space_id, device.user_id, logical_path
         )
         filename = PurePosixPath(record.logical_path).name
-        return FileResponse(
+        transfer_id, stream = runtime.storage.stream_download(
+            record,
             physical_path,
+            device.user_id,
+        )
+        return StreamingResponse(
+            stream,
             media_type=record.content_type,
-            filename=filename,
             headers={
                 "ETag": f'"sha256:{record.sha256}"',
+                "Content-Length": str(record.size_bytes),
+                "Content-Disposition": f"attachment; filename*=utf-8''{quote(filename)}",
+                "X-Transfer-ID": transfer_id,
             },
         )
 

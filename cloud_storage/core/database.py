@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
     storage_root_id TEXT NOT NULL REFERENCES storage_roots(id) ON DELETE RESTRICT,
     logical_path TEXT NOT NULL,
     temporary_path TEXT NOT NULL,
+    staging_path TEXT,
     expected_size INTEGER NOT NULL CHECK(expected_size >= 0),
     expected_sha256 TEXT,
     received_bytes INTEGER NOT NULL DEFAULT 0 CHECK(received_bytes >= 0),
@@ -126,6 +127,38 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS transfer_settings (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    staging_enabled INTEGER NOT NULL DEFAULT 0 CHECK(staging_enabled IN (0, 1)),
+    staging_path TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS transfer_jobs (
+    id TEXT PRIMARY KEY,
+    direction TEXT NOT NULL CHECK(direction IN ('inbound', 'outbound')),
+    status TEXT NOT NULL CHECK(status IN (
+        'receiving', 'moving', 'sending', 'completed', 'failed', 'cancelled'
+    )),
+    file_id TEXT NOT NULL DEFAULT '',
+    space_id TEXT NOT NULL DEFAULT '',
+    user_id TEXT NOT NULL DEFAULT '',
+    logical_path TEXT NOT NULL,
+    content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+    total_bytes INTEGER NOT NULL DEFAULT 0 CHECK(total_bytes >= 0),
+    network_bytes INTEGER NOT NULL DEFAULT 0 CHECK(network_bytes >= 0),
+    storage_bytes INTEGER NOT NULL DEFAULT 0 CHECK(storage_bytes >= 0),
+    sha256 TEXT NOT NULL DEFAULT '',
+    staging_path TEXT NOT NULL DEFAULT '',
+    temporary_path TEXT NOT NULL DEFAULT '',
+    storage_root_id TEXT NOT NULL DEFAULT '',
+    object_path TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS maintenance_jobs (
@@ -359,6 +392,10 @@ CREATE INDEX IF NOT EXISTS idx_files_space_path ON files(space_id, logical_path)
 CREATE INDEX IF NOT EXISTS idx_directories_space_path ON directories(space_id, logical_path);
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_user ON upload_sessions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_expiry ON upload_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_transfer_jobs_direction_created
+    ON transfer_jobs(direction, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_transfer_jobs_status
+    ON transfer_jobs(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_maintenance_jobs_status ON maintenance_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_backup_jobs_status ON backup_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_backup_verifications_created
@@ -408,10 +445,23 @@ class Database:
             }
             if "pruned_at" not in backup_columns:
                 connection.execute("ALTER TABLE backup_jobs ADD COLUMN pruned_at TEXT")
+            upload_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(upload_sessions)").fetchall()
+            }
+            if "staging_path" not in upload_columns:
+                connection.execute("ALTER TABLE upload_sessions ADD COLUMN staging_path TEXT")
+            connection.execute(
+                "UPDATE upload_sessions SET staging_path = '' WHERE staging_path IS NULL"
+            )
             self._upgrade_automation_schema(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO automation_settings(id, enabled, interval_seconds, updated_at) "
                 "VALUES(1, 1, 60, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO transfer_settings("
+                "id, staging_enabled, staging_path, updated_at) "
+                "VALUES(1, 0, '', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
@@ -460,6 +510,10 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(11, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(12, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
             connection.commit()
 

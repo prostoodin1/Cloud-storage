@@ -9,3 +9,5 @@
 - Added a narrow role-gated mobile server view for monitoring, device approval/revocation and confirmed read-only mode without exposing the Manager API.
 - Added Android/iOS validation and Android preview APK generation in GitHub Actions.
 - Expanded Core, LAN, zrok, client and security tests for the new account and mobile-admin flows.
+
+The attached Android APK is a debug-signed preview intended for direct testing, not a Google Play production build. The iPhone source and CI-validated iOS bundle are included in the repository; an installable iOS package still requires an Apple Developer account and device/App Store signing.

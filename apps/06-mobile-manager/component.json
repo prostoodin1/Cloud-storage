@@ -1,0 +1,17 @@
+{
+  "id": "mobile-manager",
+  "name": "Cloud Storage Mobile Manager",
+  "version": "0.9.0",
+  "platforms": ["android", "ios"],
+  "role": "admin",
+  "source_paths": [
+    "mobile/src/screens/ServerControlScreen.tsx",
+    "mobile/src/api.ts",
+    "mobile/App.tsx",
+    "cloud_storage/core/api.py"
+  ],
+  "release_assets": [
+    "CloudStorage-Mobile-0.9.0-android.apk",
+    "CloudStorage-Mobile-0.9.0-iphone-simulator.zip"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "desktop-client",
+  "name": "Cloud Storage Desktop Client",
+  "version": "0.9.0",
+  "platforms": ["windows", "linux"],
+  "entry_point": "cloud_storage.client",
+  "source_paths": [
+    "cloud_storage/client",
+    "cloud_storage/updates.py",
+    "drive_windows"
+  ],
+  "release_asset": "CloudStorage-Client-Portable-0.9.0-windows-x64.zip"
+}
+

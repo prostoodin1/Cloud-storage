@@ -1,0 +1,15 @@
+{
+  "id": "server-manager",
+  "name": "Cloud Storage Server Manager",
+  "version": "0.9.0",
+  "platforms": ["windows", "linux"],
+  "entry_point": "cloud_storage",
+  "source_paths": [
+    "cloud_storage/ui",
+    "cloud_storage/services",
+    "cloud_storage/core",
+    "cloud_storage/help"
+  ],
+  "release_asset": "CloudStorage-Server-Portable-0.9.0-windows-x64.zip"
+}
+

@@ -23,7 +23,14 @@ const debugConfig = `    signingConfigs {
     }`;
 if (!source.includes(debugConfig)) throw new Error('Expo Android signing block was not found');
 
-const releaseConfig = `${debugConfig.slice(0, -6)}        release {
+const releaseConfig = `    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+        release {
             storeFile file(System.getenv('CLOUD_STORAGE_ANDROID_KEYSTORE'))
             storePassword System.getenv('CLOUD_STORAGE_ANDROID_KEYSTORE_PASSWORD')
             keyAlias System.getenv('CLOUD_STORAGE_ANDROID_KEY_ALIAS')
@@ -32,7 +39,7 @@ const releaseConfig = `${debugConfig.slice(0, -6)}        release {
     }`;
 source = source.replace(debugConfig, releaseConfig);
 source = source.replace(
-  /release \{([\s\S]*?)signingConfig signingConfigs\.debug/,
-  'release {$1signingConfig signingConfigs.release',
+  /(buildTypes\s*\{[\s\S]*?\brelease\s*\{[\s\S]*?)signingConfig signingConfigs\.debug/,
+  '$1signingConfig signingConfigs.release',
 );
 writeFileSync(buildFile, source, 'utf8');

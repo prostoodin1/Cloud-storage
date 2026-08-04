@@ -2,7 +2,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
 
 from cloud_storage.models import DiskSnapshot
 from cloud_storage.services.settings_store import SettingsStore
@@ -68,4 +69,34 @@ def test_advanced_mode_is_saved_immediately_and_survives_refresh(tmp_path) -> No
     app.processEvents()
 
     assert window.settings_page.mode.currentData() is True
+    window.close()
+
+
+def test_every_settings_section_is_scrollable_and_has_explanatory_text(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(store=SettingsStore(tmp_path), disk_service=FakeDiskService())
+    page = window.settings_page
+    page.mode.setCurrentIndex(1)
+    window.resize(1040, 700)
+    window.show()
+    app.processEvents()
+
+    assert page.section_list.count() == len(page._SECTIONS)
+    for row in range(page.section_list.count()):
+        page.section_list.setCurrentRow(row)
+        app.processEvents()
+        section = page.stack.currentWidget()
+        assert isinstance(section, QScrollArea)
+        assert (
+            section.horizontalScrollBarPolicy()
+            == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        text = " ".join(
+            label.text().strip()
+            for label in section.findChildren(QLabel)
+            if label.text().strip()
+        )
+        assert len(text) > 40, page.section_list.currentItem().text()
+        assert "станет активным" not in text
+
     window.close()

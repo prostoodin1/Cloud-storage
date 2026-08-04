@@ -1,9 +1,9 @@
-CLOUD STORAGE SERVER 0.7.0 — STAGE 7 COMPLETE
+CLOUD STORAGE SERVER 0.7.1 — STAGE 7 COMPLETE
 ================================
 
 Обычный запуск
 --------------
-1. Запустите CloudStorage-Server-Setup-0.7.0-windows-x64.exe от администратора.
+1. Запустите CloudStorage-Server-Setup-0.7.1-windows-x64.exe от администратора.
 2. Установщик создаст и автоматически запустит службу CloudStorageServerCore.
 3. Откройте Cloud Storage Server Manager из меню «Пуск».
 4. В разделе «Пользователи» создайте человека и отправьте ему одноразовый код или QR.

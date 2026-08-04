@@ -23,7 +23,7 @@ COLORS = {
 APP_STYLESHEET = f"""
 * {{
     font-family: "Segoe UI", "Inter", sans-serif;
-    font-size: 14px;
+    font-size: 15px;
     color: {COLORS["text"]};
 }}
 QMainWindow, QDialog, QWidget#AppRoot {{
@@ -46,7 +46,7 @@ QLabel#BrandMark {{
     padding: 8px;
 }}
 QLabel#PageTitle {{
-    font-size: 28px;
+    font-size: 30px;
     font-weight: 700;
 }}
 QLabel#PageSubtitle, QLabel[muted="true"] {{
@@ -85,11 +85,24 @@ QFrame[accent="blue"] {{
     border-left: 4px solid {COLORS["blue"]};
     border-radius: 12px;
 }}
+QFrame[accent="orange"] {{
+    background: #241c12;
+    border: 1px solid #604621;
+    border-left: 4px solid {COLORS["yellow"]};
+    border-radius: 12px;
+}}
+QLabel[emptyState="true"] {{
+    color: {COLORS["muted"]};
+    background: #111419;
+    border: 1px dashed #343a43;
+    border-radius: 10px;
+    padding: 14px 16px;
+}}
 QPushButton {{
     background: {COLORS["surface_alt"]};
     border: 1px solid #343a43;
     border-radius: 8px;
-    min-height: 34px;
+    min-height: 38px;
     padding: 2px 14px;
 }}
 QPushButton:hover {{
@@ -119,7 +132,7 @@ QPushButton[nav="true"] {{
     background: transparent;
     border: 0;
     border-radius: 8px;
-    min-height: 42px;
+    min-height: 44px;
     color: {COLORS["muted"]};
     font-weight: 600;
     padding-left: 14px;
@@ -137,7 +150,7 @@ QLineEdit, QSpinBox, QComboBox, QListWidget {{
     background: #101216;
     border: 1px solid #343a43;
     border-radius: 8px;
-    min-height: 34px;
+    min-height: 38px;
     padding: 2px 10px;
     selection-background-color: {COLORS["red"]};
 }}
@@ -152,6 +165,15 @@ QComboBox QAbstractItemView {{
     background: {COLORS["surface_alt"]};
     border: 1px solid #3a414a;
     selection-background-color: #322024;
+}}
+QListWidget#SettingsSections::item {{
+    min-height: 32px;
+    padding: 4px 8px;
+    border-radius: 6px;
+}}
+QListWidget#SettingsSections::item:selected {{
+    background: #322024;
+    color: white;
 }}
 QCheckBox {{ spacing: 9px; }}
 QCheckBox::indicator {{

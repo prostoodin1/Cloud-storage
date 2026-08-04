@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -378,6 +379,7 @@ class SettingsPage(QWidget):
     restore_requested = Signal(str, str)
     restore_resume_requested = Signal(str)
     restore_cancel_requested = Signal(str)
+    open_updates_requested = Signal()
 
     _SECTIONS = [
         ("Сервер", False),
@@ -426,7 +428,13 @@ class SettingsPage(QWidget):
         body = QHBoxLayout()
         body.setSpacing(16)
         self.section_list = QListWidget()
-        self.section_list.setFixedWidth(230)
+        self.section_list.setObjectName("SettingsSections")
+        self.section_list.setFixedWidth(205)
+        self.section_list.setWordWrap(True)
+        self.section_list.setSpacing(1)
+        self.section_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         self.section_list.currentRowChanged.connect(self._show_section)
         self.stack = QStackedWidget()
         body.addWidget(self.section_list)
@@ -518,6 +526,8 @@ class SettingsPage(QWidget):
         self.automation_run_rows: QVBoxLayout | None = None
         self.notification_rows: QVBoxLayout | None = None
         self.integration_rows: QVBoxLayout | None = None
+        self.log_rows: QVBoxLayout | None = None
+        self.log_path: QLabel | None = None
         self.diagnostics_status_label: QLabel | None = None
         self.diagnostics_detail_label: QLabel | None = None
         self.diagnostics_rows: QVBoxLayout | None = None
@@ -743,6 +753,22 @@ class SettingsPage(QWidget):
         self._update_automation(automation_rules or {}, online)
         self._update_notifications(notifications or [], integrations or {}, online)
         self._update_diagnostics(diagnostics or {}, online)
+        if self.log_rows is not None:
+            clear_layout(self.log_rows)
+            events = list(audit_events or [])[:20]
+            if not events:
+                self._add_muted(
+                    self.log_rows,
+                    "Событий Core пока нет. Они появятся после запуска ядра и первых действий.",
+                )
+            for event in events:
+                label = QLabel(
+                    f"{event.get('timestamp', '—')} · {event.get('action', 'событие')}\n"
+                    f"{event.get('detail', '')}"
+                )
+                label.setWordWrap(True)
+                label.setProperty("emptyState", True)
+                self.log_rows.addWidget(label)
 
     def _update_backups(
         self,
@@ -1518,6 +1544,8 @@ class SettingsPage(QWidget):
         self.zrok_executable.setText(settings.zrok_executable)
         self.zrok_share_name.setText(settings.zrok_share_name)
         self.config_path.setText(config_path)
+        if self.log_path is not None:
+            self.log_path.setText(str(Path(config_path).parent / "audit.jsonl"))
         if self.server_state_label is not None:
             self.server_state_label.setText(
                 "Настройка завершена" if settings.setup_complete else "Ожидает настройки"
@@ -1671,6 +1699,13 @@ class SettingsPage(QWidget):
             form = QFormLayout()
             form.addRow("Обновлять данные каждые", self.refresh_interval)
             layout.addLayout(form)
+            note = QLabel(
+                "Этот интервал относится к состоянию дисков и Core. Выбранный простой или "
+                "расширенный режим сохраняется сразу и не сбрасывается после обновления данных."
+            )
+            note.setWordWrap(True)
+            note.setProperty("emptyState", True)
+            layout.addWidget(note)
         elif name == "Сеть":
             self.lan_status_label = QLabel("Выключен")
             self.lan_details_label = QLabel(
@@ -1847,13 +1882,85 @@ class SettingsPage(QWidget):
             )
             body.setWordWrap(True)
             layout.addWidget(body)
+            guide = QLabel(
+                "Как это работает:\n"
+                "1. Основные диски принимают новые файлы по приоритету и свободному месту.\n"
+                "2. Зеркала получают проверенную копию каждой версии файла.\n"
+                "3. Диски резервных копий хранят независимые снимки и не участвуют в обычной записи."
+            )
+            guide.setWordWrap(True)
+            guide.setProperty("emptyState", True)
+            layout.addWidget(guide)
         elif name == "Диски":
             body = QLabel(
-                "Менеджер только читает системные сведения. Форматирование, разметка и "
-                "перенос существующих файлов намеренно отсутствуют в Beta 0.2."
+                "Менеджер читает реальные сведения Windows и не форматирует накопители. "
+                "Назначение, порог заполнения и приоритет задаются во вкладке «Диски»: "
+                "нажмите карточку нужного накопителя, чтобы открыть подробные настройки."
             )
             body.setWordWrap(True)
             layout.addWidget(body)
+            note = QLabel(
+                "Если диск не отображается: убедитесь, что Windows назначила ему букву, затем "
+                "нажмите «Обновить» во вкладке «Диски». Недоступный диск не удаляется из конфигурации."
+            )
+            note.setWordWrap(True)
+            note.setProperty("emptyState", True)
+            layout.addWidget(note)
+        elif name == "Права доступа":
+            description = QLabel(
+                "Права применяются серверным ядром, а не интерфейсом клиента. Пользователь не "
+                "может увидеть чужое личное пространство или административные функции."
+            )
+            description.setWordWrap(True)
+            layout.addWidget(description)
+            matrix = QLabel(
+                "Обычный пользователь\n"
+                "• читает, загружает и удаляет только собственные файлы;\n"
+                "• подключает только подтверждённые устройства;\n"
+                "• не видит диски, журналы, других пользователей и резервные копии.\n\n"
+                "Администратор\n"
+                "• управляет пользователями, квотами и устройствами через локальный Manager;\n"
+                "• запускает диагностику, резервирование и обслуживание;\n"
+                "• не получает пароль пользователя — пароли хранятся как стойкие хэши."
+            )
+            matrix.setWordWrap(True)
+            matrix.setProperty("emptyState", True)
+            layout.addWidget(matrix)
+        elif name == "Журналы":
+            description = QLabel(
+                "Здесь показываются последние административные и защитные события Core. "
+                "Содержимое пользовательских файлов, пароли и токены в журнал не записываются."
+            )
+            description.setWordWrap(True)
+            layout.addWidget(description)
+            self.log_path = QLabel("—")
+            self.log_path.setWordWrap(True)
+            self.log_path.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            path_form = QFormLayout()
+            path_form.addRow("Локальный журнал Manager", self.log_path)
+            layout.addLayout(path_form)
+            self.log_rows = QVBoxLayout()
+            layout.addLayout(self.log_rows)
+        elif name == "Обновления":
+            description = QLabel(
+                "Центр обновлений позволяет выбрать ручной или автоматический режим, стабильный "
+                "или тестовый канал и конкретную версию для скачивания."
+            )
+            description.setWordWrap(True)
+            layout.addWidget(description)
+            safety = QLabel(
+                "Перед установкой проверяются подпись Ed25519 каталога, размер и SHA-256 файла. "
+                "Настройки и пользовательские данные установщик не удаляет."
+            )
+            safety.setWordWrap(True)
+            safety.setProperty("emptyState", True)
+            layout.addWidget(safety)
+            open_updates = QPushButton("Открыть центр обновлений")
+            open_updates.setProperty("primary", True)
+            open_updates.clicked.connect(self.open_updates_requested)
+            layout.addWidget(open_updates)
         elif name == "Автоматизация":
             description = QLabel(
                 "Правила работают внутри Core, сохраняются в SQLite и переживают перезапуск. "
@@ -2039,17 +2146,8 @@ class SettingsPage(QWidget):
             layout.addLayout(controls)
             self.maintenance_rows = QVBoxLayout()
             layout.addLayout(self.maintenance_rows)
-        else:
-            stage = "этапе 4" if name in {"Резервные копии", "Автоматизация"} else "этапе 2"
-            body = QLabel(
-                f"Раздел подготовлен в архитектуре и станет активным на {stage}. "
-                "Неактивные функции не показывают фиктивные данные."
-            )
-            body.setWordWrap(True)
-            body.setProperty("muted", True)
-            layout.addWidget(body)
         layout.addStretch()
-        return page
+        return _scroll_page(page)
 
     def _emit_migration(self) -> None:
         if self.migration_source is None or self.migration_target is None:
@@ -2165,7 +2263,8 @@ class SettingsPage(QWidget):
     @staticmethod
     def _add_muted(layout: QVBoxLayout, text: str) -> None:
         label = QLabel(text)
-        label.setProperty("muted", True)
+        label.setWordWrap(True)
+        label.setProperty("emptyState", True)
         layout.addWidget(label)
         label.show()
 

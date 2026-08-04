@@ -24,15 +24,17 @@ UPDATE_PUBLIC_KEY = "6MAV324wKv/5LwvAnKMyCk+djeST6b5ufaMBVfe3XWQ="
 DEFAULT_FEEDS = {
     "client": (
         "https://github.com/prostoodin1/Cloud-storage/releases/latest/download/"
-        "cloud-storage-client-stable.json"
+        "cloud-storage-client-catalog.json"
     ),
     "server": (
         "https://github.com/prostoodin1/Cloud-storage/releases/latest/download/"
-        "cloud-storage-server-stable.json"
+        "cloud-storage-server-catalog.json"
     ),
 }
-MAX_MANIFEST_BYTES = 256 * 1024
+MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_INSTALLER_BYTES = 2 * 1024**3
+UPDATE_POLICIES = {"manual", "download", "install"}
+UPDATE_CHANNELS = {"stable", "beta"}
 
 
 class UpdateError(RuntimeError):
@@ -59,6 +61,16 @@ class UpdateInfo:
     @property
     def newer_than_current(self) -> bool:
         return version_key(self.version) > version_key(__version__)
+
+
+@dataclass(frozen=True, slots=True)
+class UpdatePreferences:
+    policy: str = "manual"
+    channel: str = "stable"
+
+    def __post_init__(self) -> None:
+        if self.policy not in UPDATE_POLICIES or self.channel not in UPDATE_CHANNELS:
+            raise ValueError("invalid update preferences")
 
 
 def canonical_manifest_payload(value: dict[str, object]) -> bytes:
@@ -93,6 +105,67 @@ def parse_signed_manifest(
 
     if not isinstance(value, dict) or value.get("schema_version") != 1:
         raise UpdateError("версия манифеста обновления не поддерживается")
+    return _parse_update_info(value, expected_product=expected_product)
+
+
+def parse_signed_catalog(
+    raw: bytes,
+    *,
+    expected_product: str,
+    public_key: str = UPDATE_PUBLIC_KEY,
+) -> list[UpdateInfo]:
+    """Parse a signed multi-version catalog or a legacy single-version manifest."""
+    if len(raw) > MAX_MANIFEST_BYTES:
+        raise UpdateError("каталог обновлений слишком большой")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateError("каталог обновлений повреждён") from exc
+    if isinstance(value, dict) and value.get("schema_version") == 1:
+        return [
+            parse_signed_manifest(
+                raw,
+                expected_product=expected_product,
+                public_key=public_key,
+            )
+        ]
+    try:
+        signature = base64.b64decode(str(value["signature"]), validate=True)
+        key_bytes = base64.b64decode(public_key, validate=True)
+        Ed25519PublicKey.from_public_bytes(key_bytes).verify(
+            signature, canonical_manifest_payload(value)
+        )
+    except InvalidSignature as exc:
+        raise UpdateError("цифровая подпись каталога недействительна") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UpdateError("каталог обновлений повреждён") from exc
+    if not isinstance(value, dict) or value.get("schema_version") != 2:
+        raise UpdateError("версия каталога обновлений не поддерживается")
+    product = str(value.get("product", ""))
+    versions = value.get("versions")
+    if product != expected_product or product not in DEFAULT_FEEDS:
+        raise UpdateError("каталог предназначен для другого приложения")
+    if not isinstance(versions, list) or not 1 <= len(versions) <= 100:
+        raise UpdateError("список версий в каталоге недействителен")
+    result: list[UpdateInfo] = []
+    seen: set[tuple[str, str]] = set()
+    for item in versions:
+        if not isinstance(item, dict):
+            raise UpdateError("описание версии в каталоге недействительно")
+        entry = dict(item)
+        entry["product"] = product
+        info = _parse_update_info(entry, expected_product=expected_product)
+        identity = (info.version, info.channel)
+        if identity in seen:
+            raise UpdateError("каталог содержит повторяющуюся версию")
+        seen.add(identity)
+        result.append(info)
+    return sorted(result, key=lambda item: version_key(item.version), reverse=True)
+
+
+def _parse_update_info(
+    value: dict[str, object], *, expected_product: str
+) -> UpdateInfo:
     product = str(value.get("product", ""))
     version = str(value.get("version", ""))
     channel = str(value.get("channel", ""))
@@ -100,7 +173,7 @@ def parse_signed_manifest(
     if product != expected_product or product not in DEFAULT_FEEDS:
         raise UpdateError("обновление предназначено для другого приложения")
     version_key(version)
-    if channel not in {"stable", "beta"} or not isinstance(package_value, dict):
+    if channel not in UPDATE_CHANNELS or not isinstance(package_value, dict):
         raise UpdateError("поля манифеста обновления недействительны")
     url = _https_url(str(package_value.get("url", "")))
     sha256 = str(package_value.get("sha256", "")).casefold()
@@ -145,7 +218,42 @@ class UpdateService:
         self.public_key = public_key
         self.download_directory = data_directory / "updates"
 
-    def check(self) -> UpdateInfo:
+    @property
+    def preferences_path(self) -> Path:
+        return self.download_directory / "preferences.json"
+
+    def load_preferences(self) -> UpdatePreferences:
+        try:
+            value = json.loads(self.preferences_path.read_text(encoding="utf-8"))
+            if not isinstance(value, dict) or value.get("schema_version") != 1:
+                raise ValueError
+            return UpdatePreferences(
+                policy=str(value.get("policy", "manual")),
+                channel=str(value.get("channel", "stable")),
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return UpdatePreferences()
+
+    def save_preferences(self, preferences: UpdatePreferences) -> None:
+        self.download_directory.mkdir(parents=True, exist_ok=True)
+        temporary = self.preferences_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "policy": preferences.policy,
+                    "channel": preferences.channel,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary, self.preferences_path)
+
+    def list_versions(self, channel: str = "stable") -> list[UpdateInfo]:
+        if channel not in UPDATE_CHANNELS:
+            raise ValueError("unknown update channel")
         request = urllib.request.Request(
             self.feed_url,
             headers={
@@ -159,11 +267,19 @@ class UpdateService:
                 raw = _read_limited(response, MAX_MANIFEST_BYTES)
         except (OSError, urllib.error.URLError) as exc:
             raise UpdateError("не удалось получить сведения об обновлении") from exc
-        return parse_signed_manifest(
+        versions = parse_signed_catalog(
             raw,
             expected_product=self.product,
             public_key=self.public_key,
         )
+        if channel == "stable":
+            versions = [item for item in versions if item.channel == "stable"]
+        if not versions:
+            raise UpdateError("в выбранном канале пока нет доступных версий")
+        return versions
+
+    def check(self, channel: str = "stable") -> UpdateInfo:
+        return self.list_versions(channel)[0]
 
     def download(self, info: UpdateInfo) -> Path:
         if info.product != self.product:

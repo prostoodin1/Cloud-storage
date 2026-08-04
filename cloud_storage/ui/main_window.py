@@ -117,8 +117,8 @@ class MainWindow(QMainWindow):
         self._nav_buttons: list[QPushButton] = []
 
         self.setWindowTitle(f"Cloud Storage Server Manager · {__version__}")
-        self.setMinimumSize(1050, 700)
-        self.resize(1320, 820)
+        self.setMinimumSize(1040, 700)
+        self.resize(1380, 860)
         self._build_ui()
         self._connect_pages()
 
@@ -137,7 +137,7 @@ class MainWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(245)
+        sidebar.setFixedWidth(220)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(18, 22, 18, 20)
         sidebar_layout.setSpacing(8)
@@ -201,7 +201,7 @@ class MainWindow(QMainWindow):
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(26, 22, 10, 10)
+        content_layout.setContentsMargins(22, 20, 12, 12)
         content_layout.addWidget(self.stack)
         layout.addWidget(content, 1)
 
@@ -271,6 +271,9 @@ class MainWindow(QMainWindow):
             self.acknowledge_notification
         )
         self.settings_page.integration_test_requested.connect(self.test_integration)
+        self.settings_page.open_updates_requested.connect(
+            lambda: self._show_page(self.update_page)
+        )
 
     def _prepare_server_update(self) -> None:
         if self.core_health is None:

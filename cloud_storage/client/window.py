@@ -136,8 +136,8 @@ class ClientWindow(QMainWindow):
         self.tray_icon: QSystemTrayIcon | None = None
 
         self.setWindowTitle(f"Cloud Storage Client · {__version__}")
-        self.setMinimumSize(980, 640)
-        self.resize(1240, 780)
+        self.setMinimumSize(1040, 700)
+        self.resize(1320, 820)
         self._build_ui()
         self._setup_tray()
         self._load_profile()
@@ -169,7 +169,7 @@ class ClientWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(235)
+        sidebar.setFixedWidth(220)
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(18, 22, 18, 20)
         mark_row = QHBoxLayout()
@@ -230,7 +230,7 @@ class ClientWindow(QMainWindow):
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(28, 24, 20, 18)
+        content_layout.setContentsMargins(22, 20, 16, 14)
         content_layout.addWidget(self.stack)
         outer.addWidget(content, 1)
 
@@ -369,6 +369,13 @@ class ClientWindow(QMainWindow):
             3, QHeaderView.ResizeMode.ResizeToContents
         )
         self.files_table.doubleClicked.connect(self.open_selected)
+        self.files_empty = QLabel(
+            "Файлы появятся после подключения и выбора личного пространства. "
+            "Если папка пуста, загрузите первый файл кнопкой выше."
+        )
+        self.files_empty.setWordWrap(True)
+        self.files_empty.setProperty("emptyState", True)
+        layout.addWidget(self.files_empty)
         layout.addWidget(self.files_table, 1)
         actions = QHBoxLayout()
         open_button = QPushButton("Открыть")
@@ -404,6 +411,13 @@ class ClientWindow(QMainWindow):
         layout.addLayout(toolbar)
         self.transfer_rows = QVBoxLayout()
         layout.addLayout(self.transfer_rows)
+        transfer_help = QLabel(
+            "Здесь появятся загрузки и скачивания, включая прогресс, паузу и повтор после ошибки. "
+            "Начните передачу во вкладке «Мои файлы» — очередь сохранится после перезапуска."
+        )
+        transfer_help.setWordWrap(True)
+        transfer_help.setProperty("emptyState", True)
+        layout.addWidget(transfer_help)
         layout.addStretch()
         return page
 
@@ -1014,6 +1028,7 @@ class ClientWindow(QMainWindow):
 
     def _render_entries(self, result: object) -> None:
         self.entries = result if isinstance(result, list) else []
+        self.files_empty.setVisible(not self.entries)
         self.files_table.setRowCount(len(self.entries))
         for row, entry in enumerate(self.entries):
             name = QTableWidgetItem(str(entry.get("name", "")))

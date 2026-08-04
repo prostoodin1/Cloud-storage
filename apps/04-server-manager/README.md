@@ -11,4 +11,3 @@ Server Manager — главное административное прилож�
 - [История изменений раздела](https://github.com/prostoodin1/Cloud-storage/commits/codex/cloud-storage-alpha-0.4.0a2/apps/04-server-manager)
 
 Запуск из исходников: `python -m cloud_storage`.
-

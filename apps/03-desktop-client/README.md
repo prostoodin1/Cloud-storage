@@ -11,4 +11,3 @@ Desktop Client подключается к домашнему серверу, п
 - [История изменений раздела](https://github.com/prostoodin1/Cloud-storage/commits/codex/cloud-storage-alpha-0.4.0a2/apps/03-desktop-client)
 
 Запуск из исходников: `python -m cloud_storage.client`.
-

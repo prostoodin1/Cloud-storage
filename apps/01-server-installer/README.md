@@ -11,4 +11,3 @@ Windows-установщик разворачивает Server Manager, Core API
 - [История изменений раздела](https://github.com/prostoodin1/Cloud-storage/commits/codex/cloud-storage-alpha-0.4.0a2/apps/01-server-installer)
 
 Сборка: `powershell -ExecutionPolicy Bypass -File scripts/build-installers.ps1`.
-

@@ -104,10 +104,10 @@ jobs:
           java-version: "17"
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec expo prebuild --platform android --no-install --clean
-      - name: Build screenshot APK
+      - name: Build self-contained screenshot APK
         env:
           EXPO_PUBLIC_SCREENSHOT_SCREEN: files
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleRelease
         working-directory: mobile/android
       - name: Enable Android emulator acceleration
         run: |
@@ -124,7 +124,7 @@ jobs:
           disable-linux-hw-accel: false
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
           script: |
-            adb install -r mobile/android/app/build/outputs/apk/debug/app-debug.apk
+            adb install -r mobile/android/app/build/outputs/apk/release/app-release.apk
             adb shell am force-stop com.cloudstorage.mobile
             adb shell monkey -p com.cloudstorage.mobile 1
             sleep 8
@@ -162,14 +162,14 @@ jobs:
           xcodebuild \
             -workspace ios/CloudStorage.xcworkspace \
             -scheme CloudStorage \
-            -configuration Debug \
+            -configuration Release \
             -sdk iphonesimulator \
             -derivedDataPath build/ios-derived \
             CODE_SIGNING_ALLOWED=NO \
             build
       - name: Package and capture iPhone application
         run: |
-          APP_PATH="build/ios-derived/Build/Products/Debug-iphonesimulator/CloudStorage.app"
+          APP_PATH="build/ios-derived/Build/Products/Release-iphonesimulator/CloudStorage.app"
           test -d "$APP_PATH"
           mkdir -p release screenshots
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" release/CloudStorage-Mobile-0.9.0-iphone-simulator.zip

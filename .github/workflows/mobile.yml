@@ -37,7 +37,8 @@ jobs:
       - run: pnpm exec expo export --platform android --output-dir dist-android
       - run: pnpm exec expo export --platform ios --output-dir dist-ios
 
-  android-preview:
+  android-release:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,12 +55,132 @@ jobs:
           distribution: temurin
           java-version: "17"
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec expo prebuild --platform android --no-install
-      - name: Build debug APK
-        run: ./gradlew assembleDebug
+      - run: pnpm exec expo prebuild --platform android --no-install --clean
+      - name: Configure private release key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          CLOUD_STORAGE_ANDROID_KEYSTORE: cloud-storage-release.p12
+          CLOUD_STORAGE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CLOUD_STORAGE_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          CLOUD_STORAGE_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/cloud-storage-release.p12
+          node scripts/configure-android-signing.mjs
+      - name: Build signed APK and Google Play bundle
+        env:
+          CLOUD_STORAGE_ANDROID_KEYSTORE: cloud-storage-release.p12
+          CLOUD_STORAGE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CLOUD_STORAGE_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          CLOUD_STORAGE_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease bundleRelease
         working-directory: mobile/android
+      - name: Name release files
+        run: |
+          mkdir -p release
+          cp android/app/build/outputs/apk/release/app-release.apk release/CloudStorage-Mobile-0.9.0-android.apk
+          cp android/app/build/outputs/bundle/release/app-release.aab release/CloudStorage-Mobile-0.9.0-android.aab
       - uses: actions/upload-artifact@v4
         with:
-          name: CloudStorage-Mobile-0.8.0-android-preview
-          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          name: CloudStorage-Mobile-0.9.0-android-release
+          path: mobile/release/*
+          if-no-files-found: error
+
+  android-screenshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec expo prebuild --platform android --no-install --clean
+      - name: Build screenshot APK
+        env:
+          EXPO_PUBLIC_SCREENSHOT_SCREEN: files
+        run: ./gradlew assembleDebug
+        working-directory: mobile/android
+      - name: Capture Android screenshot
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            adb install -r mobile/android/app/build/outputs/apk/debug/app-debug.apk
+            adb shell am force-stop com.cloudstorage.mobile
+            adb shell monkey -p com.cloudstorage.mobile 1
+            sleep 8
+            mkdir -p mobile/screenshots
+            adb exec-out screencap -p > mobile/screenshots/CloudStorage-Mobile-0.9.0-android.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloudStorage-Mobile-0.9.0-android-screenshot
+          path: mobile/screenshots/*.png
+          if-no-files-found: error
+
+  ios-simulator:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Generate iOS project
+        env:
+          EXPO_PUBLIC_SCREENSHOT_SCREEN: server
+        run: pnpm exec expo prebuild --platform ios --no-install --clean
+      - run: pod install
+        working-directory: mobile/ios
+      - name: Build unsigned simulator application
+        env:
+          EXPO_PUBLIC_SCREENSHOT_SCREEN: server
+        run: |
+          xcodebuild \
+            -workspace ios/CloudStorage.xcworkspace \
+            -scheme CloudStorage \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -derivedDataPath build/ios-derived \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+      - name: Package and capture iPhone application
+        run: |
+          APP_PATH="build/ios-derived/Build/Products/Debug-iphonesimulator/CloudStorage.app"
+          test -d "$APP_PATH"
+          mkdir -p release screenshots
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" release/CloudStorage-Mobile-0.9.0-iphone-simulator.zip
+          DEVICE_ID=$(xcrun simctl create "Cloud Storage Screenshot" "iPhone 16 Pro" "iOS 18.5" 2>/dev/null || true)
+          if [ -z "$DEVICE_ID" ]; then
+            DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(v["udid"] for values in d.values() for v in values if "iPhone" in v["name"]))')
+          fi
+          xcrun simctl boot "$DEVICE_ID" || true
+          open -a Simulator
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+          xcrun simctl install "$DEVICE_ID" "$APP_PATH"
+          xcrun simctl launch "$DEVICE_ID" com.cloudstorage.mobile
+          sleep 8
+          xcrun simctl io "$DEVICE_ID" screenshot screenshots/CloudStorage-Mobile-0.9.0-iphone.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloudStorage-Mobile-0.9.0-iphone-simulator
+          path: |
+            mobile/release/*.zip
+            mobile/screenshots/*.png
           if-no-files-found: error

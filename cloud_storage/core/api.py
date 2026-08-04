@@ -187,6 +187,30 @@ class MoveEntryRequest(BaseModel):
     kind: str = Field(pattern="^(file|directory)$")
 
 
+class CreateShareRequest(BaseModel):
+    space_id: str = Field(min_length=1, max_length=100)
+    logical_path: str = Field(min_length=1, max_length=1024)
+    kind: str = Field(pattern="^(file|directory)$")
+    ttl_hours: int = Field(default=24, ge=1, le=720)
+
+
+class MobileAdminConfirmationRequest(BaseModel):
+    password: SecretStr
+    action: str = Field(min_length=3, max_length=100)
+
+
+class MobileStorageWriteRequest(BaseModel):
+    enabled: bool
+
+
+class MobileAutomationRequest(BaseModel):
+    enabled: bool
+
+
+class MobileUserEnabledRequest(BaseModel):
+    enabled: bool
+
+
 class SyncStorageRootsRequest(BaseModel):
     roots: list[StorageRootRequest] = Field(max_length=128)
 
@@ -232,6 +256,27 @@ class SlidingWindowLimiter:
                 return False
             events.append(now)
             return True
+
+
+MOBILE_ADMIN_ACTIONS = {
+    "device.approve",
+    "device.revoke",
+    "server.read_only",
+    "server.normal",
+    "diagnostics.quick",
+    "diagnostics.full",
+    "backup.run",
+    "storage.write.pause",
+    "storage.write.resume",
+    "automation.pause",
+    "automation.resume",
+    "tunnel.restart",
+    "core.restart",
+    "user.create",
+    "user.password",
+    "user.enable",
+    "user.disable",
+}
 
 
 def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
@@ -322,12 +367,16 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     )
     app.state.runtime = runtime
     app.state.shutdown_callback = None
+    app.state.restart_callback = None
     bearer = HTTPBearer(auto_error=False)
     pairing_limiter = SlidingWindowLimiter(limit=10, window_seconds=300)
     remote_pairing_limiter = SlidingWindowLimiter(limit=5, window_seconds=900)
     remote_login_limiter = SlidingWindowLimiter(limit=5, window_seconds=300)
     remote_request_limiter = SlidingWindowLimiter(limit=600, window_seconds=60)
     remote_audit_limiter = SlidingWindowLimiter(limit=30, window_seconds=3600)
+    mobile_confirmation_limiter = SlidingWindowLimiter(limit=10, window_seconds=300)
+    consumed_mobile_confirmations: dict[str, int] = {}
+    consumed_mobile_confirmations_lock = threading.Lock()
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=(
@@ -351,12 +400,20 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "/v1/pairing/status",
             "/v1/remote/session",
             "/v1/spaces",
+            "/v1/operations",
+            "/v1/shares",
             "/v1/mobile/admin/overview",
+            "/v1/mobile/admin/confirm",
             "/v1/mobile/admin/server-mode",
+            "/v1/mobile/admin/diagnostics/scans",
+            "/v1/mobile/admin/automation/settings",
+            "/v1/mobile/admin/core/restart",
+            "/v1/mobile/admin/users",
         }:
             return True
         patterns = (
             r"/v1/spaces/[^/]+/entries",
+            r"/v1/spaces/[^/]+/search",
             r"/v1/spaces/[^/]+/directories",
             r"/v1/spaces/[^/]+/directories/.+",
             r"/v1/spaces/[^/]+/moves",
@@ -364,7 +421,15 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             r"/v1/spaces/[^/]+/files/.+",
             r"/v1/uploads/[^/]+",
             r"/v1/uploads/[^/]+/complete",
+            r"/v1/shares/[^/]+",
+            r"/v1/public/shares/[^/]+",
+            r"/v1/public/shares/[^/]+/download",
+            r"/v1/public/shares/[^/]+/files/.+",
             r"/v1/mobile/admin/devices/[^/]+/(approve|revoke)",
+            r"/v1/mobile/admin/backups/[^/]+/run",
+            r"/v1/mobile/admin/storage/[^/]+/write",
+            r"/v1/mobile/admin/tunnels/[^/]+/restart",
+            r"/v1/mobile/admin/users/[^/]+/(password|enabled)",
         )
         return any(re.fullmatch(pattern, path) for pattern in patterns)
 
@@ -428,8 +493,12 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                     "/v1/admin/notifications",
                     "/v1/admin/integrations",
                     "/v1/mobile/admin/server-mode",
+                    "/v1/mobile/admin/diagnostics/scans",
+                    "/v1/mobile/admin/automation/settings",
+                    "/v1/mobile/admin/core/restart",
                 )
             )
+            and not re.fullmatch(r"/v1/mobile/admin/storage/[^/]+/write", request.url.path)
             and request.url.path != "/v1/admin/shutdown"
             and not request.url.path.endswith("/revoke")
         ):
@@ -520,6 +589,42 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         if user.role != "admin" or not user.enabled:
             raise HTTPException(status_code=403, detail="administrator role is required")
         return device
+
+    def consume_mobile_confirmation(
+        token: str,
+        *,
+        device: DeviceRecord,
+        action: str,
+    ) -> None:
+        if action not in MOBILE_ADMIN_ACTIONS:
+            raise HTTPException(status_code=400, detail="unsupported administrator action")
+        try:
+            runtime.repository.credentials.verify_mobile_confirmation(
+                token,
+                user_id=device.user_id,
+                device_id=device.id,
+                action=action,
+                password_version=runtime.repository.user_password_version(device.user_id),
+            )
+        except InvalidCredential as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        fingerprint = runtime.repository.credentials.fingerprint(
+            token, "consumed-mobile-confirmation"
+        )
+        now = int(time.time())
+        with consumed_mobile_confirmations_lock:
+            expired = [
+                key for key, consumed_at in consumed_mobile_confirmations.items()
+                if consumed_at <= now - 300
+            ]
+            for key in expired:
+                consumed_mobile_confirmations.pop(key, None)
+            if fingerprint in consumed_mobile_confirmations:
+                raise HTTPException(
+                    status_code=409,
+                    detail="administrator confirmation has already been used",
+                )
+            consumed_mobile_confirmations[fingerprint] = now
 
     @app.exception_handler(NotFoundError)
     async def not_found_handler(request: Request, exc: NotFoundError) -> JSONResponse:
@@ -1434,36 +1539,250 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             },
             "users": [asdict(item) for item in runtime.repository.list_users()],
             "devices": [asdict(item) for item in runtime.repository.list_devices()],
+            "storage": runtime.storage.mobile_storage_overview(),
+            "backup_policies": [
+                runtime.backup_automation.policy_to_dict(item)
+                for item in runtime.backup_automation.list_policies()
+            ],
+            "backups": [
+                runtime.storage.backup_to_dict(item)
+                for item in runtime.storage.list_backup_jobs(limit=10)
+            ],
+            "automation": runtime.automation.overview()["scheduler"],
         }
+
+    @app.post(
+        "/v1/mobile/admin/confirm",
+        tags=["mobile-control"],
+    )
+    def mobile_confirm_admin_action(
+        body: MobileAdminConfirmationRequest,
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        if body.action not in MOBILE_ADMIN_ACTIONS:
+            raise HTTPException(status_code=400, detail="unsupported administrator action")
+        if not mobile_confirmation_limiter.allow(device.id):
+            raise HTTPException(status_code=429, detail="too many administrator confirmations")
+        user = runtime.repository.get_user(device.user_id)
+        try:
+            authenticated = runtime.repository.authenticate_user_password(
+                user.username,
+                body.password.get_secret_value(),
+            )
+        except (InvalidCredential, PermissionDeniedError) as exc:
+            raise HTTPException(status_code=403, detail="invalid administrator password") from exc
+        if authenticated.id != device.user_id or authenticated.role != "admin":
+            raise HTTPException(status_code=403, detail="administrator role is required")
+        token, expires_at = runtime.repository.credentials.issue_mobile_confirmation(
+            device.user_id,
+            device.id,
+            body.action,
+            password_version=runtime.repository.user_password_version(device.user_id),
+        )
+        return {"confirmation_token": token, "action": body.action, "expires_at": expires_at}
+
+    @app.post(
+        "/v1/mobile/admin/users",
+        tags=["mobile-control"],
+        status_code=status.HTTP_201_CREATED,
+    )
+    def mobile_create_user(
+        body: CreateUserRequest,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        consume_mobile_confirmation(confirmation, device=device, action="user.create")
+        user, space = runtime.repository.create_user(
+            body.username,
+            body.display_name,
+            body.quota_gib * 1024**3,
+            body.role,
+            body.password.get_secret_value() if body.password else None,
+        )
+        return {"user": asdict(user), "space": asdict(space)}
+
+    @app.put(
+        "/v1/mobile/admin/users/{user_id}/password",
+        tags=["mobile-control"],
+    )
+    def mobile_set_user_password(
+        user_id: str,
+        body: SetUserPasswordRequest,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        consume_mobile_confirmation(confirmation, device=device, action="user.password")
+        return asdict(runtime.repository.set_user_password(user_id, body.password.get_secret_value()))
+
+    @app.put(
+        "/v1/mobile/admin/users/{user_id}/enabled",
+        tags=["mobile-control"],
+    )
+    def mobile_set_user_enabled(
+        user_id: str,
+        body: MobileUserEnabledRequest,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        action = "user.enable" if body.enabled else "user.disable"
+        consume_mobile_confirmation(confirmation, device=device, action=action)
+        if user_id == device.user_id and not body.enabled:
+            raise HTTPException(status_code=400, detail="you cannot disable your own account")
+        return asdict(runtime.repository.set_user_enabled(user_id, body.enabled))
 
     @app.post(
         "/v1/mobile/admin/devices/{device_id}/approve",
         tags=["mobile-control"],
-        dependencies=[Depends(require_mobile_admin)],
     )
-    def mobile_approve_device(device_id: str) -> dict[str, Any]:
+    def mobile_approve_device(
+        device_id: str,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        consume_mobile_confirmation(confirmation, device=device, action="device.approve")
         return asdict(runtime.repository.set_device_status(device_id, "trusted"))
 
     @app.post(
         "/v1/mobile/admin/devices/{device_id}/revoke",
         tags=["mobile-control"],
-        dependencies=[Depends(require_mobile_admin)],
     )
-    def mobile_revoke_device(device_id: str) -> dict[str, Any]:
+    def mobile_revoke_device(
+        device_id: str,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        consume_mobile_confirmation(confirmation, device=device, action="device.revoke")
         return asdict(runtime.repository.set_device_status(device_id, "revoked"))
 
     @app.put(
         "/v1/mobile/admin/server-mode",
         tags=["mobile-control"],
-        dependencies=[Depends(require_mobile_admin)],
     )
-    def mobile_set_server_mode(body: SetServerModeRequest) -> dict[str, Any]:
+    def mobile_set_server_mode(
+        body: SetServerModeRequest,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        consume_mobile_confirmation(
+            confirmation,
+            device=device,
+            action="server.read_only" if body.mode == "read_only" else "server.normal",
+        )
         if body.mode == "read_only" and not body.confirmed:
             raise HTTPException(
                 status_code=400,
                 detail="explicit confirmation is required for emergency read-only mode",
             )
         return runtime.recovery.set_server_mode(body.mode, body.reason)
+
+    @app.post(
+        "/v1/mobile/admin/diagnostics/scans",
+        tags=["mobile-control"],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def mobile_run_diagnostics(
+        body: CreateDiagnosticScanRequest,
+        background: BackgroundTasks,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        consume_mobile_confirmation(
+            confirmation,
+            device=device,
+            action="diagnostics.full" if body.kind == "full" else "diagnostics.quick",
+        )
+        scan = runtime.diagnostics.create_scan(body.kind, source="mobile")
+        background.add_task(runtime.diagnostics.run_scan_safely, scan.id)
+        return runtime.diagnostics.scan_to_dict(scan)
+
+    @app.post(
+        "/v1/mobile/admin/backups/{target_root_id}/run",
+        tags=["mobile-control"],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def mobile_run_backup(
+        target_root_id: str,
+        background: BackgroundTasks,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        consume_mobile_confirmation(confirmation, device=device, action="backup.run")
+        job = runtime.backup_automation.queue_policy_run(target_root_id)
+        background.add_task(runtime.backup_automation.run_backup_pipeline, job.id)
+        return runtime.storage.backup_to_dict(job)
+
+    @app.put(
+        "/v1/mobile/admin/storage/{root_id}/write",
+        tags=["mobile-control"],
+    )
+    def mobile_set_storage_write(
+        root_id: str,
+        body: MobileStorageWriteRequest,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        consume_mobile_confirmation(
+            confirmation,
+            device=device,
+            action="storage.write.resume" if body.enabled else "storage.write.pause",
+        )
+        return runtime.storage.set_root_write_enabled(
+            root_id,
+            body.enabled,
+            actor_user_id=device.user_id,
+        )
+
+    @app.put(
+        "/v1/mobile/admin/automation/settings",
+        tags=["mobile-control"],
+    )
+    def mobile_set_automation(
+        body: MobileAutomationRequest,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        consume_mobile_confirmation(
+            confirmation,
+            device=device,
+            action="automation.resume" if body.enabled else "automation.pause",
+        )
+        settings = runtime.automation.settings()
+        return runtime.automation.set_settings(
+            enabled=body.enabled,
+            interval_seconds=int(settings["interval_seconds"]),
+        )
+
+    @app.post(
+        "/v1/mobile/admin/tunnels/{provider_id}/restart",
+        tags=["mobile-control"],
+    )
+    def mobile_restart_tunnel(
+        provider_id: str,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, Any]:
+        consume_mobile_confirmation(confirmation, device=device, action="tunnel.restart")
+        try:
+            return runtime.tunnels.restart(provider_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="tunnel provider not found") from exc
+
+    @app.post(
+        "/v1/mobile/admin/core/restart",
+        tags=["mobile-control"],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def mobile_restart_core(
+        background: BackgroundTasks,
+        confirmation: str = Header(alias="X-Cloud-Admin-Confirmation"),
+        device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
+    ) -> dict[str, bool]:
+        consume_mobile_confirmation(confirmation, device=device, action="core.restart")
+        callback = app.state.restart_callback
+        if callback is None:
+            raise HTTPException(status_code=409, detail="restart is unavailable in embedded mode")
+        background.add_task(callback)
+        return {"accepted": True}
 
     @app.post("/v1/admin/shutdown", tags=["manager"], dependencies=[Depends(require_manager)])
     def shutdown(background: BackgroundTasks) -> dict[str, bool]:
@@ -1569,6 +1888,96 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         directory: str = Query(default="", max_length=1024),
     ):
         return runtime.storage.list_entries(space_id, device.user_id, directory)
+
+    @app.get("/v1/spaces/{space_id}/search", tags=["files"])
+    def search_entries(
+        space_id: str,
+        query: str = Query(min_length=2, max_length=200),
+        directory: str = Query(default="", max_length=1024),
+        limit: int = Query(default=100, ge=1, le=200),
+        device: DeviceRecord = Depends(require_device),  # noqa: B008
+    ):
+        return runtime.storage.search_entries(
+            space_id,
+            device.user_id,
+            query,
+            directory=directory,
+            limit=limit,
+        )
+
+    @app.get("/v1/operations", tags=["files"])
+    def recent_operations(
+        limit: int = Query(default=100, ge=1, le=200),
+        device: DeviceRecord = Depends(require_device),  # noqa: B008
+    ) -> list[dict[str, Any]]:
+        return runtime.repository.recent_user_operations(device.user_id, limit)
+
+    @app.get("/v1/shares", tags=["files"])
+    def list_shares(
+        device: DeviceRecord = Depends(require_device),  # noqa: B008
+    ) -> list[dict[str, Any]]:
+        return runtime.storage.list_public_shares(device.user_id)
+
+    @app.post("/v1/shares", tags=["files"], status_code=status.HTTP_201_CREATED)
+    def create_share(
+        body: CreateShareRequest,
+        device: DeviceRecord = Depends(require_device),  # noqa: B008
+    ) -> dict[str, Any]:
+        share = runtime.storage.create_public_share(
+            body.space_id,
+            device.user_id,
+            body.logical_path,
+            body.kind,
+            ttl_hours=body.ttl_hours,
+        )
+        return {
+            **asdict(share),
+            "url_path": f"/v1/public/shares/{quote(share.token)}",
+        }
+
+    @app.delete("/v1/shares/{share_id}", tags=["files"])
+    def revoke_share(
+        share_id: str,
+        device: DeviceRecord = Depends(require_device),  # noqa: B008
+    ) -> dict[str, bool]:
+        return {"revoked": runtime.storage.revoke_public_share(share_id, device.user_id)}
+
+    @app.get("/v1/public/shares/{token}", tags=["public-share"])
+    def public_share_overview(token: str) -> dict[str, Any]:
+        return runtime.storage.public_share_overview(token)
+
+    def public_share_stream(token: str, relative_path: str = "") -> StreamingResponse:
+        share, record, physical_path = runtime.storage.resolve_public_share_download(
+            token,
+            relative_path,
+        )
+        filename = PurePosixPath(record.logical_path).name
+        transfer_id, stream = runtime.storage.stream_download(
+            record,
+            physical_path,
+            share.owner_user_id,
+        )
+        return StreamingResponse(
+            stream,
+            media_type=record.content_type,
+            headers={
+                "ETag": f'"sha256:{record.sha256}"',
+                "Content-Length": str(record.size_bytes),
+                "Content-Disposition": f"attachment; filename*=utf-8''{quote(filename)}",
+                "X-Transfer-ID": transfer_id,
+            },
+        )
+
+    @app.get("/v1/public/shares/{token}/download", tags=["public-share"])
+    def download_public_shared_file(token: str) -> StreamingResponse:
+        return public_share_stream(token)
+
+    @app.get("/v1/public/shares/{token}/files/{relative_path:path}", tags=["public-share"])
+    def download_public_shared_directory_file(
+        token: str,
+        relative_path: Annotated[str, Path(min_length=1, max_length=1024)],
+    ) -> StreamingResponse:
+        return public_share_stream(token, relative_path)
 
     @app.post(
         "/v1/spaces/{space_id}/directories",

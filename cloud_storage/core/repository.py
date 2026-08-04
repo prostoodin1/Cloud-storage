@@ -237,6 +237,30 @@ class CoreRepository:
             )
         return self.get_user(user_id)
 
+    def set_user_enabled(self, user_id: str, enabled: bool) -> UserRecord:
+        with self.database.transaction() as connection:
+            changed = connection.execute(
+                "UPDATE users SET enabled = ? WHERE id = ?",
+                (int(enabled), user_id),
+            )
+            if changed.rowcount != 1:
+                raise NotFoundError("user not found")
+            if not enabled:
+                connection.execute(
+                    "UPDATE devices SET status = 'revoked' WHERE user_id = ? AND status != 'revoked'",
+                    (user_id,),
+                )
+            self._audit_tx(
+                connection,
+                actor_type="manager",
+                actor_id=None,
+                action="user.enabled" if enabled else "user.disabled",
+                target_type="user",
+                target_id=user_id,
+                detail="Учётная запись включена" if enabled else "Учётная запись отключена",
+            )
+        return self.get_user(user_id)
+
     def create_invitation(self, user_id: str, ttl_seconds: int) -> tuple[str, str, str]:
         self.get_user(user_id)
         invitation_id = str(uuid.uuid4())
@@ -569,6 +593,20 @@ class CoreRepository:
                 FROM audit_events ORDER BY id DESC LIMIT ?
                 """,
                 (max(1, min(limit, 500)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_user_operations(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        self.get_user(user_id)
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT timestamp, action, target_type, detail
+                FROM audit_events
+                WHERE actor_type = 'user' AND actor_id = ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (user_id, max(1, min(limit, 200))),
             ).fetchall()
         return [dict(row) for row in rows]
 

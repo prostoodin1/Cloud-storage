@@ -61,6 +61,18 @@ CREATE TABLE IF NOT EXISTS invitations (
     cancelled_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS file_shares (
+    id TEXT PRIMARY KEY,
+    owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    logical_path TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('file', 'directory')),
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS storage_roots (
     id TEXT PRIMARY KEY,
     disk_id TEXT,
@@ -389,6 +401,8 @@ CREATE TABLE IF NOT EXISTS audit_events (
 
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_invitations_user ON invitations(user_id);
+CREATE INDEX IF NOT EXISTS idx_file_shares_owner ON file_shares(owner_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_file_shares_expiry ON file_shares(expires_at, revoked_at);
 CREATE INDEX IF NOT EXISTS idx_files_space_path ON files(space_id, logical_path);
 CREATE INDEX IF NOT EXISTS idx_directories_space_path ON directories(space_id, logical_path);
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_user ON upload_sessions(user_id, status);
@@ -527,6 +541,10 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(13, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(14, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
             connection.commit()
 

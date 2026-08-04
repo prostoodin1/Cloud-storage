@@ -3,13 +3,14 @@
     "name": "Cloud Storage",
     "slug": "cloud-storage-mobile",
     "scheme": "cloudstorage",
-    "version": "0.8.0",
+    "version": "0.9.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.cloudstorage.mobile",
+      "buildNumber": "9",
       "infoPlist": {
         "NSFaceIDUsageDescription": "Cloud Storage защищает токены подключения в системном хранилище.",
         "NSPhotoLibraryUsageDescription": "Cloud Storage выбирает фотографии только для загрузки в ваше личное хранилище."
@@ -17,6 +18,7 @@
     },
     "android": {
       "package": "com.cloudstorage.mobile",
+      "versionCode": 9,
       "adaptiveIcon": {
         "backgroundColor": "#e2383f",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -49,6 +51,20 @@
         {
           "photosPermission": "Cloud Storage выбирает фотографии только для загрузки в ваше личное хранилище.",
           "microphonePermission": false
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Cloud Storage создаёт защищённую резервную копию выбранных фотографий и видео в вашем личном хранилище.",
+          "savePhotosPermission": "Cloud Storage сохраняет скачанные фотографии в медиатеку только по вашей команде.",
+          "granularPermissions": ["photo", "video"]
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Cloud Storage использует Face ID для подтверждения административных действий."
         }
       ]
     ]

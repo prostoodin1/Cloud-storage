@@ -9,6 +9,20 @@ export interface ConnectionProfile {
   deviceStatus: DeviceStatus;
 }
 
+export interface PhotoBackupSettings {
+  enabled: boolean;
+  wifiOnly: boolean;
+  chargingOnly: boolean;
+  includeVideos: boolean;
+  destination: string;
+  spaceId: string;
+  scanOffset: number;
+  initialScanComplete: boolean;
+  queuedCount: number;
+  lastScanAt: string;
+  lastError?: string;
+}
+
 export interface DeviceRecord {
   id: string;
   user_id: string;
@@ -45,12 +59,23 @@ export interface SpaceRecord {
 export interface FileEntry {
   id?: string;
   name: string;
+  logical_path?: string;
   type: 'file' | 'directory';
   size_bytes?: number;
   sha256?: string;
   content_type?: string;
   version?: number;
   modified_at?: string;
+}
+
+export interface PublicShareResult {
+  id: string;
+  token: string;
+  space_id: string;
+  logical_path: string;
+  kind: 'file' | 'directory';
+  expires_at: string;
+  url_path: string;
 }
 
 export interface MobileAdminOverview {
@@ -80,6 +105,56 @@ export interface MobileAdminOverview {
     has_password: boolean;
   }>;
   devices: DeviceRecord[];
+  storage: Array<{
+    id: string;
+    purpose: string;
+    write_enabled: boolean;
+    available: boolean;
+    total_bytes: number;
+    used_bytes: number;
+    free_bytes: number;
+    status: string;
+  }>;
+  backup_policies: Array<{
+    target_root_id: string;
+    enabled: boolean;
+    interval_hours: number;
+    next_run_at: string | null;
+  }>;
+  backups: Array<{
+    id: string;
+    status: string;
+    target_root_id: string;
+    created_at: string;
+  }>;
+  automation: { running: boolean; enabled: boolean; interval_seconds: number };
+}
+
+export type MobileAdminAction =
+  | 'device.approve'
+  | 'device.revoke'
+  | 'server.read_only'
+  | 'server.normal'
+  | 'user.create'
+  | 'user.password'
+  | 'user.enable'
+  | 'user.disable'
+  | 'diagnostics.quick'
+  | 'diagnostics.full'
+  | 'backup.run'
+  | 'storage.write.pause'
+  | 'storage.write.resume'
+  | 'automation.pause'
+  | 'automation.resume'
+  | 'tunnel.restart'
+  | 'core.restart';
+
+export interface MobileCreateUserInput {
+  username: string;
+  displayName: string;
+  quotaGiB: number;
+  role: 'admin' | 'member';
+  password: string;
 }
 
 export type TransferDirection = 'upload' | 'download';
@@ -96,6 +171,7 @@ export interface TransferRecord {
   totalBytes: number;
   completedBytes: number;
   remoteUploadId?: string;
+  sourceAssetId?: string;
   error?: string;
   createdAt: string;
 }
@@ -103,4 +179,5 @@ export interface TransferRecord {
 export interface PersistedState {
   connection: ConnectionProfile | null;
   transfers: TransferRecord[];
+  photoBackup: PhotoBackupSettings;
 }

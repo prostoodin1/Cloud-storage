@@ -154,6 +154,72 @@ class CredentialService:
         if not valid:
             raise InvalidCredential("internet login is required")
 
+    def issue_mobile_confirmation(
+        self,
+        user_id: str,
+        device_id: str,
+        action: str,
+        *,
+        password_version: int = 0,
+        ttl_seconds: int = 120,
+    ) -> tuple[str, int]:
+        now = int(time.time())
+        expires_at = now + max(30, min(ttl_seconds, 300))
+        payload = urlsafe_b64encode(
+            json.dumps(
+                {
+                    "v": 1,
+                    "uid": user_id,
+                    "did": device_id,
+                    "pv": password_version,
+                    "action": action,
+                    "iat": now,
+                    "exp": expires_at,
+                    "nonce": secrets.token_urlsafe(18),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).decode("ascii").rstrip("=")
+        signature = self.fingerprint(payload, "mobile-admin-confirmation")
+        return f"csa_{payload}.{signature}", expires_at
+
+    def verify_mobile_confirmation(
+        self,
+        token: str,
+        *,
+        user_id: str,
+        device_id: str,
+        action: str,
+        password_version: int = 0,
+    ) -> None:
+        if not token.startswith("csa_") or len(token) > 4096:
+            raise InvalidCredential("fresh administrator confirmation is required")
+        try:
+            payload, signature = token[4:].split(".", 1)
+        except ValueError as exc:
+            raise InvalidCredential("fresh administrator confirmation is required") from exc
+        expected = self.fingerprint(payload, "mobile-admin-confirmation")
+        if not self.constant_time_equal(signature, expected):
+            raise InvalidCredential("fresh administrator confirmation is required")
+        try:
+            padding = "=" * (-len(payload) % 4)
+            claims = json.loads(urlsafe_b64decode(payload + padding).decode("utf-8"))
+            now = int(time.time())
+            valid = (
+                claims.get("v") == 1
+                and claims.get("uid") == user_id
+                and claims.get("did") == device_id
+                and claims.get("action") == action
+                and int(claims.get("pv", 0)) == password_version
+                and int(claims.get("exp", 0)) > now
+                and int(claims.get("iat", 0)) <= now + 30
+            )
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InvalidCredential("fresh administrator confirmation is required") from exc
+        if not valid:
+            raise InvalidCredential("fresh administrator confirmation is required")
+
     @staticmethod
     def constant_time_equal(left: str, right: str) -> bool:
         return hmac.compare_digest(left.encode(), right.encode())

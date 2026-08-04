@@ -18,17 +18,22 @@ class CloudStorageCoreService(win32serviceutil.ServiceFramework):
     def __init__(self, args) -> None:
         super().__init__(args)
         self.servers: CoreServerGroup | None = None
+        self.stop_requested = False
 
     def SvcStop(self) -> None:
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+        self.stop_requested = True
         if self.servers is not None:
             self.servers.request_shutdown(delay=False)
 
     def SvcDoRun(self) -> None:
         servicemanager.LogInfoMsg("Cloud Storage Server Core is starting")
         config = CoreConfig.from_environment()
-        self.servers = CoreServerGroup(config)
-        self.servers.run()
+        while not self.stop_requested:
+            self.servers = CoreServerGroup(config)
+            self.servers.run()
+            if not self.servers.restart_requested:
+                break
         servicemanager.LogInfoMsg("Cloud Storage Server Core has stopped")
 
 

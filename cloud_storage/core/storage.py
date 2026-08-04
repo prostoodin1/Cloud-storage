@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import sqlite3
 import stat
@@ -67,6 +68,19 @@ class FileRecord:
     created_at: str
     modified_at: str
     deleted_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PublicShareRecord:
+    id: str
+    owner_user_id: str
+    space_id: str
+    logical_path: str
+    kind: str
+    token: str
+    expires_at: str
+    created_at: str
+    revoked_at: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1426,6 +1440,70 @@ class StorageService:
                 }
         return list(entries.values())
 
+    def search_entries(
+        self,
+        space_id: str,
+        user_id: str,
+        query: str,
+        *,
+        directory: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        self.repository.require_space_permission(space_id, user_id, write=False)
+        query = query.strip()
+        if len(query) < 2 or len(query) > 200:
+            raise ValueError("search query must contain 2-200 characters")
+        directory = directory.strip("/")
+        prefix = normalize_logical_path(directory) + "/" if directory else ""
+        escaped_query = self._like_prefix(query)
+        pattern = self._like_prefix(prefix) + "%" + escaped_query + "%"
+        safe_limit = max(1, min(limit, 200))
+        with self.database.connection() as connection:
+            directories = connection.execute(
+                """
+                SELECT logical_path, modified_at FROM directories
+                WHERE space_id = ? AND logical_path LIKE ? ESCAPE '\\' COLLATE NOCASE
+                ORDER BY modified_at DESC LIMIT ?
+                """,
+                (space_id, pattern, safe_limit),
+            ).fetchall()
+            remaining = max(0, safe_limit - len(directories))
+            files = connection.execute(
+                """
+                SELECT id, logical_path, size_bytes, sha256, content_type, version, modified_at
+                FROM files
+                WHERE space_id = ? AND deleted_at IS NULL
+                  AND logical_path LIKE ? ESCAPE '\\' COLLATE NOCASE
+                ORDER BY modified_at DESC LIMIT ?
+                """,
+                (space_id, pattern, remaining),
+            ).fetchall()
+        result = [
+            {
+                "name": PurePosixPath(row["logical_path"]).name,
+                "logical_path": row["logical_path"],
+                "type": "directory",
+                "modified_at": row["modified_at"],
+            }
+            for row in directories
+        ]
+        result.extend(
+            {
+                "id": row["id"],
+                "name": PurePosixPath(row["logical_path"]).name,
+                "logical_path": row["logical_path"],
+                "type": "file",
+                "size_bytes": row["size_bytes"],
+                "sha256": row["sha256"],
+                "content_type": row["content_type"],
+                "version": row["version"],
+                "modified_at": row["modified_at"],
+            }
+            for row in files
+        )
+        result.sort(key=lambda item: str(item["modified_at"]), reverse=True)
+        return result[:safe_limit]
+
     def create_directory(self, space_id: str, user_id: str, logical_path: str) -> dict[str, Any]:
         self._require_server_writable()
         self.repository.require_space_permission(space_id, user_id, write=True)
@@ -1595,6 +1673,230 @@ class StorageService:
             detail=f"Перемещено: {source_path} → {destination_path}",
         )
         return {"source_path": source_path, "destination_path": destination_path, "type": kind}
+
+    def create_public_share(
+        self,
+        space_id: str,
+        user_id: str,
+        logical_path: str,
+        kind: str,
+        *,
+        ttl_hours: int = 24,
+    ) -> PublicShareRecord:
+        self.repository.require_space_permission(space_id, user_id, write=False)
+        logical_path = normalize_logical_path(logical_path)
+        if kind not in {"file", "directory"}:
+            raise ValueError("share type must be file or directory")
+        with self.database.connection() as connection:
+            if kind == "file":
+                exists = connection.execute(
+                    "SELECT 1 FROM files WHERE space_id = ? AND logical_path = ? "
+                    "AND deleted_at IS NULL",
+                    (space_id, logical_path),
+                ).fetchone()
+            else:
+                exists = connection.execute(
+                    "SELECT 1 FROM directories WHERE space_id = ? AND logical_path = ?",
+                    (space_id, logical_path),
+                ).fetchone()
+        if exists is None:
+            raise NotFoundError(f"{kind} not found")
+        share_id = str(uuid.uuid4())
+        token = "csh_" + secrets.token_urlsafe(40)
+        token_hash = self.repository.credentials.fingerprint(token, "public-share")
+        created_at = utc_text()
+        expires_at = (utc_now() + timedelta(hours=max(1, min(ttl_hours, 24 * 30)))).isoformat(
+            timespec="seconds"
+        )
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO file_shares(
+                    id, owner_user_id, space_id, logical_path, kind, token_hash,
+                    expires_at, created_at, revoked_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    share_id,
+                    user_id,
+                    space_id,
+                    logical_path,
+                    kind,
+                    token_hash,
+                    expires_at,
+                    created_at,
+                ),
+            )
+            self.repository._audit_tx(
+                connection,
+                actor_type="user",
+                actor_id=user_id,
+                action="share.created",
+                target_type=kind,
+                target_id=f"{space_id}:{logical_path}",
+                detail=f"Создана ссылка общего доступа на {ttl_hours} ч.",
+            )
+        return PublicShareRecord(
+            id=share_id,
+            owner_user_id=user_id,
+            space_id=space_id,
+            logical_path=logical_path,
+            kind=kind,
+            token=token,
+            expires_at=expires_at,
+            created_at=created_at,
+            revoked_at=None,
+        )
+
+    def list_public_shares(self, user_id: str) -> list[dict[str, Any]]:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, space_id, logical_path, kind, expires_at, created_at, revoked_at
+                FROM file_shares WHERE owner_user_id = ? ORDER BY created_at DESC LIMIT 200
+                """,
+                (user_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def revoke_public_share(self, share_id: str, user_id: str) -> bool:
+        revoked_at = utc_text()
+        with self.database.transaction() as connection:
+            changed = connection.execute(
+                """
+                UPDATE file_shares SET revoked_at = ?
+                WHERE id = ? AND owner_user_id = ? AND revoked_at IS NULL
+                """,
+                (revoked_at, share_id, user_id),
+            )
+            if changed.rowcount != 1:
+                raise NotFoundError("share not found")
+            self.repository._audit_tx(
+                connection,
+                actor_type="user",
+                actor_id=user_id,
+                action="share.revoked",
+                target_type="share",
+                target_id=share_id,
+                detail="Ссылка общего доступа отозвана",
+            )
+        return True
+
+    def resolve_public_share(self, token: str) -> PublicShareRecord:
+        if not token.startswith("csh_") or not 40 <= len(token) <= 256:
+            raise NotFoundError("share not found")
+        token_hash = self.repository.credentials.fingerprint(token, "public-share")
+        with self.database.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT id, owner_user_id, space_id, logical_path, kind,
+                       expires_at, created_at, revoked_at
+                FROM file_shares
+                WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?
+                """,
+                (token_hash, utc_text()),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("share not found")
+        return PublicShareRecord(token=token, **dict(row))
+
+    def public_share_overview(self, token: str) -> dict[str, Any]:
+        share = self.resolve_public_share(token)
+        result: dict[str, Any] = {
+            "name": PurePosixPath(share.logical_path).name,
+            "type": share.kind,
+            "expires_at": share.expires_at,
+        }
+        if share.kind == "file":
+            record = self.find_file(share.space_id, share.logical_path)
+            if record is None:
+                raise NotFoundError("shared file not found")
+            result.update(
+                size_bytes=record.size_bytes,
+                content_type=record.content_type,
+                sha256=record.sha256,
+            )
+        else:
+            result["entries"] = self.list_entries(
+                share.space_id,
+                share.owner_user_id,
+                share.logical_path,
+            )
+        return result
+
+    def resolve_public_share_download(
+        self, token: str, relative_path: str = ""
+    ) -> tuple[PublicShareRecord, FileRecord, Path]:
+        share = self.resolve_public_share(token)
+        if share.kind == "file":
+            if relative_path:
+                raise NotFoundError("shared file not found")
+            logical_path = share.logical_path
+        else:
+            relative_path = normalize_logical_path(relative_path)
+            logical_path = f"{share.logical_path}/{relative_path}"
+        record, physical_path = self.resolve_download(
+            share.space_id,
+            share.owner_user_id,
+            logical_path,
+        )
+        return share, record, physical_path
+
+    def mobile_storage_overview(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for root in self.list_roots():
+            try:
+                usage = shutil.disk_usage(root.path)
+                total_bytes, used_bytes, free_bytes = usage.total, usage.used, usage.free
+                available = True
+            except OSError:
+                total_bytes = used_bytes = free_bytes = 0
+                available = False
+            result.append(
+                {
+                    "id": root.id,
+                    "purpose": root.purpose,
+                    "write_enabled": root.write_enabled,
+                    "available": available,
+                    "total_bytes": total_bytes,
+                    "used_bytes": used_bytes,
+                    "free_bytes": free_bytes,
+                    "temperature_c": None,
+                    "status": (
+                        "unavailable"
+                        if not available
+                        else "write_paused"
+                        if not root.write_enabled
+                        else "healthy"
+                    ),
+                }
+            )
+        return result
+
+    def set_root_write_enabled(
+        self, root_id: str, enabled: bool, *, actor_user_id: str
+    ) -> dict[str, Any]:
+        with self.database.transaction() as connection:
+            changed = connection.execute(
+                "UPDATE storage_roots SET write_enabled = ? WHERE id = ? AND enabled = 1",
+                (int(enabled), root_id),
+            )
+            if changed.rowcount != 1:
+                raise NotFoundError("storage root not found")
+            self.repository._audit_tx(
+                connection,
+                actor_type="device",
+                actor_id=actor_user_id,
+                action="storage.write.resumed" if enabled else "storage.write.paused",
+                target_type="storage_root",
+                target_id=root_id,
+                detail=(
+                    "Запись на накопитель возобновлена с Mobile Server Control"
+                    if enabled
+                    else "Новые записи на накопитель приостановлены с Mobile Server Control"
+                ),
+            )
+        return next(item for item in self.mobile_storage_overview() if item["id"] == root_id)
 
     def _require_file_path_available(self, space_id: str, logical_path: str) -> None:
         parts = PurePosixPath(logical_path).parts

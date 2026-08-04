@@ -169,7 +169,7 @@ class ClientWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(220)
+        sidebar.setFixedWidth(244)
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(18, 22, 18, 20)
         mark_row = QHBoxLayout()

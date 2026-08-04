@@ -106,6 +106,8 @@ class CoreServerGroup:
                 self._uvicorn_config(config.zrok_host, config.zrok_port, secondary=True)
             )
         self.application.state.shutdown_callback = self.request_shutdown
+        self.application.state.restart_callback = self.request_restart
+        self.restart_requested = False
 
     def _uvicorn_config(
         self,
@@ -188,6 +190,10 @@ class CoreServerGroup:
             self.zrok_server.should_exit = True
         self.application.state.runtime.tunnels.stop_all()
 
+    def request_restart(self) -> None:
+        self.restart_requested = True
+        self.request_shutdown()
+
     def _run_lan(self) -> None:
         assert self.lan_server is not None
         try:
@@ -211,9 +217,12 @@ class CoreServerGroup:
 
 
 def run_server(config: CoreConfig) -> int:
-    servers = CoreServerGroup(config)
     with PidGuard(config.pid_path):
-        servers.run()
+        while True:
+            servers = CoreServerGroup(config)
+            servers.run()
+            if not servers.restart_requested:
+                break
     return 0
 
 

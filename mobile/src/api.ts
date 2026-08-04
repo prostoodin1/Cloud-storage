@@ -4,7 +4,10 @@ import type {
   FileEntry,
   HealthResult,
   MobileAdminOverview,
+  MobileAdminAction,
+  MobileCreateUserInput,
   PairingResult,
+  PublicShareResult,
   SpaceRecord,
 } from './types';
 
@@ -172,6 +175,29 @@ export class CloudApi {
     );
   }
 
+  searchEntries(spaceId: string, query: string, directory = ''): Promise<FileEntry[]> {
+    return this.request(
+      `/v1/spaces/${encodeURIComponent(spaceId)}/search?query=${encodeURIComponent(query)}&directory=${encodeURIComponent(directory)}`,
+    );
+  }
+
+  createPublicShare(
+    spaceId: string,
+    logicalPath: string,
+    kind: FileEntry['type'],
+    ttlHours = 24,
+  ): Promise<PublicShareResult> {
+    return this.request('/v1/shares', {
+      method: 'POST',
+      body: JSON.stringify({
+        space_id: spaceId,
+        logical_path: logicalPath,
+        kind,
+        ttl_hours: ttlHours,
+      }),
+    });
+  }
+
   createDirectory(spaceId: string, logicalPath: string): Promise<Record<string, unknown>> {
     return this.request(`/v1/spaces/${encodeURIComponent(spaceId)}/directories`, {
       method: 'POST',
@@ -244,20 +270,129 @@ export class CloudApi {
     return this.request('/v1/mobile/admin/overview');
   }
 
-  mobileSetDeviceStatus(deviceId: string, status: 'approve' | 'revoke'): Promise<void> {
+  mobileConfirmAdminAction(
+    password: string,
+    action: MobileAdminAction,
+  ): Promise<{ confirmation_token: string; action: string; expires_at: number }> {
+    return this.request('/v1/mobile/admin/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ password, action }),
+    });
+  }
+
+  mobileSetDeviceStatus(
+    deviceId: string,
+    status: 'approve' | 'revoke',
+    confirmationToken: string,
+  ): Promise<void> {
     return this.request(
       `/v1/mobile/admin/devices/${encodeURIComponent(deviceId)}/${status}`,
-      { method: 'POST' },
+      { method: 'POST', headers: { 'X-Cloud-Admin-Confirmation': confirmationToken } },
     );
   }
 
   mobileSetServerMode(
     mode: 'normal' | 'read_only',
     reason: string,
+    confirmationToken: string,
   ): Promise<Record<string, unknown>> {
     return this.request('/v1/mobile/admin/server-mode', {
       method: 'PUT',
       body: JSON.stringify({ mode, reason, confirmed: mode === 'read_only' }),
+      headers: { 'X-Cloud-Admin-Confirmation': confirmationToken },
+    });
+  }
+
+  mobileCreateUser(
+    input: MobileCreateUserInput,
+    confirmationToken: string,
+  ): Promise<Record<string, unknown>> {
+    return this.request('/v1/mobile/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: input.username,
+        display_name: input.displayName,
+        quota_gib: input.quotaGiB,
+        role: input.role,
+        password: input.password,
+      }),
+      headers: { 'X-Cloud-Admin-Confirmation': confirmationToken },
+    });
+  }
+
+  mobileSetUserPassword(
+    userId: string,
+    password: string,
+    confirmationToken: string,
+  ): Promise<Record<string, unknown>> {
+    return this.request(`/v1/mobile/admin/users/${encodeURIComponent(userId)}/password`, {
+      method: 'PUT',
+      body: JSON.stringify({ password }),
+      headers: { 'X-Cloud-Admin-Confirmation': confirmationToken },
+    });
+  }
+
+  mobileSetUserEnabled(
+    userId: string,
+    enabled: boolean,
+    confirmationToken: string,
+  ): Promise<Record<string, unknown>> {
+    return this.request(`/v1/mobile/admin/users/${encodeURIComponent(userId)}/enabled`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+      headers: { 'X-Cloud-Admin-Confirmation': confirmationToken },
+    });
+  }
+
+  mobileRunDiagnostics(
+    kind: 'quick' | 'full',
+    confirmationToken: string,
+  ): Promise<Record<string, unknown>> {
+    return this.request('/v1/mobile/admin/diagnostics/scans', {
+      method: 'POST',
+      body: JSON.stringify({ kind }),
+      headers: { 'X-Cloud-Admin-Confirmation': confirmationToken },
+    });
+  }
+
+  mobileRunBackup(targetRootId: string, confirmationToken: string): Promise<Record<string, unknown>> {
+    return this.request(`/v1/mobile/admin/backups/${encodeURIComponent(targetRootId)}/run`, {
+      method: 'POST',
+      headers: { 'X-Cloud-Admin-Confirmation': confirmationToken },
+    });
+  }
+
+  mobileSetStorageWrite(
+    rootId: string,
+    enabled: boolean,
+    confirmationToken: string,
+  ): Promise<Record<string, unknown>> {
+    return this.request(`/v1/mobile/admin/storage/${encodeURIComponent(rootId)}/write`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+      headers: { 'X-Cloud-Admin-Confirmation': confirmationToken },
+    });
+  }
+
+  mobileSetAutomation(enabled: boolean, confirmationToken: string): Promise<Record<string, unknown>> {
+    return this.request('/v1/mobile/admin/automation/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+      headers: { 'X-Cloud-Admin-Confirmation': confirmationToken },
+    });
+  }
+
+  mobileRestartTunnel(providerId: string, confirmationToken: string): Promise<Record<string, unknown>> {
+    return this.request(`/v1/mobile/admin/tunnels/${encodeURIComponent(providerId)}/restart`, {
+      method: 'POST',
+      headers: { 'X-Cloud-Admin-Confirmation': confirmationToken },
+    });
+  }
+
+  mobileRestartCore(confirmationToken: string): Promise<Record<string, unknown>> {
+    return this.request('/v1/mobile/admin/core/restart', {
+      method: 'POST',
+      headers: { 'X-Cloud-Admin-Confirmation': confirmationToken },
     });
   }
 }

@@ -1,13 +1,31 @@
 import { File, Paths } from 'expo-file-system';
 import * as SecureStore from 'expo-secure-store';
 
-import type { PersistedState } from './types';
+import type { PersistedState, PhotoBackupSettings } from './types';
 
 const STATE_FILE = new File(Paths.document, 'cloud-storage-mobile.json');
+const PHOTO_INDEX_FILE = new File(Paths.document, 'cloud-storage-photo-index.json');
 const DEVICE_TOKEN_KEY = 'cloud-storage-device-token-v1';
 const REMOTE_SESSION_KEY = 'cloud-storage-remote-session-v1';
 
-const emptyState: PersistedState = { connection: null, transfers: [] };
+export const defaultPhotoBackup: PhotoBackupSettings = {
+  enabled: false,
+  wifiOnly: true,
+  chargingOnly: false,
+  includeVideos: true,
+  destination: 'Фото с телефона',
+  spaceId: '',
+  scanOffset: 0,
+  initialScanComplete: false,
+  queuedCount: 0,
+  lastScanAt: '',
+};
+
+const emptyState: PersistedState = {
+  connection: null,
+  transfers: [],
+  photoBackup: defaultPhotoBackup,
+};
 
 export function loadState(): PersistedState {
   try {
@@ -18,6 +36,7 @@ export function loadState(): PersistedState {
     return {
       connection: parsed.connection ?? null,
       transfers: Array.isArray(parsed.transfers) ? parsed.transfers : [],
+      photoBackup: { ...defaultPhotoBackup, ...(parsed.photoBackup ?? {}) },
     };
   } catch {
     return emptyState;
@@ -29,6 +48,25 @@ export function saveState(state: PersistedState): void {
     STATE_FILE.create({ intermediates: true });
   }
   STATE_FILE.write(JSON.stringify(state));
+}
+
+export function loadPhotoAssetIds(): Set<string> {
+  try {
+    if (!PHOTO_INDEX_FILE.exists) return new Set();
+    const parsed = JSON.parse(PHOTO_INDEX_FILE.textSync()) as { assetIds?: string[] };
+    return new Set(Array.isArray(parsed.assetIds) ? parsed.assetIds : []);
+  } catch {
+    return new Set();
+  }
+}
+
+export function savePhotoAssetIds(assetIds: Set<string>): void {
+  if (!PHOTO_INDEX_FILE.exists) PHOTO_INDEX_FILE.create({ intermediates: true });
+  PHOTO_INDEX_FILE.write(JSON.stringify({ assetIds: [...assetIds] }));
+}
+
+export function clearPhotoAssetIds(): void {
+  if (PHOTO_INDEX_FILE.exists) PHOTO_INDEX_FILE.delete();
 }
 
 export async function loadDeviceToken(): Promise<string> {

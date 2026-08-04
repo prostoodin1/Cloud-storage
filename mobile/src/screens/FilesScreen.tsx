@@ -39,6 +39,8 @@ export function FilesScreen({
   onDownload,
   onDelete,
   onCreateDirectory,
+  onSearch,
+  onShare,
 }: {
   spaces: SpaceRecord[];
   selectedSpaceId: string;
@@ -53,9 +55,12 @@ export function FilesScreen({
   onDownload: (entry: FileEntry) => void;
   onDelete: (entry: FileEntry) => void;
   onCreateDirectory: (name: string) => void;
+  onSearch: (query: string) => void;
+  onShare: (entry: FileEntry) => void;
 }) {
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [folderName, setFolderName] = useState('');
+  const [search, setSearch] = useState('');
 
   const pickDocument = async () => {
     const result = await DocumentPicker.getDocumentAsync({
@@ -126,6 +131,26 @@ export function FilesScreen({
         <Button title="Фото / видео" onPress={pickPhoto} secondary />
         <Button title="Новая папка" onPress={() => setCreatingFolder((value) => !value)} secondary />
       </View>
+      <Card>
+        <Field
+          label="Поиск по текущему хранилищу"
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Название файла или папки"
+          returnKeyType="search"
+          onSubmitEditing={() => onSearch(search)}
+        />
+        <View style={styles.entryActions}>
+          <Pressable onPress={() => onSearch(search)} style={[styles.smallButton, styles.searchButton]}>
+            <Text style={styles.smallButtonText}>Найти</Text>
+          </Pressable>
+          {search ? (
+            <Pressable onPress={() => { setSearch(''); onSearch(''); }} style={styles.smallButton}>
+              <Text style={styles.smallButtonText}>Сбросить</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      </Card>
       {creatingFolder ? (
         <Card>
           <Field
@@ -150,7 +175,7 @@ export function FilesScreen({
         <Empty>Здесь пока пусто. Загрузите файл, фотографию или создайте папку.</Empty>
       ) : null}
       {entries.map((entry) => {
-        const logicalPath = joinPath(directory, entry.name);
+        const logicalPath = entry.logical_path ?? joinPath(directory, entry.name);
         return (
           <Card key={`${entry.type}:${entry.name}`}>
             <Pressable
@@ -169,6 +194,9 @@ export function FilesScreen({
               </View>
             </Pressable>
             <View style={styles.entryActions}>
+              <Pressable onPress={() => onShare(entry)} style={styles.smallButton}>
+                <Text style={styles.smallButtonText}>Поделиться</Text>
+              </Pressable>
               {entry.type === 'file' ? (
                 <Pressable onPress={() => onDownload(entry)} style={styles.smallButton}>
                   <Text style={styles.smallButtonText}>Скачать</Text>
@@ -239,5 +267,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 13,
   },
   deleteButton: { borderColor: colors.redDark },
+  searchButton: { backgroundColor: colors.red, borderColor: colors.red },
   smallButtonText: { color: colors.text, fontWeight: '700' },
 });

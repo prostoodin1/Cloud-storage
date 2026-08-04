@@ -2,13 +2,14 @@ import * as BackgroundTask from 'expo-background-task';
 import * as TaskManager from 'expo-task-manager';
 
 import { CloudApi } from './api';
+import { queuePhotoBackupBatch } from './photoBackup';
 import { loadDeviceToken, loadRemoteSession, loadState, saveState } from './storage';
 import { runUploadTransfer } from './transfers';
 
 export const TRANSFER_BACKGROUND_TASK = 'cloud-storage-transfer-retry-v1';
 
 TaskManager.defineTask(TRANSFER_BACKGROUND_TASK, async () => {
-  const state = loadState();
+  let state = loadState();
   const connection = state.connection;
   if (!connection) return BackgroundTask.BackgroundTaskResult.Success;
   try {
@@ -18,6 +19,11 @@ TaskManager.defineTask(TRANSFER_BACKGROUND_TASK, async () => {
     ]);
     if (!deviceToken) return BackgroundTask.BackgroundTaskResult.Success;
     const api = new CloudApi(connection.serverUrl, deviceToken, remoteSession);
+    if (state.photoBackup.enabled) {
+      const result = await queuePhotoBackupBatch(state, 3, false);
+      state = result.state;
+      saveState(state);
+    }
     const candidate = state.transfers.find(
       (item) => item.direction === 'upload' && ['queued', 'running'].includes(item.status),
     );

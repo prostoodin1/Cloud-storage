@@ -219,14 +219,148 @@ def test_confirmed_admin_phone_can_monitor_and_approve_devices(tmp_path) -> None
     assert overview.json()["summary"]["users"] == 2
     assert {item["id"] for item in overview.json()["users"]} == {admin["id"], member["id"]}
 
+    confirmation = client.post(
+        "/v1/mobile/admin/confirm",
+        headers=admin_headers,
+        json={"password": "owner secure mobile password", "action": "device.approve"},
+    )
+    assert confirmation.status_code == 200
     approved = client.post(
         f"/v1/mobile/admin/devices/{member_phone['device']['id']}/approve",
-        headers=admin_headers,
+        headers={
+            **admin_headers,
+            "X-Cloud-Admin-Confirmation": confirmation.json()["confirmation_token"],
+        },
     )
     assert approved.status_code == 200
     assert approved.json()["status"] == "trusted"
+    replay = client.post(
+        f"/v1/mobile/admin/devices/{member_phone['device']['id']}/approve",
+        headers={
+            **admin_headers,
+            "X-Cloud-Admin-Confirmation": confirmation.json()["confirmation_token"],
+        },
+    )
+    assert replay.status_code == 409
     member_headers = {"Authorization": f"Bearer {member_phone['device_token']}"}
     assert client.get("/v1/mobile/admin/overview", headers=member_headers).status_code == 403
+
+
+def test_mobile_admin_can_create_reset_and_disable_users_with_fresh_confirmations(tmp_path) -> None:
+    _, client, manager_headers = build_client(tmp_path)
+    owner = client.post(
+        "/v1/admin/users",
+        headers=manager_headers,
+        json={
+            "username": "mobileowner",
+            "display_name": "Mobile Owner",
+            "quota_gib": 1,
+            "role": "admin",
+            "password": "mobile owner secure password",
+        },
+    ).json()["user"]
+    phone = client.post(
+        "/v1/auth/device-login",
+        json={
+            "username": "mobileowner",
+            "password": "mobile owner secure password",
+            "device_name": "Owner iPhone",
+            "platform": "iOS",
+        },
+    ).json()
+    client.post(
+        f"/v1/admin/devices/{phone['device']['id']}/approve",
+        headers=manager_headers,
+    ).raise_for_status()
+    device_headers = {"Authorization": f"Bearer {phone['device_token']}"}
+
+    def confirmed(action: str) -> dict[str, str]:
+        response = client.post(
+            "/v1/mobile/admin/confirm",
+            headers=device_headers,
+            json={"password": "mobile owner secure password", "action": action},
+        )
+        response.raise_for_status()
+        return {
+            **device_headers,
+            "X-Cloud-Admin-Confirmation": response.json()["confirmation_token"],
+        }
+
+    created = client.post(
+        "/v1/mobile/admin/users",
+        headers=confirmed("user.create"),
+        json={
+            "username": "fromphone",
+            "display_name": "From Phone",
+            "quota_gib": 5,
+            "role": "member",
+            "password": "temporary password from phone",
+        },
+    )
+    assert created.status_code == 201
+    user = created.json()["user"]
+    assert created.json()["space"]["owner_user_id"] == user["id"]
+
+    reset = client.put(
+        f"/v1/mobile/admin/users/{user['id']}/password",
+        headers=confirmed("user.password"),
+        json={"password": "replacement password from phone"},
+    )
+    assert reset.status_code == 200
+    disabled = client.put(
+        f"/v1/mobile/admin/users/{user['id']}/enabled",
+        headers=confirmed("user.disable"),
+        json={"enabled": False},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    cannot_disable_self = client.put(
+        f"/v1/mobile/admin/users/{owner['id']}/enabled",
+        headers=confirmed("user.disable"),
+        json={"enabled": False},
+    )
+    assert cannot_disable_self.status_code == 400
+
+
+def test_search_and_revocable_public_file_share(tmp_path) -> None:
+    _, client, _, device_headers, _, space, _ = provision_trusted_device(tmp_path)
+    uploaded = client.put(
+        f"/v1/spaces/{space['id']}/files/Photos/Summer-report.txt",
+        headers={**device_headers, "Content-Type": "text/plain"},
+        content=b"private cloud report",
+    )
+    assert uploaded.status_code == 201
+
+    search = client.get(
+        f"/v1/spaces/{space['id']}/search",
+        headers=device_headers,
+        params={"query": "report"},
+    )
+    assert search.status_code == 200
+    assert search.json()[0]["logical_path"] == "Photos/Summer-report.txt"
+
+    created = client.post(
+        "/v1/shares",
+        headers=device_headers,
+        json={
+            "space_id": space["id"],
+            "logical_path": "Photos/Summer-report.txt",
+            "kind": "file",
+            "ttl_hours": 24,
+        },
+    )
+    assert created.status_code == 201
+    share = created.json()
+    assert share["token"].startswith("csh_")
+    assert client.get(share["url_path"]).json()["name"] == "Summer-report.txt"
+    downloaded = client.get(f"{share['url_path']}/download")
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"private cloud report"
+    assert len(client.get("/v1/shares", headers=device_headers).json()) == 1
+
+    revoked = client.delete(f"/v1/shares/{share['id']}", headers=device_headers)
+    assert revoked.status_code == 200
+    assert client.get(share["url_path"]).status_code == 404
 
 
 def test_tunnel_registry_is_builtin_and_restart_is_manager_only(tmp_path) -> None:

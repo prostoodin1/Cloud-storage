@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Share, StyleSheet, Text, View } from 'react-native';
 import { File } from 'expo-file-system';
+import * as LocalAuthentication from 'expo-local-authentication';
 import * as Sharing from 'expo-sharing';
 import { StatusBar } from 'expo-status-bar';
 
 import { ApiError, CloudApi } from './src/api';
 import { ensureBackgroundTransfersRegistered } from './src/background';
+import { queuePhotoBackupBatch } from './src/photoBackup';
+import { PreviewApp } from './src/PreviewApp';
 import { TabBar, type MainTab } from './src/components/TabBar';
 import { Brand, Screen } from './src/components/Ui';
 import { FilesScreen, type UploadAsset } from './src/screens/FilesScreen';
@@ -17,6 +20,7 @@ import { SettingsScreen } from './src/screens/SettingsScreen';
 import { TransfersScreen } from './src/screens/TransfersScreen';
 import {
   clearSecrets,
+  clearPhotoAssetIds,
   loadDeviceToken,
   loadRemoteSession,
   loadState,
@@ -36,7 +40,10 @@ import type {
   ConnectionProfile,
   FileEntry,
   MobileAdminOverview,
+  MobileAdminAction,
+  MobileCreateUserInput,
   PairingResult,
+  PhotoBackupSettings,
   SpaceRecord,
   TransferRecord,
 } from './src/types';
@@ -52,12 +59,20 @@ function joinPath(directory: string, name: string): string {
 }
 
 export default function App() {
+  const previewScreen = process.env.EXPO_PUBLIC_SCREENSHOT_SCREEN;
+  return previewScreen ? <PreviewApp screen={previewScreen} /> : <MainApp />;
+}
+
+function MainApp() {
   const persisted = useMemo(() => loadState(), []);
   const [stage, setStage] = useState<Stage>('boot');
   const [connection, setConnection] = useState<ConnectionProfile | null>(persisted.connection);
   const [deviceToken, setDeviceToken] = useState('');
   const [remoteSession, setRemoteSession] = useState('');
   const [transfers, setTransfers] = useState<TransferRecord[]>(persisted.transfers);
+  const [photoBackup, setPhotoBackup] = useState<PhotoBackupSettings>(persisted.photoBackup);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoMessage, setPhotoMessage] = useState('');
   const [checking, setChecking] = useState(false);
   const [connectionError, setConnectionError] = useState('');
   const [spaces, setSpaces] = useState<SpaceRecord[]>([]);
@@ -73,6 +88,8 @@ export default function App() {
   const activeTransfers = useRef(new Set<string>());
   const transferRef = useRef(transfers);
   const connectionRef = useRef(connection);
+  const photoBackupRef = useRef(photoBackup);
+  const photoRunActive = useRef(false);
 
   useEffect(() => {
     transferRef.current = transfers;
@@ -80,6 +97,9 @@ export default function App() {
   useEffect(() => {
     connectionRef.current = connection;
   }, [connection]);
+  useEffect(() => {
+    photoBackupRef.current = photoBackup;
+  }, [photoBackup]);
 
   const api = useMemo(
     () => (connection ? new CloudApi(connection.serverUrl, deviceToken, remoteSession) : null),
@@ -88,7 +108,7 @@ export default function App() {
 
   const persistTransfers = useCallback((next: TransferRecord[]) => {
     transferRef.current = next;
-    saveState({ connection: connectionRef.current, transfers: next });
+    saveState({ connection: connectionRef.current, transfers: next, photoBackup: photoBackupRef.current });
   }, []);
 
   const replaceTransfer = useCallback(
@@ -146,7 +166,7 @@ export default function App() {
       const updated = { ...connection, deviceStatus: status.status as ConnectionProfile['deviceStatus'] };
       setConnection(updated);
       connectionRef.current = updated;
-      saveState({ connection: updated, transfers: transferRef.current });
+      saveState({ connection: updated, transfers: transferRef.current, photoBackup: photoBackupRef.current });
       if (status.status === 'trusted') {
         await enterMain(api);
       } else {
@@ -196,7 +216,7 @@ export default function App() {
     setRemoteSession('');
     setConnection(profile);
     connectionRef.current = profile;
-    saveState({ connection: profile, transfers: transferRef.current });
+    saveState({ connection: profile, transfers: transferRef.current, photoBackup: photoBackupRef.current });
     setConnectionError('');
     setStage('pending');
   };
@@ -221,7 +241,10 @@ export default function App() {
     persistTransfers(nextTransfers);
     setConnection(null);
     connectionRef.current = null;
-    saveState({ connection: null, transfers: nextTransfers });
+    const disabledPhotoBackup = { ...photoBackupRef.current, enabled: false };
+    photoBackupRef.current = disabledPhotoBackup;
+    setPhotoBackup(disabledPhotoBackup);
+    saveState({ connection: null, transfers: nextTransfers, photoBackup: disabledPhotoBackup });
     setDeviceToken('');
     setRemoteSession('');
     setSpaces([]);
@@ -331,7 +354,7 @@ export default function App() {
       direction: 'download',
       status: 'queued',
       name: entry.name,
-      logicalPath: joinPath(directory, entry.name),
+      logicalPath: entry.logical_path ?? joinPath(directory, entry.name),
       localUri: destination.uri,
       spaceId: selectedSpaceId,
       totalBytes: entry.size_bytes ?? 0,
@@ -347,7 +370,7 @@ export default function App() {
   const deleteEntry = async (entry: FileEntry) => {
     if (!api || !selectedSpaceId) return;
     try {
-      await api.deleteEntry(selectedSpaceId, joinPath(directory, entry.name), entry.type);
+      await api.deleteEntry(selectedSpaceId, entry.logical_path ?? joinPath(directory, entry.name), entry.type);
       await loadEntries();
     } catch (error) {
       setFilesError(error instanceof Error ? error.message : 'Удаление не выполнено.');
@@ -364,6 +387,38 @@ export default function App() {
     }
   };
 
+  const searchFiles = async (query: string) => {
+    if (!api || !selectedSpaceId) return;
+    if (query.trim().length < 2) {
+      await loadEntries();
+      return;
+    }
+    setFilesLoading(true);
+    setFilesError('');
+    try {
+      setEntries(await api.searchEntries(selectedSpaceId, query.trim(), directory));
+    } catch (error) {
+      setFilesError(error instanceof Error ? error.message : 'Поиск не выполнен.');
+    } finally {
+      setFilesLoading(false);
+    }
+  };
+
+  const shareEntry = async (entry: FileEntry) => {
+    if (!api || !selectedSpaceId) return;
+    try {
+      const shared = await api.createPublicShare(
+        selectedSpaceId,
+        entry.logical_path ?? joinPath(directory, entry.name),
+        entry.type,
+      );
+      const url = `${api.serverUrl}${shared.url_path}`;
+      await Share.share({ message: `Ссылка Cloud Storage действует 24 часа:\n${url}`, url });
+    } catch (error) {
+      setFilesError(error instanceof Error ? error.message : 'Ссылка не создана.');
+    }
+  };
+
   const retryTransfer = (id: string) => {
     const record = transferRef.current.find((item) => item.id === id);
     if (!record) return;
@@ -375,6 +430,84 @@ export default function App() {
     setTransfers(next);
     persistTransfers(next);
   };
+
+  const savePhotoBackup = useCallback((next: PhotoBackupSettings) => {
+    photoBackupRef.current = next;
+    setPhotoBackup(next);
+    saveState({
+      connection: connectionRef.current,
+      transfers: transferRef.current,
+      photoBackup: next,
+    });
+  }, []);
+
+  const runPhotoBackup = useCallback(async (requestPermission = false) => {
+    if (photoRunActive.current) return;
+    const preferredSpace = photoBackupRef.current.spaceId ||
+      spaces.find((space) => space.kind === 'personal')?.id || selectedSpaceId || spaces[0]?.id || '';
+    const settings = { ...photoBackupRef.current, spaceId: preferredSpace };
+    if (!settings.enabled || !preferredSpace) return;
+    photoRunActive.current = true;
+    setPhotoBusy(true);
+    setPhotoMessage('');
+    try {
+      const result = await queuePhotoBackupBatch(
+        { connection: connectionRef.current, transfers: transferRef.current, photoBackup: settings },
+        requestPermission ? 25 : 5,
+        requestPermission,
+      );
+      transferRef.current = result.state.transfers;
+      photoBackupRef.current = result.state.photoBackup;
+      setTransfers(result.state.transfers);
+      setPhotoBackup(result.state.photoBackup);
+      saveState(result.state);
+      setPhotoMessage(result.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось проверить медиатеку.';
+      const failed = { ...settings, lastError: message, lastScanAt: new Date().toISOString() };
+      savePhotoBackup(failed);
+      setPhotoMessage(message);
+    } finally {
+      photoRunActive.current = false;
+      setPhotoBusy(false);
+    }
+  }, [savePhotoBackup, selectedSpaceId, spaces]);
+
+  const updatePhotoBackup = async (patch: Partial<PhotoBackupSettings>) => {
+    const enabling = patch.enabled === true && !photoBackupRef.current.enabled;
+    const next = {
+      ...photoBackupRef.current,
+      ...patch,
+      spaceId: patch.spaceId ?? photoBackupRef.current.spaceId ?? selectedSpaceId,
+    };
+    savePhotoBackup(next);
+    if (enabling) await runPhotoBackup(true);
+  };
+
+  const resetPhotoBackupIndex = () => {
+    clearPhotoAssetIds();
+    const next = {
+      ...photoBackupRef.current,
+      scanOffset: 0,
+      initialScanComplete: false,
+      queuedCount: 0,
+      lastScanAt: '',
+      lastError: undefined,
+    };
+    savePhotoBackup(next);
+    setPhotoMessage('Индекс фотографий очищен. Следующая проверка начнётся заново.');
+  };
+
+  useEffect(() => {
+    if (stage !== 'main' || !photoBackup.enabled || spaces.length === 0) return;
+    if (!photoBackup.spaceId) {
+      const spaceId = spaces.find((space) => space.kind === 'personal')?.id ?? spaces[0]?.id ?? '';
+      if (spaceId) savePhotoBackup({ ...photoBackup, spaceId });
+    }
+    void runPhotoBackup(false);
+    const timer = setInterval(() => void runPhotoBackup(false), 5 * 60_000);
+    return () => clearInterval(timer);
+  }, [stage, photoBackup.enabled, photoBackup.spaceId, spaces, runPhotoBackup, savePhotoBackup]);
 
   const refreshAdmin = async () => {
     if (!api || !adminOverview) return;
@@ -390,27 +523,135 @@ export default function App() {
     }
   };
 
-  const setDeviceStatus = async (deviceId: string, status: 'approve' | 'revoke') => {
+  const confirmAdminAction = async (action: MobileAdminAction, password: string) => {
+    if (!api) throw new Error('Сервер недоступен.');
+    const [compatible, enrolled] = await Promise.all([
+      LocalAuthentication.hasHardwareAsync(),
+      LocalAuthentication.isEnrolledAsync(),
+    ]);
+    if (compatible && enrolled) {
+      const local = await LocalAuthentication.authenticateAsync({
+        promptMessage: 'Подтвердите действие администратора',
+        cancelLabel: 'Отмена',
+        disableDeviceFallback: false,
+      });
+      if (!local.success) throw new Error('Локальное подтверждение отменено.');
+    }
+    const result = await api.mobileConfirmAdminAction(password, action);
+    return result.confirmation_token;
+  };
+
+  const setDeviceStatus = async (
+    deviceId: string,
+    status: 'approve' | 'revoke',
+    password: string,
+  ) => {
     if (!api) return;
     try {
-      await api.mobileSetDeviceStatus(deviceId, status);
+      const token = await confirmAdminAction(
+        status === 'approve' ? 'device.approve' : 'device.revoke',
+        password,
+      );
+      await api.mobileSetDeviceStatus(deviceId, status, token);
       await refreshAdmin();
     } catch (error) {
       setAdminError(error instanceof Error ? error.message : 'Действие не выполнено.');
     }
   };
 
-  const setServerMode = async (mode: 'normal' | 'read_only') => {
+  const setServerMode = async (mode: 'normal' | 'read_only', password: string) => {
     if (!api) return;
     try {
+      const token = await confirmAdminAction(
+        mode === 'read_only' ? 'server.read_only' : 'server.normal',
+        password,
+      );
       await api.mobileSetServerMode(
         mode,
         mode === 'read_only' ? 'Включено администратором с мобильного устройства' : '',
+        token,
       );
       await refreshAdmin();
     } catch (error) {
       setAdminError(error instanceof Error ? error.message : 'Режим сервера не изменён.');
     }
+  };
+
+  const createMobileUser = async (input: MobileCreateUserInput, adminPassword: string) => {
+    if (!api) return;
+    try {
+      const token = await confirmAdminAction('user.create', adminPassword);
+      await api.mobileCreateUser(input, token);
+      await refreshAdmin();
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Пользователь не создан.');
+      throw error;
+    }
+  };
+
+  const setMobileUserPassword = async (userId: string, password: string, adminPassword: string) => {
+    if (!api) return;
+    try {
+      const token = await confirmAdminAction('user.password', adminPassword);
+      await api.mobileSetUserPassword(userId, password, token);
+      await refreshAdmin();
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Пароль пользователя не изменён.');
+      throw error;
+    }
+  };
+
+  const setMobileUserEnabled = async (userId: string, enabled: boolean, adminPassword: string) => {
+    if (!api) return;
+    try {
+      const token = await confirmAdminAction(enabled ? 'user.enable' : 'user.disable', adminPassword);
+      await api.mobileSetUserEnabled(userId, enabled, token);
+      await refreshAdmin();
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Состояние пользователя не изменено.');
+      throw error;
+    }
+  };
+
+  const runMobileDiagnostics = async (kind: 'quick' | 'full', adminPassword: string) => {
+    if (!api) return;
+    const token = await confirmAdminAction(kind === 'full' ? 'diagnostics.full' : 'diagnostics.quick', adminPassword);
+    await api.mobileRunDiagnostics(kind, token);
+    await refreshAdmin();
+  };
+
+  const runMobileBackup = async (rootId: string, adminPassword: string) => {
+    if (!api) return;
+    const token = await confirmAdminAction('backup.run', adminPassword);
+    await api.mobileRunBackup(rootId, token);
+    await refreshAdmin();
+  };
+
+  const setMobileStorageWrite = async (rootId: string, enabled: boolean, adminPassword: string) => {
+    if (!api) return;
+    const token = await confirmAdminAction(enabled ? 'storage.write.resume' : 'storage.write.pause', adminPassword);
+    await api.mobileSetStorageWrite(rootId, enabled, token);
+    await refreshAdmin();
+  };
+
+  const setMobileAutomation = async (enabled: boolean, adminPassword: string) => {
+    if (!api) return;
+    const token = await confirmAdminAction(enabled ? 'automation.resume' : 'automation.pause', adminPassword);
+    await api.mobileSetAutomation(enabled, token);
+    await refreshAdmin();
+  };
+
+  const restartMobileTunnel = async (adminPassword: string) => {
+    if (!api) return;
+    const token = await confirmAdminAction('tunnel.restart', adminPassword);
+    await api.mobileRestartTunnel('zrok', token);
+    await refreshAdmin();
+  };
+
+  const restartMobileCore = async (adminPassword: string) => {
+    if (!api) return;
+    const token = await confirmAdminAction('core.restart', adminPassword);
+    await api.mobileRestartCore(token);
   };
 
   if (stage === 'boot') {
@@ -475,6 +716,8 @@ export default function App() {
           onDownload={queueDownload}
           onDelete={(entry) => void deleteEntry(entry)}
           onCreateDirectory={(name) => void createDirectory(name)}
+          onSearch={(query) => void searchFiles(query)}
+          onShare={(entry) => void shareEntry(entry)}
         />
       ) : null}
       {tab === 'transfers' ? (
@@ -483,6 +726,13 @@ export default function App() {
       {tab === 'settings' ? (
         <SettingsScreen
           profile={connection}
+          spaces={spaces}
+          photoBackup={photoBackup}
+          photoBusy={photoBusy}
+          photoMessage={photoMessage}
+          onPhotoBackupChange={(patch) => void updatePhotoBackup(patch)}
+          onRunPhotoBackup={() => void runPhotoBackup(true)}
+          onResetPhotoIndex={resetPhotoBackupIndex}
           onLockInternet={() => void lockInternet()}
           onForget={() =>
             Alert.alert('Забыть сервер?', 'Локальный токен будет удалён с телефона.', [
@@ -498,9 +748,18 @@ export default function App() {
           loading={adminLoading}
           error={adminError}
           onRefresh={() => void refreshAdmin()}
-          onApprove={(id) => void setDeviceStatus(id, 'approve')}
-          onRevoke={(id) => void setDeviceStatus(id, 'revoke')}
-          onSetMode={(mode) => void setServerMode(mode)}
+          onApprove={(id, password) => setDeviceStatus(id, 'approve', password)}
+          onRevoke={(id, password) => setDeviceStatus(id, 'revoke', password)}
+          onSetMode={setServerMode}
+          onCreateUser={createMobileUser}
+          onSetUserPassword={setMobileUserPassword}
+          onSetUserEnabled={setMobileUserEnabled}
+          onRunDiagnostics={runMobileDiagnostics}
+          onRunBackup={runMobileBackup}
+          onSetStorageWrite={setMobileStorageWrite}
+          onSetAutomation={setMobileAutomation}
+          onRestartTunnel={restartMobileTunnel}
+          onRestartCore={restartMobileCore}
         />
       ) : null}
       <TabBar tab={tab} onChange={setTab} badge={activeCount} admin={adminOverview !== null} />

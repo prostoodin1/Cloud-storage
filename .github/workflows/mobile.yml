@@ -40,6 +40,15 @@ jobs:
   android-release:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - variant: client
+            output: CloudStorage-Mobile-Client-0.9.0-android.apk
+          - variant: manager
+            output: CloudStorage-Mobile-Manager-0.9.0-android.apk
+    env:
+      EXPO_PUBLIC_APP_VARIANT: ${{ matrix.variant }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -67,22 +76,23 @@ jobs:
           test -n "$ANDROID_KEYSTORE_BASE64"
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/cloud-storage-release.p12
           node scripts/configure-android-signing.mjs
-      - name: Build signed APK and Google Play bundle
+      - name: Build signed APK
         env:
           CLOUD_STORAGE_ANDROID_KEYSTORE: cloud-storage-release.p12
           CLOUD_STORAGE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           CLOUD_STORAGE_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           CLOUD_STORAGE_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: ./gradlew assembleRelease bundleRelease
+        run: ./gradlew assembleRelease
         working-directory: mobile/android
       - name: Name release files
+        env:
+          MOBILE_OUTPUT: ${{ matrix.output }}
         run: |
           mkdir -p release
-          cp android/app/build/outputs/apk/release/app-release.apk release/CloudStorage-Mobile-0.9.0-android.apk
-          cp android/app/build/outputs/bundle/release/app-release.aab release/CloudStorage-Mobile-0.9.0-android.aab
+          cp android/app/build/outputs/apk/release/app-release.apk "release/$MOBILE_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: CloudStorage-Mobile-0.9.0-android-release
+          name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.0-android-release
           path: mobile/release/*
           if-no-files-found: error
 

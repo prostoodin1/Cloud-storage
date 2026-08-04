@@ -11,7 +11,7 @@
     "cloud_storage/core/api.py"
   ],
   "release_assets": [
-    "CloudStorage-Mobile-0.9.0-android.apk",
+    "CloudStorage-Mobile-Manager-0.9.0-android.apk",
     "CloudStorage-Mobile-0.9.0-iphone-simulator.zip"
   ]
 }

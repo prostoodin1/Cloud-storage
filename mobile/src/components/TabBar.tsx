@@ -16,13 +16,21 @@ export function TabBar({
   onChange,
   badge,
   admin,
+  mode = 'combined',
 }: {
   tab: MainTab;
   onChange: (tab: MainTab) => void;
   badge: number;
   admin: boolean;
+  mode?: 'client' | 'manager' | 'combined';
 }) {
-  const visibleTabs = admin ? tabs : tabs.filter((item) => item.id !== 'server');
+  const visibleTabs = mode === 'manager'
+    ? tabs.filter((item) => item.id === 'server' || item.id === 'settings')
+    : mode === 'client'
+      ? tabs.filter((item) => item.id !== 'server')
+      : admin
+        ? tabs
+        : tabs.filter((item) => item.id !== 'server');
   return (
     <View style={styles.bar}>
       {visibleTabs.map((item) => (

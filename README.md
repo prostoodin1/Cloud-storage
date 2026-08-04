@@ -2,6 +2,17 @@
 
 Домашний облачный сервер для Windows и Linux. Версия **0.9.0** завершает основной мобильный этап: Android/iPhone-клиент получил автоматическую копию фото и видео, поиск, временные общие ссылки и полноценное защищённое управление сервером и пользователями.
 
+## Скачать приложения и установщики
+
+| № | Приложение | Файл |
+|---:|---|---|
+| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Server-Setup-0.9.0-windows-x64.exe) |
+| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Client-Setup-0.9.0-windows-x64.exe) |
+| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Desktop-Client-0.9.0-windows-x64.zip) |
+| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Server-Manager-0.9.0-windows-x64.zip) |
+| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Mobile-Client-0.9.0-android.apk) |
+| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Mobile-Manager-0.9.0-android.apk) |
+
 ## Шесть приложений проекта
 
 Репозиторий разделён на шесть понятных мини-проектов: установщики сервера и клиента, Desktop Client, Server Manager, мобильный клиент и мобильный менеджер. У каждого раздела есть собственный README, manifest, карта исходников, ссылки на сборки и история изменений.

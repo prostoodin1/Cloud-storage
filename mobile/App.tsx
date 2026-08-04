@@ -49,6 +49,10 @@ import type {
 } from './src/types';
 
 type Stage = 'boot' | 'login' | 'pending' | 'unlock' | 'main';
+type MobileVariant = 'client' | 'manager';
+
+const mobileVariant: MobileVariant =
+  process.env.EXPO_PUBLIC_APP_VARIANT === 'manager' ? 'manager' : 'client';
 
 function makeId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -81,7 +85,7 @@ function MainApp() {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState('');
-  const [tab, setTab] = useState<MainTab>('files');
+  const [tab, setTab] = useState<MainTab>(mobileVariant === 'manager' ? 'server' : 'files');
   const [adminOverview, setAdminOverview] = useState<MobileAdminOverview | null>(null);
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminError, setAdminError] = useState('');
@@ -131,13 +135,22 @@ function MainApp() {
           ? current
           : (availableSpaces[0]?.id ?? ''),
       );
-      try {
-        setAdminOverview(await candidate.mobileAdminOverview());
-      } catch (error) {
-        if (!(error instanceof ApiError) || error.status !== 403) {
-          setAdminError(error instanceof Error ? error.message : 'Управление сервером недоступно.');
+      if (mobileVariant === 'manager') {
+        try {
+          setAdminOverview(await candidate.mobileAdminOverview());
+          setAdminError('');
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 403) {
+            setAdminError('Для этого приложения нужна учётная запись администратора.');
+          } else {
+            setAdminError(error instanceof Error ? error.message : 'Управление сервером недоступно.');
+          }
+          setAdminOverview(null);
         }
+        setTab('server');
+      } else {
         setAdminOverview(null);
+        setTab('files');
       }
       setConnectionError('');
       setStage('main');
@@ -499,7 +512,7 @@ function MainApp() {
   };
 
   useEffect(() => {
-    if (stage !== 'main' || !photoBackup.enabled || spaces.length === 0) return;
+    if (mobileVariant !== 'client' || stage !== 'main' || !photoBackup.enabled || spaces.length === 0) return;
     if (!photoBackup.spaceId) {
       const spaceId = spaces.find((space) => space.kind === 'personal')?.id ?? spaces[0]?.id ?? '';
       if (spaceId) savePhotoBackup({ ...photoBackup, spaceId });
@@ -510,7 +523,7 @@ function MainApp() {
   }, [stage, photoBackup.enabled, photoBackup.spaceId, spaces, runPhotoBackup, savePhotoBackup]);
 
   const refreshAdmin = async () => {
-    if (!api || !adminOverview) return;
+    if (!api) return;
     setAdminLoading(true);
     setAdminError('');
     try {
@@ -701,7 +714,7 @@ function MainApp() {
   return (
     <View style={styles.app}>
       <StatusBar style="light" />
-      {tab === 'files' ? (
+      {mobileVariant === 'client' && tab === 'files' ? (
         <FilesScreen
           spaces={spaces}
           selectedSpaceId={selectedSpaceId}
@@ -720,7 +733,7 @@ function MainApp() {
           onShare={(entry) => void shareEntry(entry)}
         />
       ) : null}
-      {tab === 'transfers' ? (
+      {mobileVariant === 'client' && tab === 'transfers' ? (
         <TransfersScreen transfers={transfers} onRetry={retryTransfer} onClearCompleted={clearCompleted} />
       ) : null}
       {tab === 'settings' ? (
@@ -762,7 +775,21 @@ function MainApp() {
           onRestartCore={restartMobileCore}
         />
       ) : null}
-      <TabBar tab={tab} onChange={setTab} badge={activeCount} admin={adminOverview !== null} />
+      {mobileVariant === 'manager' && tab === 'server' && !adminOverview ? (
+        <Screen>
+          <Brand />
+          <Text style={styles.managerMessage}>
+            {adminLoading ? 'Загружаем управление сервером…' : (adminError || 'Управление сервером недоступно.')}
+          </Text>
+        </Screen>
+      ) : null}
+      <TabBar
+        tab={tab}
+        onChange={setTab}
+        badge={activeCount}
+        admin={adminOverview !== null}
+        mode={mobileVariant}
+      />
     </View>
   );
 }
@@ -771,4 +798,5 @@ const styles = StyleSheet.create({
   app: { flex: 1, backgroundColor: colors.background },
   boot: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 24 },
   bootText: { color: colors.muted, textAlign: 'center' },
+  managerMessage: { color: colors.muted, fontSize: 16, lineHeight: 24, textAlign: 'center' },
 });

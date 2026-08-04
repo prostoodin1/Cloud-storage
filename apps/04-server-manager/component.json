@@ -10,5 +10,5 @@
     "cloud_storage/core",
     "cloud_storage/help"
   ],
-  "release_asset": "CloudStorage-Server-Portable-0.9.0-windows-x64.zip"
+  "release_asset": "CloudStorage-Server-Manager-0.9.0-windows-x64.zip"
 }

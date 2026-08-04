@@ -12,8 +12,7 @@
     "mobile/src/transfers.ts"
   ],
   "release_assets": [
-    "CloudStorage-Mobile-0.9.0-android.apk",
-    "CloudStorage-Mobile-0.9.0-android.aab",
+    "CloudStorage-Mobile-Client-0.9.0-android.apk",
     "CloudStorage-Mobile-0.9.0-iphone-simulator.zip"
   ]
 }

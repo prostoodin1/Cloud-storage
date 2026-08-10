@@ -103,8 +103,10 @@ jobs:
         include:
           - variant: client
             package: com.cloudstorage.mobile
+            screenshot_screen: files
           - variant: manager
             package: com.cloudstorage.manager
+            screenshot_screen: server
     env:
       EXPO_PUBLIC_APP_VARIANT: ${{ matrix.variant }}
     steps:
@@ -125,7 +127,7 @@ jobs:
       - run: pnpm exec expo prebuild --platform android --no-install --clean
       - name: Build self-contained screenshot APK
         env:
-          EXPO_PUBLIC_SCREENSHOT_SCREEN: files
+          EXPO_PUBLIC_SCREENSHOT_SCREEN: ${{ matrix.screenshot_screen }}
         run: ./gradlew assembleRelease
         working-directory: mobile/android
       - name: Enable Android emulator acceleration
@@ -166,10 +168,12 @@ jobs:
             bundle: com.cloudstorage.mobile
             output: CloudStorage-Mobile-Client-0.9.5-apple-simulator.zip
             device_output: CloudStorage-Mobile-Client-0.9.5-unsigned.ipa
+            screenshot_screen: files
           - variant: manager
             bundle: com.cloudstorage.manager
             output: CloudStorage-Mobile-Manager-0.9.5-apple-simulator.zip
             device_output: CloudStorage-Mobile-Manager-0.9.5-unsigned.ipa
+            screenshot_screen: server
     env:
       EXPO_PUBLIC_APP_VARIANT: ${{ matrix.variant }}
     steps:
@@ -194,7 +198,7 @@ jobs:
         working-directory: mobile/ios
       - name: Build unsigned simulator application
         env:
-          EXPO_PUBLIC_SCREENSHOT_SCREEN: server
+          EXPO_PUBLIC_SCREENSHOT_SCREEN: ${{ matrix.screenshot_screen }}
         run: |
           WORKSPACE=$(find ios -maxdepth 1 -name '*.xcworkspace' -print -quit)
           test -n "$WORKSPACE"

@@ -159,6 +159,7 @@ jobs:
     runs-on: macos-15
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - variant: client
@@ -230,6 +231,7 @@ jobs:
           (cd release && zip -qry "$MOBILE_DEVICE_OUTPUT" Payload)
           rm -rf release/Payload
       - name: Package and capture iPhone application
+        timeout-minutes: 15
         env:
           MOBILE_BUNDLE: ${{ matrix.bundle }}
           MOBILE_OUTPUT: ${{ matrix.output }}
@@ -251,7 +253,6 @@ jobs:
               DEVICE_ID=$(xcrun simctl list devices available -j | FAMILY="$FAMILY" python3 -c 'import json,os,sys; d=json.load(sys.stdin)["devices"]; print(next(v["udid"] for values in d.values() for v in values if os.environ["FAMILY"] in v["name"]))')
             fi
             xcrun simctl boot "$DEVICE_ID" || true
-            open -a Simulator
             xcrun simctl bootstatus "$DEVICE_ID" -b
             xcrun simctl install "$DEVICE_ID" "$APP_PATH"
             xcrun simctl launch "$DEVICE_ID" "$MOBILE_BUNDLE"

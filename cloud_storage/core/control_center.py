@@ -23,6 +23,7 @@ from cloud_storage.core.automation import AutomationService
 from cloud_storage.core.config import CoreConfig, _restrict_secret_file
 from cloud_storage.core.database import Database
 from cloud_storage.core.diagnostics import DiagnosticsService
+from cloud_storage.core.host_tools import HostToolsService
 from cloud_storage.core.integrations import IntegrationRegistry
 from cloud_storage.core.notifications import NotificationService
 from cloud_storage.core.repository import CoreRepository, NotFoundError, utc_text
@@ -373,6 +374,7 @@ class ControlCenterService:
     notifications: NotificationService
     automation: AutomationService
     tls_fingerprint: str = ""
+    host_tools: HostToolsService = field(init=False, repr=False)
     _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _last_access_monotonic: float = field(default_factory=time.monotonic, init=False, repr=False)
@@ -383,6 +385,7 @@ class ControlCenterService:
     _shutdown_timer: threading.Timer | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.host_tools = HostToolsService(self.config.data_directory)
         with self.database.transaction() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO control_settings(id, settings_json, updated_at) VALUES(1, ?, ?)",
@@ -505,7 +508,56 @@ class ControlCenterService:
             "reports": {"sections": sorted(REPORT_SECTIONS), "schedules": self.list_reports()},
             "cells": self.list_cells(),
             "network": self.network_status(),
+            "host_tools": self.host_tools.overview(),
         }
+
+    def install_docker(self, *, confirmed: bool) -> dict[str, Any]:
+        result = self.host_tools.install_docker(confirmed=confirmed)
+        self.repository.record_audit(
+            actor_type="manager",
+            actor_id=None,
+            action="host.docker.install.requested",
+            target_type="system",
+            target_id="docker",
+            detail="Запрошена установка Docker Desktop из интерфейса менеджера",
+        )
+        return result
+
+    def enable_ssh(
+        self,
+        *,
+        username: str,
+        public_key: str,
+        port: int,
+        confirmed: bool,
+    ) -> dict[str, Any]:
+        result = self.host_tools.enable_ssh(
+            username=username,
+            public_key=public_key,
+            port=port,
+            confirmed=confirmed,
+        )
+        self.repository.record_audit(
+            actor_type="manager",
+            actor_id=None,
+            action="host.ssh.enable.requested",
+            target_type="system",
+            target_id="openssh",
+            detail=f"Запрошен SSH по ключу для {username.strip()} на TCP/{port}",
+        )
+        return result
+
+    def disable_ssh(self, *, confirmed: bool) -> dict[str, Any]:
+        result = self.host_tools.disable_ssh(confirmed=confirmed)
+        self.repository.record_audit(
+            actor_type="manager",
+            actor_id=None,
+            action="host.ssh.disable.requested",
+            target_type="system",
+            target_id="openssh",
+            detail="Запрошено отключение SSH и правила брандмауэра",
+        )
+        return result
 
     def network_status(self) -> dict[str, Any]:
         tunnel = self.tunnels.status("zrok")

@@ -105,6 +105,27 @@ class CoreClient:
             timeout=300.0,
         )
 
+    def install_docker_desktop(self) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/control-center/host-tools/docker/install",
+            method="POST",
+            payload={"confirmed": True},
+        )
+
+    def enable_windows_ssh(self, values: dict[str, Any]) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/control-center/host-tools/ssh/enable",
+            method="POST",
+            payload={**values, "confirmed": True},
+        )
+
+    def disable_windows_ssh(self) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/control-center/host-tools/ssh/disable",
+            method="POST",
+            payload={"confirmed": True},
+        )
+
     def test_integration(self, provider_id: str) -> dict[str, Any]:
         return self._manager_request(
             f"/v1/admin/integrations/{provider_id}/test",

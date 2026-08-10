@@ -279,6 +279,9 @@ class MainWindow(QMainWindow):
         self.control_page.report_requested.connect(self.create_control_report)
         self.control_page.cell_create_requested.connect(self.create_sandbox_cell)
         self.control_page.cell_run_requested.connect(self.run_sandbox_cell)
+        self.control_page.docker_install_requested.connect(self.install_docker_desktop)
+        self.control_page.ssh_enable_requested.connect(self.enable_windows_ssh)
+        self.control_page.ssh_disable_requested.connect(self.disable_windows_ssh)
         self.control_page.open_updates_requested.connect(lambda: self._show_page(self.update_page))
         self.control_page.open_network_settings_requested.connect(
             lambda: self._show_page(self.settings_page)
@@ -1282,6 +1285,84 @@ class MainWindow(QMainWindow):
             "Запуск завершён",
             f"Статус: {result.get('status')}\n\n{str(result.get('last_result', ''))[-1200:]}",
         )
+
+    def install_docker_desktop(self) -> None:
+        response = QMessageBox.warning(
+            self,
+            "Установить Docker Desktop?",
+            "Менеджер скачает Docker Desktop с официального сайта и установит его для всех "
+            "пользователей Windows с WSL 2 и Linux-контейнерами. Нажимая «Да», вы "
+            "подтверждаете установку и принятие Docker Subscription Service Agreement.\n\n"
+            "Для личного использования и небольших компаний Docker Desktop обычно бесплатен; "
+            "для крупных организаций может требоваться платная подписка.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.core_client.install_docker_desktop()
+        except (CoreApiError, CoreUnavailable, ValueError) as exc:
+            QMessageBox.warning(self, "Docker не устанавливается", self._core_error_text(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Установка Docker началась",
+            "Загрузка и установка идут в фоне. Статус виден во вкладке «Docker и SSH». "
+            "После завершения откройте Docker Desktop один раз из меню Пуск.",
+        )
+        self.refresh_core()
+
+    def enable_windows_ssh(self, values: dict) -> None:
+        if not values.get("username") or not values.get("public_key"):
+            QMessageBox.warning(
+                self,
+                "Не хватает данных",
+                "Укажите локального администратора Windows и вставьте публичный SSH-ключ.",
+            )
+            return
+        response = QMessageBox.warning(
+            self,
+            "Открыть SSH-доступ?",
+            f"Будет установлен OpenSSH Server и открыт TCP-порт {values.get('port')} только "
+            "для частной сети. Войти сможет только указанный Windows-пользователь и только "
+            "по ключу; вход по паролю будет отключён.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.core_client.enable_windows_ssh(values)
+        except (CoreApiError, CoreUnavailable, ValueError) as exc:
+            QMessageBox.warning(self, "SSH не включается", self._core_error_text(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Настройка SSH началась",
+            "OpenSSH устанавливается и проверяет конфигурацию в фоне. Обновляйте статус "
+            "во вкладке «Docker и SSH».",
+        )
+        self.refresh_core()
+
+    def disable_windows_ssh(self) -> None:
+        response = QMessageBox.warning(
+            self,
+            "Отключить SSH?",
+            "Служба OpenSSH будет остановлена и отключена, а созданное Cloud Storage правило "
+            "брандмауэра удалено. Ключ и резервная копия конфигурации сохранятся.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.core_client.disable_windows_ssh()
+        except (CoreApiError, CoreUnavailable, ValueError) as exc:
+            QMessageBox.warning(self, "SSH не отключён", self._core_error_text(exc))
+            return
+        QMessageBox.information(self, "SSH отключается", "Операция выполняется в фоне.")
+        self.refresh_core()
 
     def test_integration(self, provider_id: str) -> None:
         try:

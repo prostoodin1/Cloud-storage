@@ -103,6 +103,15 @@ def main() -> int:
             app.processEvents()
             main_captures.append((title, window.grab()))
 
+        system_captures: list[tuple[str, QPixmap]] = []
+        window.stack.setCurrentWidget(window.control_page)
+        for index in range(window.control_page.tabs.count()):
+            window.control_page.tabs.setCurrentIndex(index)
+            app.processEvents()
+            system_captures.append(
+                (window.control_page.tabs.tabText(index), window.grab())
+            )
+
         settings = window.settings_page
         settings.mode.setCurrentIndex(1)
         app.processEvents()
@@ -115,6 +124,7 @@ def main() -> int:
             )
 
         save_contact_sheet(main_captures, args.output / "main-tabs.png", columns=2)
+        save_contact_sheet(system_captures, args.output / "system-tabs.png", columns=2)
         save_contact_sheet(
             settings_captures, args.output / "settings-tabs.png", columns=3
         )
@@ -147,7 +157,8 @@ def main() -> int:
         client.close()
     print(
         f"Rendered {len(main_captures)} Manager tabs, "
-        f"{len(settings_captures)} settings tabs and {len(client_captures)} Client tabs"
+        f"{len(system_captures)} system tabs, {len(settings_captures)} settings tabs "
+        f"and {len(client_captures)} Client tabs"
     )
     return 0
 

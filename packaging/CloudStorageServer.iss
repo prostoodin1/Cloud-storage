@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.9.5"
+#define AppVersion "0.9.6"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
 #define BuildRoot "..\dist"
@@ -60,7 +60,7 @@ Filename: "{sys}\sc.exe"; Parameters: "failure CloudStorageServerCore reset= 864
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Cloud Storage HTTPS (Private)"" dir=in action=allow protocol=TCP localport=8766 profile=private"; Flags: runhidden waituntilterminated; Tasks: privatefirewall
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Cloud Storage Discovery (Private)"" dir=in action=allow protocol=UDP localport=47777 profile=private"; Flags: runhidden waituntilterminated; Tasks: privatefirewall
 Filename: "{sys}\sc.exe"; Parameters: "start CloudStorageServerCore"; StatusMsg: "Запускаем серверную службу…"; Flags: runhidden waituntilterminated
-Filename: "{app}\Manager\CloudStorageServerManager.exe"; Description: "Открыть Cloud Storage Server Manager"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Manager\CloudStorageServerManager.exe"; Description: "Открыть Cloud Storage Server Manager"; Flags: nowait postinstall skipifsilent runascurrentuser
 
 [UninstallRun]
 Filename: "{sys}\net.exe"; Parameters: "stop CloudStorageServerCore /y"; Flags: runhidden waituntilterminated; RunOnceId: "StopCloudStorageServerCore"

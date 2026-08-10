@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -11,6 +13,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -30,6 +33,9 @@ class ControlCenterPage(QWidget):
     report_requested = Signal(dict)
     cell_create_requested = Signal(dict)
     cell_run_requested = Signal(str)
+    docker_install_requested = Signal()
+    ssh_enable_requested = Signal(dict)
+    ssh_disable_requested = Signal()
     open_updates_requested = Signal()
     open_network_settings_requested = Signal()
     integration_test_requested = Signal(str)
@@ -43,7 +49,7 @@ class ControlCenterPage(QWidget):
         layout.setSpacing(14)
         header = make_header(
             "Система",
-            "Idea 4: режимы, питание, сеть, боты, отчёты, автоматизации и безопасные ячейки.",
+            "Idea 4: режимы, питание, сеть, Docker, SSH, автоматизации и контейнеры.",
         )
         layout.addWidget(header)
         top = QHBoxLayout()
@@ -64,7 +70,8 @@ class ControlCenterPage(QWidget):
         self.tabs.addTab(self._build_network_tab(), "Сеть и боты")
         self.tabs.addTab(self._build_automation_tab(), "Автоматизации")
         self.tabs.addTab(self._build_report_tab(), "Отчёты")
-        self.tabs.addTab(self._build_cell_tab(), "Ячейки")
+        self.tabs.addTab(self._build_host_tools_tab(), "Docker и SSH")
+        self.tabs.addTab(self._build_cell_tab(), "Контейнеры")
         layout.addWidget(self.tabs, 1)
 
     @staticmethod
@@ -298,6 +305,13 @@ class ControlCenterPage(QWidget):
         self.cell_capabilities.setWordWrap(True)
         self.cell_capabilities.setProperty("muted", True)
         layout.addWidget(self.cell_capabilities)
+        explanation = QLabel(
+            "Каждый скрипт, бот или обработчик запускается отдельно внутри контейнера. "
+            "Он не получает прямой доступ к Windows и дискам сервера; сеть выключена, "
+            "пока вы явно её не разрешите."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
         form = QFormLayout()
         self.cell_name = QLineEdit("Тестовая ячейка")
         self.cell_image = QLineEdit("python:3.12-alpine")
@@ -309,12 +323,17 @@ class ControlCenterPage(QWidget):
         self.cell_storage = QSpinBox()
         self.cell_storage.setRange(64, 10240)
         self.cell_storage.setValue(512)
+        self.cell_network = QCheckBox("Разрешить контейнеру выход в сеть")
+        self.cell_network.setToolTip(
+            "Нужно, например, Telegram-боту. Оставьте выключенным для локальных скриптов."
+        )
         form.addRow("Название", self.cell_name)
         form.addRow("Container image", self.cell_image)
         form.addRow("Команда (аргументы через запятую)", self.cell_command)
         form.addRow("CPU", self.cell_cpu)
         form.addRow("RAM MiB", self.cell_memory)
         form.addRow("Рабочее место MiB", self.cell_storage)
+        form.addRow("Сеть", self.cell_network)
         layout.addLayout(form)
         row = QHBoxLayout()
         create = QPushButton("Создать ячейку")
@@ -327,7 +346,92 @@ class ControlCenterPage(QWidget):
         layout.addLayout(row)
         self.cell_list = QListWidget()
         layout.addWidget(self.cell_list, 1)
-        return content
+        return self._scroll(content)
+
+    def _build_host_tools_tab(self) -> QWidget:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(16, 16, 16, 24)
+        layout.setSpacing(14)
+
+        docker_card = QFrame()
+        docker_card.setProperty("card", True)
+        docker_layout = QVBoxLayout(docker_card)
+        docker_title = QLabel("Docker Desktop для контейнеров")
+        docker_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        docker_text = QLabel(
+            "Docker нужен, чтобы ячейки для скриптов и ботов действительно запускались "
+            "изолированно. Установка выполняется в фоне с официального сайта Docker."
+        )
+        docker_text.setWordWrap(True)
+        self.docker_status = QLabel("Проверяем Docker…")
+        self.docker_status.setWordWrap(True)
+        self.docker_status.setProperty("muted", True)
+        docker_docs = QLabel(
+            '<a href="https://docs.docker.com/desktop/setup/install/windows-install/">'
+            "Условия и официальная инструкция Docker Desktop</a>"
+        )
+        docker_docs.setOpenExternalLinks(True)
+        install_docker = QPushButton("Скачать и установить Docker Desktop")
+        install_docker.setProperty("primary", True)
+        install_docker.clicked.connect(self.docker_install_requested)
+        self.install_docker_button = install_docker
+        docker_layout.addWidget(docker_title)
+        docker_layout.addWidget(docker_text)
+        docker_layout.addWidget(self.docker_status)
+        docker_layout.addWidget(docker_docs)
+        docker_layout.addWidget(install_docker)
+        layout.addWidget(docker_card)
+
+        ssh_card = QFrame()
+        ssh_card.setProperty("card", True)
+        ssh_layout = QVBoxLayout(ssh_card)
+        ssh_title = QLabel("SSH-подключение к серверу")
+        ssh_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        ssh_text = QLabel(
+            "Менеджер установит системный OpenSSH Server, разрешит вход только выбранному "
+            "локальному администратору Windows и только по публичному ключу. Парольный вход "
+            "будет выключен, а порт открыт лишь для профиля «Частная сеть»."
+        )
+        ssh_text.setWordWrap(True)
+        self.ssh_status = QLabel("Проверяем SSH…")
+        self.ssh_status.setWordWrap(True)
+        self.ssh_status.setProperty("muted", True)
+        ssh_form = QFormLayout()
+        self.ssh_username = QLineEdit(os.environ.get("USERNAME", ""))
+        self.ssh_username.setPlaceholderText("локальный администратор Windows")
+        self.ssh_port = QSpinBox()
+        self.ssh_port.setRange(1, 65535)
+        self.ssh_port.setValue(22)
+        self.ssh_public_key = QPlainTextEdit()
+        self.ssh_public_key.setPlaceholderText("ssh-ed25519 AAAA… имя-устройства")
+        self.ssh_public_key.setMaximumHeight(92)
+        ssh_form.addRow("Windows-логин", self.ssh_username)
+        ssh_form.addRow("TCP-порт", self.ssh_port)
+        ssh_form.addRow("Публичный SSH-ключ", self.ssh_public_key)
+        ssh_help = QLabel(
+            "На компьютере, с которого будете входить: ssh-keygen -t ed25519. "
+            "Сюда вставьте содержимое файла id_ed25519.pub; закрытый ключ никому не отправляйте."
+        )
+        ssh_help.setWordWrap(True)
+        ssh_help.setProperty("muted", True)
+        ssh_actions = QHBoxLayout()
+        enable_ssh = QPushButton("Установить и включить SSH")
+        enable_ssh.setProperty("primary", True)
+        enable_ssh.clicked.connect(self._emit_ssh_enable)
+        disable_ssh = QPushButton("Отключить SSH")
+        disable_ssh.clicked.connect(self.ssh_disable_requested)
+        ssh_actions.addWidget(enable_ssh)
+        ssh_actions.addWidget(disable_ssh)
+        ssh_layout.addWidget(ssh_title)
+        ssh_layout.addWidget(ssh_text)
+        ssh_layout.addWidget(self.ssh_status)
+        ssh_layout.addLayout(ssh_form)
+        ssh_layout.addWidget(ssh_help)
+        ssh_layout.addLayout(ssh_actions)
+        layout.addWidget(ssh_card)
+        layout.addStretch()
+        return self._scroll(content)
 
     def update_data(self, data: dict, *, online: bool) -> None:
         self._data = data or {}
@@ -380,6 +484,7 @@ class ControlCenterPage(QWidget):
         self._render_templates(data.get("automation_templates", []))
         self._render_reports(data.get("reports", {}).get("schedules", []))
         self._render_cells(data.get("cells", []), data.get("sandbox", {}))
+        self._render_host_tools(data.get("host_tools", {}))
         self._update_profile_description()
 
     @staticmethod
@@ -428,6 +533,51 @@ class ControlCenterPage(QWidget):
             )
             item.setData(Qt.ItemDataRole.UserRole, cell.get("id"))
             self.cell_list.addItem(item)
+
+    def _render_host_tools(self, tools: dict) -> None:
+        docker = tools.get("docker", {})
+        docker_job = docker.get("job", {})
+        if docker.get("engine_ready"):
+            docker_text = f"Docker работает · версия {docker.get('version') or 'определяется'}"
+        elif docker.get("installed"):
+            docker_text = "Docker установлен, но движок ещё не запущен. Откройте Docker Desktop."
+        elif not docker.get("supported", True):
+            docker_text = "Автоустановка Docker Desktop недоступна на этой системе."
+        else:
+            docker_text = "Docker пока не установлен. Контейнеры запускаться не будут."
+        if docker_job.get("status") not in {None, "", "idle"}:
+            docker_text += (
+                f"\nУстановка: {docker_job.get('status')} · {docker_job.get('message', '')}"
+            )
+        self.docker_status.setText(docker_text)
+        self.install_docker_button.setEnabled(
+            bool(docker.get("supported", True))
+            and not bool(docker.get("installed"))
+            and docker_job.get("status") not in {"queued", "running"}
+        )
+
+        ssh = tools.get("ssh", {})
+        ssh_job = ssh.get("job", {})
+        state = "работает" if ssh.get("running") else "выключен"
+        ssh_text = (
+            f"OpenSSH: {state} · порт {ssh.get('port', 22)} · "
+            f"вход по ключу: {'да' if ssh.get('key_only') else 'нет'}"
+        )
+        if ssh.get("username"):
+            ssh_text += f" · пользователь {ssh.get('username')}"
+        addresses = ssh.get("addresses", [])
+        if ssh.get("running") and addresses and ssh.get("username"):
+            host = str(addresses[0]).rsplit(":", 1)[0]
+            ssh_text += (
+                f"\nКоманда подключения: ssh -p {ssh.get('port', 22)} {ssh.get('username')}@{host}"
+            )
+        if ssh_job.get("status") not in {None, "", "idle"}:
+            ssh_text += f"\nНастройка: {ssh_job.get('status')} · {ssh_job.get('message', '')}"
+        self.ssh_status.setText(ssh_text)
+        if ssh.get("port"):
+            self.ssh_port.setValue(int(ssh.get("port", 22)))
+        if ssh.get("username") and not self.ssh_username.text().strip():
+            self.ssh_username.setText(str(ssh.get("username")))
 
     def _emit_settings(self) -> None:
         secrets = {}
@@ -514,7 +664,7 @@ class ControlCenterPage(QWidget):
                 "memory_mib": self.cell_memory.value(),
                 "storage_mib": self.cell_storage.value(),
                 "timeout_seconds": 300,
-                "network_enabled": False,
+                "network_enabled": self.cell_network.isChecked(),
             }
         )
 
@@ -522,3 +672,12 @@ class ControlCenterPage(QWidget):
         current = self.cell_list.currentItem()
         if current is not None:
             self.cell_run_requested.emit(str(current.data(Qt.ItemDataRole.UserRole)))
+
+    def _emit_ssh_enable(self) -> None:
+        self.ssh_enable_requested.emit(
+            {
+                "username": self.ssh_username.text().strip(),
+                "public_key": self.ssh_public_key.toPlainText().strip(),
+                "port": self.ssh_port.value(),
+            }
+        )

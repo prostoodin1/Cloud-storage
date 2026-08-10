@@ -247,6 +247,21 @@ class SandboxCellRequest(BaseModel):
     network_enabled: bool = False
 
 
+class DockerInstallRequest(BaseModel):
+    confirmed: bool = False
+
+
+class SshEnableRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    public_key: str = Field(min_length=32, max_length=16_384)
+    port: int = Field(default=22, ge=1, le=65535)
+    confirmed: bool = False
+
+
+class SshDisableRequest(BaseModel):
+    confirmed: bool = False
+
+
 class WakeOnLanRequest(BaseModel):
     mac_address: str = Field(min_length=12, max_length=32)
     broadcast: str = Field(default="255.255.255.255", max_length=255)
@@ -938,6 +953,33 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             return runtime.control.run_cell(cell_id)
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v1/admin/control-center/host-tools/docker/install",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def install_docker_desktop(body: DockerInstallRequest) -> dict[str, Any]:
+        return runtime.control.install_docker(confirmed=body.confirmed)
+
+    @app.post(
+        "/v1/admin/control-center/host-tools/ssh/enable",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def enable_windows_ssh(body: SshEnableRequest) -> dict[str, Any]:
+        return runtime.control.enable_ssh(**body.model_dump())
+
+    @app.post(
+        "/v1/admin/control-center/host-tools/ssh/disable",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def disable_windows_ssh(body: SshDisableRequest) -> dict[str, Any]:
+        return runtime.control.disable_ssh(confirmed=body.confirmed)
 
     @app.post(
         "/v1/admin/control-center/wake-on-lan",

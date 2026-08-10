@@ -40,6 +40,7 @@ AUTOMATION_TRIGGER_LABELS = {
     "maintenance_failed": "ошибка обслуживания диска",
     "pending_device": "устройство ожидает подтверждения",
     "tunnel_offline": "сбой интернет-шлюза",
+    "power_outage": "пропало внешнее питание",
     "scheduled": "наступило время планового запуска",
 }
 AUTOMATION_ACTION_LABELS = {
@@ -50,6 +51,8 @@ AUTOMATION_ACTION_LABELS = {
     "run_backup": "создать и проверить резервную копию",
     "reconcile_mirrors": "проверить и восстановить зеркало",
     "restart_tunnel": "перезапустить интернет-шлюз",
+    "sleep_after_hour": "перевести сервер в сон через час",
+    "shutdown_after_hour": "безопасно выключить сервер через час",
 }
 AUTOMATION_ACTIONS_BY_TRIGGER = {
     "diagnostic_warning": ("notify", "quick_scan", "full_scan"),
@@ -61,7 +64,15 @@ AUTOMATION_ACTIONS_BY_TRIGGER = {
     "maintenance_failed": ("notify", "quick_scan", "full_scan"),
     "pending_device": ("notify",),
     "tunnel_offline": ("notify", "restart_tunnel"),
-    "scheduled": ("notify", "quick_scan", "full_scan", "run_backup", "reconcile_mirrors"),
+    "power_outage": ("notify", "shutdown_after_hour"),
+    "scheduled": (
+        "notify",
+        "quick_scan",
+        "full_scan",
+        "run_backup",
+        "reconcile_mirrors",
+        "sleep_after_hour",
+    ),
 }
 
 
@@ -72,6 +83,8 @@ def format_automation_result(value: object) -> str:
         "no_enabled_backup_policy": "нет включённой политики резервирования",
         "no_writable_mirror": "нет доступного зеркального диска",
         "no_offline_tunnel": "интернет-шлюз уже работает или выключен",
+        "shutdown_not_armed": "аварийное выключение не разрешено в Системе",
+        "shutdown_already_scheduled": "аварийное выключение уже запланировано",
     }
     if text in labels:
         return labels[text]
@@ -82,6 +95,7 @@ def format_automation_result(value: object) -> str:
         "backup_job:": "резервная копия поставлена в очередь",
         "mirror_job:": "восстановление зеркала поставлено в очередь",
         "tunnel:": "перезапуск интернет-шлюза запущен",
+        "shutdown_scheduled:": "аварийное выключение запланировано",
     }
     for prefix, label in prefixes.items():
         if text.startswith(prefix):

@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -26,6 +27,7 @@ def main() -> int:
     parser.add_argument("--key", required=True, type=Path)
     parser.add_argument("--product", required=True, choices=("client", "server"))
     parser.add_argument("--manifest", required=True, action="append", type=Path)
+    parser.add_argument("--existing-catalog", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -34,6 +36,30 @@ def main() -> int:
         raise TypeError("the update key must be an Ed25519 private key")
     versions: list[dict[str, object]] = []
     identities: set[tuple[str, str]] = set()
+    if args.existing_catalog is not None:
+        existing = json.loads(args.existing_catalog.read_text(encoding="utf-8"))
+        if (
+            not isinstance(existing, dict)
+            or existing.get("schema_version") != 2
+            or existing.get("product") != args.product
+            or not isinstance(existing.get("versions"), list)
+        ):
+            raise ValueError(f"invalid existing {args.product} catalog")
+        try:
+            private_key.public_key().verify(
+                base64.b64decode(str(existing.get("signature", "")), validate=True),
+                canonical_payload(existing),
+            )
+        except (InvalidSignature, ValueError) as exc:
+            raise ValueError("existing catalog signature is invalid") from exc
+        for item in existing["versions"]:
+            if not isinstance(item, dict):
+                raise ValueError("existing catalog contains an invalid version")
+            identity = (str(item.get("version", "")), str(item.get("channel", "")))
+            if not all(identity):
+                raise ValueError("existing catalog version identity is incomplete")
+            identities.add(identity)
+            versions.append(dict(item))
     for manifest_path in args.manifest:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if (
@@ -44,7 +70,11 @@ def main() -> int:
             raise ValueError(f"invalid {args.product} manifest: {manifest_path}")
         identity = (str(manifest.get("version", "")), str(manifest.get("channel", "")))
         if identity in identities:
-            raise ValueError(f"duplicate catalog version: {identity[0]} ({identity[1]})")
+            versions = [
+                item
+                for item in versions
+                if (str(item.get("version", "")), str(item.get("channel", ""))) != identity
+            ]
         identities.add(identity)
         versions.append(
             {
@@ -55,6 +85,10 @@ def main() -> int:
                 "package": manifest.get("package"),
             }
         )
+    versions.sort(
+        key=lambda item: tuple(int(part) for part in str(item.get("version", "0")).split(".")),
+        reverse=True,
+    )
     value: dict[str, object] = {
         "schema_version": 2,
         "product": args.product,

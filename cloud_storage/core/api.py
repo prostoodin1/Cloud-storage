@@ -34,6 +34,7 @@ from cloud_storage import __version__
 from cloud_storage.core.automation import AutomationService
 from cloud_storage.core.backup_automation import BackupAutomationService
 from cloud_storage.core.config import CoreConfig, CoreSecrets
+from cloud_storage.core.control_center import ControlCenterService
 from cloud_storage.core.database import Database
 from cloud_storage.core.diagnostics import DiagnosticsService
 from cloud_storage.core.integrations import IntegrationRegistry
@@ -65,6 +66,8 @@ class CreateUserRequest(BaseModel):
     quota_gib: int = Field(default=100, ge=1, le=1_000_000)
     role: str = Field(default="member", pattern="^(admin|member)$")
     password: SecretStr | None = None
+    email: str = Field(default="", max_length=254)
+    prepare_access: bool = True
 
 
 class SetUserPasswordRequest(BaseModel):
@@ -146,8 +149,8 @@ class AutomationRuleRequest(BaseModel):
     )
     action_type: str = Field(
         pattern=(
-            "^(notify|quick_scan|full_scan|read_only|run_backup|"
-            "reconcile_mirrors|restart_tunnel)$"
+            "^(notify|quick_scan|full_scan|read_only|run_backup|reconcile_mirrors|"
+            "restart_tunnel|sleep_after_hour)$"
         )
     )
     cooldown_minutes: int = Field(default=60, ge=1, le=10080)
@@ -220,6 +223,44 @@ class TransferSettingsRequest(BaseModel):
     staging_path: str = Field(default="", max_length=2048)
 
 
+class ReportScheduleRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    enabled: bool = True
+    interval_hours: int = Field(default=24, ge=1, le=8760)
+    sections: list[str] = Field(min_length=1, max_length=10)
+    delivery_channels: list[str] = Field(default_factory=list, max_length=8)
+
+
+class GenerateReportRequest(BaseModel):
+    sections: list[str] = Field(min_length=1, max_length=10)
+    delivery_channels: list[str] = Field(default_factory=list, max_length=8)
+
+
+class SandboxCellRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    image: str = Field(min_length=1, max_length=200)
+    command: list[str] = Field(min_length=1, max_length=64)
+    cpu_limit: float = Field(gt=0)
+    memory_mib: int = Field(ge=64)
+    storage_mib: int = Field(default=512, ge=64, le=10 * 1024)
+    timeout_seconds: int = Field(default=300, ge=1, le=86400)
+    network_enabled: bool = False
+
+
+class WakeOnLanRequest(BaseModel):
+    mac_address: str = Field(min_length=12, max_length=32)
+    broadcast: str = Field(default="255.255.255.255", max_length=255)
+
+
+class StorageCleanupRequest(BaseModel):
+    confirmed: bool = False
+
+
+class PrepareAccessRequest(BaseModel):
+    email: str = Field(default="", max_length=254)
+    ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+
+
 @dataclass(slots=True)
 class CoreRuntime:
     config: CoreConfig
@@ -236,6 +277,7 @@ class CoreRuntime:
     notifications: NotificationService
     automation: AutomationService
     support: SupportBundleService
+    control: ControlCenterService
     started_monotonic: float
 
 
@@ -299,9 +341,7 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
     recovery = RecoveryService(database, repository, storage)
     recovery.recover_interrupted_jobs()
     tls_identity = (
-        load_or_create_tls_identity(config)
-        if config.lan_enabled or config.remote_enabled
-        else None
+        load_or_create_tls_identity(config) if config.lan_enabled or config.remote_enabled else None
     )
     tunnels = TunnelProviderRegistry.built_in(config)
     integrations = IntegrationRegistry.built_in(tunnels, config)
@@ -325,6 +365,18 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         notifications,
         integrations,
     )
+    control = ControlCenterService(
+        config,
+        database,
+        repository,
+        storage,
+        diagnostics,
+        tunnels,
+        integrations,
+        notifications,
+        automation,
+        tls_identity.fingerprint if tls_identity is not None else "",
+    )
     return CoreRuntime(
         config=config,
         secrets=secrets_store,
@@ -340,6 +392,7 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
         notifications=notifications,
         automation=automation,
         support=support,
+        control=control,
         started_monotonic=time.monotonic(),
     )
 
@@ -352,9 +405,11 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         runtime.diagnostics.start_monitor()
         runtime.backup_automation.start_scheduler()
         runtime.automation.start_scheduler()
+        runtime.control.start()
         try:
             yield
         finally:
+            runtime.control.stop()
             runtime.automation.stop_scheduler()
             runtime.backup_automation.stop_scheduler()
             runtime.diagnostics.stop_monitor()
@@ -450,19 +505,34 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         request.state.external_request = external_request
         remote_address = request.client.host if request.client else "unknown"
         local_host = (request.url.hostname or "").casefold()
-        invalid_local_host = not lan_request and not external_request and local_host not in {
-            "127.0.0.1",
-            "::1",
-            "localhost",
-            "testserver",
-        }
+        invalid_local_host = (
+            not lan_request
+            and not external_request
+            and local_host
+            not in {
+                "127.0.0.1",
+                "::1",
+                "localhost",
+                "testserver",
+            }
+        )
         restricted_path = request.url.path.startswith("/v1/admin") or request.url.path in {
             "/docs",
             "/redoc",
             "/openapi.json",
         }
+        browser_policy = runtime.control.settings()["browser_access"] if zrok_request else "all"
+        zrok_policy_denied = zrok_request and (
+            browser_policy == "nobody"
+            or (browser_policy == "approved" and request.url.path.startswith("/v1/public/shares/"))
+        )
         if invalid_local_host:
             response = JSONResponse(status_code=400, content={"detail": "invalid host header"})
+        elif zrok_policy_denied:
+            response = JSONResponse(
+                status_code=403,
+                content={"detail": "browser access is blocked by administrator policy"},
+            )
         elif (lan_request and restricted_path) or (
             external_request and not remote_client_path_allowed(request.url.path)
         ):
@@ -492,6 +562,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                     "/v1/admin/automation",
                     "/v1/admin/notifications",
                     "/v1/admin/integrations",
+                    "/v1/admin/control-center",
                     "/v1/mobile/admin/server-mode",
                     "/v1/mobile/admin/diagnostics/scans",
                     "/v1/mobile/admin/automation/settings",
@@ -507,6 +578,8 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                 content={"detail": "server is in emergency read-only mode"},
             )
         else:
+            if request.url.path.startswith(("/v1/spaces", "/v1/uploads", "/v1/shares")):
+                runtime.control.note_access()
             response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
@@ -548,9 +621,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
 
     def require_device(
         request: Request,
-        remote_session: Annotated[
-            str | None, Header(alias="X-Cloud-Remote-Session")
-        ] = None,
+        remote_session: Annotated[str | None, Header(alias="X-Cloud-Remote-Session")] = None,
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),  # noqa: B008
     ) -> DeviceRecord:
         if credentials is None or credentials.scheme.casefold() != "bearer":
@@ -562,9 +633,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                     remote_session or "",
                     user_id=device.user_id,
                     device_id=device.id,
-                    password_version=runtime.repository.user_password_version(
-                        device.user_id
-                    ),
+                    password_version=runtime.repository.user_password_version(device.user_id),
                 )
             return device
         except (InvalidCredential, PermissionDeniedError) as exc:
@@ -614,7 +683,8 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         now = int(time.time())
         with consumed_mobile_confirmations_lock:
             expired = [
-                key for key, consumed_at in consumed_mobile_confirmations.items()
+                key
+                for key, consumed_at in consumed_mobile_confirmations.items()
                 if consumed_at <= now - 300
             ]
             for key in expired:
@@ -637,6 +707,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     @app.exception_handler(InvalidCredential)
     @app.exception_handler(InvalidLogicalPath)
     @app.exception_handler(InvalidStorageRoot)
+    @app.exception_handler(ValueError)
     async def validation_handler(request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse(status_code=422, content={"detail": str(exc)})
 
@@ -752,6 +823,139 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     )
     def test_integration(provider_id: str) -> dict[str, Any]:
         return runtime.notifications.test_provider(provider_id)
+
+    @app.get(
+        "/v1/admin/control-center",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def control_center_overview() -> dict[str, Any]:
+        return runtime.control.overview()
+
+    @app.put(
+        "/v1/admin/control-center/settings",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def update_control_center_settings(body: dict[str, Any]) -> dict[str, Any]:
+        update = dict(body)
+        confirmed = update.pop("confirmed", False) is True
+        power = update.get("power")
+        current_power = runtime.control.settings().get("power", {})
+        enabling_system_sleep = (
+            isinstance(power, dict)
+            and power.get("allow_os_sleep") is True
+            and current_power.get("allow_os_sleep") is not True
+        )
+        enabling_system_shutdown = (
+            isinstance(power, dict)
+            and power.get("allow_os_shutdown") is True
+            and current_power.get("allow_os_shutdown") is not True
+        )
+        if (enabling_system_sleep or enabling_system_shutdown) and not confirmed:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="explicit confirmation is required to enable operating-system power actions",
+            )
+        return runtime.control.update_settings(update)
+
+    @app.post(
+        "/v1/admin/control-center/presets/{preset_id}/apply",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def apply_system_preset(preset_id: str) -> dict[str, Any]:
+        return runtime.control.apply_preset(preset_id)
+
+    @app.post(
+        "/v1/admin/control-center/automations/{template_id}/install",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_201_CREATED,
+    )
+    def install_automation_template(template_id: str) -> dict[str, Any]:
+        return runtime.control.install_template(template_id)
+
+    @app.get(
+        "/v1/admin/control-center/reports",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def list_report_schedules() -> list[dict[str, Any]]:
+        return runtime.control.list_reports()
+
+    @app.post(
+        "/v1/admin/control-center/reports",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_report_schedule(body: ReportScheduleRequest) -> dict[str, Any]:
+        return runtime.control.save_report(**body.model_dump())
+
+    @app.put(
+        "/v1/admin/control-center/reports/{report_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def update_report_schedule(report_id: str, body: ReportScheduleRequest) -> dict[str, Any]:
+        return runtime.control.save_report(report_id=report_id, **body.model_dump())
+
+    @app.post(
+        "/v1/admin/control-center/reports/run",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def run_report(body: GenerateReportRequest) -> dict[str, Any]:
+        return runtime.control.generate_report(
+            body.sections, delivery_channels=body.delivery_channels
+        )
+
+    @app.get(
+        "/v1/admin/control-center/cells",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def list_sandbox_cells() -> list[dict[str, Any]]:
+        return runtime.control.list_cells()
+
+    @app.post(
+        "/v1/admin/control-center/cells",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_sandbox_cell(body: SandboxCellRequest) -> dict[str, Any]:
+        return runtime.control.create_cell(**body.model_dump())
+
+    @app.post(
+        "/v1/admin/control-center/cells/{cell_id}/run",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def run_sandbox_cell(cell_id: str) -> dict[str, Any]:
+        try:
+            return runtime.control.run_cell(cell_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v1/admin/control-center/wake-on-lan",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def send_wake_on_lan(body: WakeOnLanRequest) -> dict[str, Any]:
+        return runtime.control.wake_on_lan(body.mac_address, broadcast=body.broadcast)
+
+    @app.post(
+        "/v1/admin/storage-roots/{root_id}/cleanup",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def cleanup_storage_root(root_id: str, body: StorageCleanupRequest) -> dict[str, int]:
+        if not body.confirmed:
+            raise HTTPException(status_code=409, detail="cleanup requires confirmation")
+        return runtime.storage.cleanup_root_temporary(root_id)
 
     @app.get(
         "/v1/admin/notifications",
@@ -943,10 +1147,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         dependencies=[Depends(require_manager)],
     )
     def list_diagnostic_scans() -> list[dict[str, Any]]:
-        return [
-            runtime.diagnostics.scan_to_dict(item)
-            for item in runtime.diagnostics.list_scans()
-        ]
+        return [runtime.diagnostics.scan_to_dict(item) for item in runtime.diagnostics.list_scans()]
 
     @app.post(
         "/v1/admin/diagnostics/scans",
@@ -980,9 +1181,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     ) -> list[dict[str, Any]]:
         return [
             runtime.diagnostics.incident_to_dict(item)
-            for item in runtime.diagnostics.list_incidents(
-                include_resolved=include_resolved
-            )
+            for item in runtime.diagnostics.list_incidents(include_resolved=include_resolved)
         ]
 
     @app.post(
@@ -1290,12 +1489,8 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         body: CreateBackupVerificationRequest,
         background_tasks: BackgroundTasks,
     ) -> dict[str, Any]:
-        verification = runtime.backup_automation.create_verification(
-            job_id, body.target_root_id
-        )
-        background_tasks.add_task(
-            runtime.backup_automation.run_verification, verification.id
-        )
+        verification = runtime.backup_automation.create_verification(job_id, body.target_root_id)
+        background_tasks.add_task(runtime.backup_automation.run_verification, verification.id)
         return runtime.backup_automation.verification_to_dict(verification)
 
     @app.get(
@@ -1450,7 +1645,54 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             role=body.role,
             password=(body.password.get_secret_value() if body.password is not None else None),
         )
-        return {"user": asdict(user), "personal_space": asdict(space)}
+        result: dict[str, Any] = {
+            "user": asdict(user),
+            "personal_space": asdict(space),
+        }
+        if body.prepare_access:
+            access = runtime.control.prepare_user_access(user.id, email=body.email)
+            access["download_url"] = f"/v1/admin/access-packages/{access['invitation_id']}"
+            result["access_package"] = access
+        return result
+
+    @app.post(
+        "/v1/admin/users/{user_id}/access-package",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_201_CREATED,
+    )
+    def prepare_user_access(user_id: str, body: PrepareAccessRequest) -> dict[str, Any]:
+        result = runtime.control.prepare_user_access(
+            user_id, email=body.email, ttl_seconds=body.ttl_seconds
+        )
+        result["download_url"] = f"/v1/admin/access-packages/{result['invitation_id']}"
+        return result
+
+    @app.get(
+        "/v1/admin/access-packages/{invitation_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def download_access_package(invitation_id: str) -> Response:
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", invitation_id):
+            raise HTTPException(status_code=404, detail="access package not found")
+        path = (
+            runtime.config.data_directory
+            / "access-packages"
+            / f"access-{invitation_id}.cloud-access.json"
+        ).resolve()
+        expected_parent = (runtime.config.data_directory / "access-packages").resolve()
+        if path.parent != expected_parent or not path.is_file():
+            raise HTTPException(status_code=404, detail="access package not found")
+        return Response(
+            content=path.read_bytes(),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="access-{invitation_id}.cloud-access.json"'
+                )
+            },
+        )
 
     @app.put(
         "/v1/admin/users/{user_id}/password",
@@ -1522,6 +1764,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     def mobile_admin_overview() -> dict[str, Any]:
         diagnostics = runtime.diagnostics.overview()
         zrok = runtime.tunnels.status("zrok")
+        control = runtime.control.overview()
         return {
             "summary": runtime.repository.summary(),
             "server_mode": runtime.recovery.server_mode(),
@@ -1549,6 +1792,16 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                 for item in runtime.storage.list_backup_jobs(limit=10)
             ],
             "automation": runtime.automation.overview()["scheduler"],
+            "control": {
+                "profile": control["settings"]["profile"],
+                "interface_mode": control["settings"]["interface_mode"],
+                "security_mode": control["settings"]["security"]["mode"],
+                "browser_access": control["settings"]["browser_access"],
+                "power": control["power"],
+                "report_schedules": len(control["reports"]["schedules"]),
+                "sandbox_available": control["sandbox"]["available"],
+                "sandbox_runtime": control["sandbox"]["runtime"],
+            },
         }
 
     @app.post(
@@ -1599,7 +1852,12 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             body.role,
             body.password.get_secret_value() if body.password else None,
         )
-        return {"user": asdict(user), "space": asdict(space)}
+        result: dict[str, Any] = {"user": asdict(user), "space": asdict(space)}
+        if body.prepare_access:
+            result["access_package"] = runtime.control.prepare_user_access(
+                user.id, email=body.email
+            )
+        return result
 
     @app.put(
         "/v1/mobile/admin/users/{user_id}/password",
@@ -1612,7 +1870,9 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         device: DeviceRecord = Depends(require_mobile_admin),  # noqa: B008
     ) -> dict[str, Any]:
         consume_mobile_confirmation(confirmation, device=device, action="user.password")
-        return asdict(runtime.repository.set_user_password(user_id, body.password.get_secret_value()))
+        return asdict(
+            runtime.repository.set_user_password(user_id, body.password.get_secret_value())
+        )
 
     @app.put(
         "/v1/mobile/admin/users/{user_id}/enabled",
@@ -1997,11 +2257,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         logical_path: Annotated[str, Path(min_length=1, max_length=1024)],
         device: DeviceRecord = Depends(require_device),  # noqa: B008
     ):
-        return {
-            "deleted": runtime.storage.delete_directory(
-                space_id, device.user_id, logical_path
-            )
-        }
+        return {"deleted": runtime.storage.delete_directory(space_id, device.user_id, logical_path)}
 
     @app.post("/v1/spaces/{space_id}/moves", tags=["files"])
     def move_entry(

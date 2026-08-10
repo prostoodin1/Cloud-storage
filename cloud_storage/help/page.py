@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -23,6 +23,8 @@ from cloud_storage.ui.widgets import make_header
 
 class HelpPage(QWidget):
     """FAQ browser and private retrieval assistant shared by Manager and Client."""
+
+    navigate_requested = Signal(str)
 
     def __init__(
         self,
@@ -117,6 +119,10 @@ class HelpPage(QWidget):
         article_layout.addWidget(self.article_category)
         article_layout.addWidget(self.article_title)
         article_layout.addWidget(self.article_answer, 1)
+        self.navigate_button = QPushButton("Перейти к этой функции")
+        self.navigate_button.setProperty("primary", True)
+        self.navigate_button.clicked.connect(self._navigate_to_selected)
+        article_layout.addWidget(self.navigate_button)
 
         splitter.addWidget(browser_card)
         splitter.addWidget(article_card)
@@ -220,6 +226,8 @@ class HelpPage(QWidget):
         self.article_category.setText(article.category.upper())
         self.article_title.setText(article.question)
         self.article_answer.setPlainText(article.answer)
+        self.navigate_button.setProperty("route", self._route_for_article(article))
+        self.navigate_button.setVisible(self.audience == "server")
 
     def ask_question(self) -> None:
         question = self.question_input.text().strip()
@@ -249,3 +257,35 @@ class HelpPage(QWidget):
         self.knowledge_status.setText(
             f"SQLite-база · {len(self.knowledge.search('', self.audience, limit=100))} статей{suffix}"
         )
+
+    def _navigate_to_selected(self) -> None:
+        route = str(self.navigate_button.property("route") or "help")
+        self.navigate_requested.emit(route)
+
+    @staticmethod
+    def _route_for_article(article: KnowledgeArticle) -> str:
+        text = f"{article.category} {article.question} {article.keywords}".casefold()
+        routes = (
+            (("диск", "накопител", "зеркал", "ssd", "hdd"), "disks"),
+            (("приём", "загруз", "скачив", "кэш"), "receive"),
+            (("отправ", "выгруз", "share"), "send"),
+            (("обновлен", "верс"), "updates"),
+            (
+                (
+                    "автомат",
+                    "безопас",
+                    "пользовател",
+                    "zrok",
+                    "сеть",
+                    "питан",
+                    "отчёт",
+                    "бот",
+                    "настрой",
+                ),
+                "system",
+            ),
+        )
+        for words, route in routes:
+            if any(word in text for word in words):
+                return route
+        return "dashboard"

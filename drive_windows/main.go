@@ -805,6 +805,11 @@ func run() error {
 		return err
 	}
 	defer mounted.Unmount()
+	rootPath, rootErr := windows.UTF16PtrFromString(letter + ":\\")
+	volumeLabel, labelErr := windows.UTF16PtrFromString("Личный диск")
+	if rootErr == nil && labelErr == nil {
+		_ = windows.SetVolumeLabel(rootPath, volumeLabel)
+	}
 	baseStatus.State = "ready"
 	baseStatus.Detail = "Ленивое скачивание и запись на сервер включены"
 	writeStatus(statusPath, baseStatus)

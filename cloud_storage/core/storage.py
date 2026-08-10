@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import stat
 import threading
+import time
 import unicodedata
 import uuid
 from collections.abc import Iterator
@@ -553,14 +554,10 @@ class StorageService:
             raise StorageCapacityError("upload exceeds personal storage quota")
         root = self._select_root(expected_size)
         upload_id = str(uuid.uuid4())
-        object_relative = (
-            Path("objects") / space_id / upload_id[:2] / f"{upload_id}.blob"
-        )
+        object_relative = Path("objects") / space_id / upload_id[:2] / f"{upload_id}.blob"
         staging_root = self._select_staging_path(expected_size, root)
         staging_directory = (
-            staging_root / ".staging"
-            if staging_root == root.path
-            else staging_root / "incoming"
+            staging_root / ".staging" if staging_root == root.path else staging_root / "incoming"
         )
         staging_directory.mkdir(parents=True, exist_ok=True)
         temporary_path = staging_directory / f"{upload_id}.resume"
@@ -780,6 +777,60 @@ class StorageService:
                 cleaned += 1
         return cleaned
 
+    def cleanup_root_temporary(self, root_id: str) -> dict[str, int]:
+        """Remove only expired sessions and old unreferenced staging files."""
+
+        root = next((item for item in self.list_roots() if item.id == root_id), None)
+        if root is None:
+            raise NotFoundError("storage root not found")
+        expired_sessions = self.cleanup_expired_uploads()
+        staging = (root.path / ".staging").resolve()
+        staging.mkdir(parents=True, exist_ok=True)
+        with self.database.connection() as connection:
+            active = {
+                str(Path(row["staging_path"]).resolve())
+                for row in connection.execute(
+                    "SELECT staging_path FROM upload_sessions WHERE status = 'active'"
+                ).fetchall()
+                if row["staging_path"]
+            }
+        cutoff = time.time() - 24 * 60 * 60
+        removed_files = 0
+        removed_bytes = 0
+        for candidate in staging.rglob("*"):
+            try:
+                resolved = candidate.resolve(strict=True)
+                if (
+                    not resolved.is_file()
+                    or staging not in resolved.parents
+                    or str(resolved) in active
+                    or resolved.stat().st_mtime > cutoff
+                ):
+                    continue
+                size = resolved.stat().st_size
+                self._make_staging_file_writable(resolved)
+                resolved.unlink()
+                removed_files += 1
+                removed_bytes += size
+            except OSError:
+                continue
+        self.repository.record_audit(
+            actor_type="manager",
+            actor_id=None,
+            action="storage.root.temporary-cleaned",
+            target_type="storage_root",
+            target_id=root_id,
+            detail=(
+                f"Удалено временных файлов: {removed_files}; "
+                f"просроченных сессий: {expired_sessions}"
+            ),
+        )
+        return {
+            "expired_sessions": expired_sessions,
+            "removed_files": removed_files,
+            "removed_bytes": removed_bytes,
+        }
+
     def set_transfer_settings(self, *, staging_enabled: bool, staging_path: str) -> dict[str, Any]:
         prepared_path = ""
         if staging_enabled:
@@ -822,9 +873,7 @@ class StorageService:
 
     def transfer_settings(self) -> dict[str, Any]:
         with self.database.connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM transfer_settings WHERE id = 1"
-            ).fetchone()
+            row = connection.execute("SELECT * FROM transfer_settings WHERE id = 1").fetchone()
         enabled = bool(row["staging_enabled"]) if row else False
         path_text = str(row["staging_path"]) if row else ""
         available = False
@@ -1307,9 +1356,7 @@ class StorageService:
 
     def _require_server_writable(self) -> None:
         with self.database.connection() as connection:
-            row = connection.execute(
-                "SELECT mode FROM server_state WHERE id = 1"
-            ).fetchone()
+            row = connection.execute("SELECT mode FROM server_state WHERE id = 1").fetchone()
         if row is not None and row["mode"] != "normal":
             raise ConflictError("server is in emergency read-only mode")
 
@@ -1927,8 +1974,7 @@ class StorageService:
         parts = PurePosixPath(logical_path).parts
         parents = ["/".join(parts[:index]) for index in range(1, len(parts))]
         file_row = connection.execute(
-            "SELECT 1 FROM files "
-            "WHERE space_id = ? AND logical_path = ? AND deleted_at IS NULL",
+            "SELECT 1 FROM files WHERE space_id = ? AND logical_path = ? AND deleted_at IS NULL",
             (space_id, logical_path),
         ).fetchone()
         directory_row = connection.execute(
@@ -2157,9 +2203,7 @@ class StorageService:
             usage = shutil.disk_usage(target.path)
         except OSError as exc:
             raise StorageCapacityError("target storage is unavailable") from exc
-        projected_percent = (
-            (usage.used + total_bytes) / usage.total * 100 if usage.total else 100
-        )
+        projected_percent = (usage.used + total_bytes) / usage.total * 100 if usage.total else 100
         if (
             usage.free - total_bytes < target.min_free_bytes
             or projected_percent > target.max_fill_percent
@@ -2186,8 +2230,7 @@ class StorageService:
                 target_type="maintenance_job",
                 target_id=job_id,
                 detail=(
-                    f"Перенос {source.id} → {target.id}: объектов {total_files}, "
-                    f"байт {total_bytes}"
+                    f"Перенос {source.id} → {target.id}: объектов {total_files}, байт {total_bytes}"
                 ),
             )
         return self.get_migration_job(job_id)
@@ -2238,9 +2281,7 @@ class StorageService:
             usage = shutil.disk_usage(target.path)
         except OSError as exc:
             raise StorageCapacityError("backup storage is unavailable") from exc
-        projected_percent = (
-            (usage.used + total_bytes) / usage.total * 100 if usage.total else 100
-        )
+        projected_percent = (usage.used + total_bytes) / usage.total * 100 if usage.total else 100
         if (
             usage.free - total_bytes < target.min_free_bytes
             or projected_percent > target.max_fill_percent
@@ -2285,9 +2326,7 @@ class StorageService:
 
     def get_backup_job(self, job_id: str) -> BackupJobRecord:
         with self.database.connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM backup_jobs WHERE id = ?", (job_id,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM backup_jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None:
             raise NotFoundError("backup job not found")
         return self._backup_job(row)
@@ -2348,7 +2387,9 @@ class StorageService:
                 source_root = Path(source_root_path).resolve(strict=True)
                 source = (source_root / str(item["object_path"])).resolve(strict=True)
                 if source_root not in source.parents or not source.is_file() or source.is_symlink():
-                    raise PermissionDeniedError("backup source object failed containment validation")
+                    raise PermissionDeniedError(
+                        "backup source object failed containment validation"
+                    )
                 destination_relative = (
                     Path("objects")
                     / str(item["entity"])
@@ -2394,9 +2435,7 @@ class StorageService:
                 os.fsync(handle.fileno())
             backups_directory = target_root.path / "backups"
             backups_directory.mkdir(exist_ok=True)
-            final_relative = Path("backups") / (
-                utc_now().strftime("%Y%m%dT%H%M%SZ") + "-" + job_id
-            )
+            final_relative = Path("backups") / (utc_now().strftime("%Y%m%dT%H%M%SZ") + "-" + job_id)
             final_path = target_root.path / final_relative
             os.replace(staging, final_path)
             staging = None
@@ -2522,7 +2561,9 @@ class StorageService:
 
     @staticmethod
     def _backup_job(row: sqlite3.Row) -> BackupJobRecord:
-        return BackupJobRecord(**{field: row[field] for field in BackupJobRecord.__dataclass_fields__})
+        return BackupJobRecord(
+            **{field: row[field] for field in BackupJobRecord.__dataclass_fields__}
+        )
 
     @staticmethod
     def backup_to_dict(job: BackupJobRecord) -> dict[str, Any]:
@@ -2727,7 +2768,9 @@ class StorageService:
                     connection,
                     actor_type="manager",
                     actor_id=None,
-                    action="mirror.reconcile.completed" if not failed_files else "mirror.reconcile.degraded",
+                    action="mirror.reconcile.completed"
+                    if not failed_files
+                    else "mirror.reconcile.degraded",
                     target_type="mirror_job",
                     target_id=job_id,
                     detail=(
@@ -2805,11 +2848,7 @@ class StorageService:
             source = (source_root.path / record.object_path).resolve(strict=True)
         except OSError as exc:
             raise NotFoundError("mirror source object is unavailable") from exc
-        if (
-            source_root.path not in source.parents
-            or not source.is_file()
-            or source.is_symlink()
-        ):
+        if source_root.path not in source.parents or not source.is_file() or source.is_symlink():
             raise PermissionDeniedError("mirror source object failed containment validation")
         try:
             usage = shutil.disk_usage(target.path)
@@ -3041,9 +3080,7 @@ class StorageService:
                     action="storage.migration.completed",
                     target_type="maintenance_job",
                     target_id=job_id,
-                    detail=(
-                        "Перенос завершён; исходные объекты сохранены как страховочные копии"
-                    ),
+                    detail=("Перенос завершён; исходные объекты сохранены как страховочные копии"),
                 )
         except Exception as exc:
             with self.database.transaction() as connection:
@@ -3308,9 +3345,7 @@ class StorageService:
         else:
             progress_bytes = record.network_bytes
         progress_percent = (
-            min(100.0, progress_bytes / record.total_bytes * 100)
-            if record.total_bytes
-            else 0.0
+            min(100.0, progress_bytes / record.total_bytes * 100) if record.total_bytes else 0.0
         )
         return {
             **asdict(record),

@@ -61,10 +61,61 @@ class CoreClient:
     def integrations(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/integrations")
 
+    def control_center(self) -> dict[str, Any]:
+        return self._manager_request("/v1/admin/control-center", timeout=5.0)
+
+    def update_control_settings(self, values: dict[str, Any]) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/control-center/settings", method="PUT", payload=values
+        )
+
+    def apply_system_preset(self, preset_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/control-center/presets/{preset_id}/apply", method="POST"
+        )
+
+    def install_automation_template(self, template_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/control-center/automations/{template_id}/install",
+            method="POST",
+        )
+
+    def create_report_schedule(self, values: dict[str, Any]) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/control-center/reports", method="POST", payload=values
+        )
+
+    def run_control_report(self, values: dict[str, Any]) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/control-center/reports/run",
+            method="POST",
+            payload=values,
+            timeout=15.0,
+        )
+
+    def create_sandbox_cell(self, values: dict[str, Any]) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/control-center/cells", method="POST", payload=values
+        )
+
+    def run_sandbox_cell(self, cell_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/control-center/cells/{cell_id}/run",
+            method="POST",
+            timeout=300.0,
+        )
+
     def test_integration(self, provider_id: str) -> dict[str, Any]:
         return self._manager_request(
             f"/v1/admin/integrations/{provider_id}/test",
             method="POST",
+        )
+
+    def wake_on_lan(self, mac_address: str, broadcast: str) -> dict[str, Any]:
+        return self._manager_request(
+            "/v1/admin/control-center/wake-on-lan",
+            method="POST",
+            payload={"mac_address": mac_address, "broadcast": broadcast},
         )
 
     def list_notifications(
@@ -99,9 +150,7 @@ class CoreClient:
         return self._manager_request("/v1/admin/automation/preview")
 
     def preview_automation_rule(self, rule_id: str) -> dict[str, Any]:
-        return self._manager_request(
-            f"/v1/admin/automation/rules/{rule_id}/preview"
-        )
+        return self._manager_request(f"/v1/admin/automation/rules/{rule_id}/preview")
 
     def create_automation_rule(self, values: dict[str, Any]) -> dict[str, Any]:
         return self._manager_request(
@@ -229,6 +278,13 @@ class CoreClient:
 
     def list_storage_roots(self) -> list[dict[str, Any]]:
         return self._manager_request("/v1/admin/storage-roots")
+
+    def cleanup_storage_root(self, root_id: str) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/storage-roots/{root_id}/cleanup",
+            method="POST",
+            payload={"confirmed": True},
+        )
 
     def transfers(self, limit: int = 100) -> dict[str, Any]:
         safe_limit = max(1, min(int(limit), 500))
@@ -392,6 +448,8 @@ class CoreClient:
         quota_gib: int,
         role: str = "member",
         password: str | None = None,
+        email: str = "",
+        prepare_access: bool = True,
     ) -> dict[str, Any]:
         return self._manager_request(
             "/v1/admin/users",
@@ -402,7 +460,18 @@ class CoreClient:
                 "quota_gib": quota_gib,
                 "role": role,
                 "password": password,
+                "email": email,
+                "prepare_access": prepare_access,
             },
+        )
+
+    def prepare_user_access(
+        self, user_id: str, *, email: str = "", ttl_seconds: int = 3600
+    ) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/users/{user_id}/access-package",
+            method="POST",
+            payload={"email": email, "ttl_seconds": ttl_seconds},
         )
 
     def set_user_password(self, user_id: str, password: str) -> dict[str, Any]:
@@ -538,18 +607,14 @@ class CoreSupervisor:
         environment["CLOUD_STORAGE_LAN_HOST"] = self.config.lan_host
         environment["CLOUD_STORAGE_LAN_PORT"] = str(self.config.lan_port)
         environment["CLOUD_STORAGE_DISCOVERY_PORT"] = str(self.config.discovery_port)
-        environment["CLOUD_STORAGE_REMOTE_ENABLED"] = (
-            "1" if self.config.remote_enabled else "0"
-        )
+        environment["CLOUD_STORAGE_REMOTE_ENABLED"] = "1" if self.config.remote_enabled else "0"
         environment["CLOUD_STORAGE_REMOTE_HOST"] = self.config.remote_host
         environment["CLOUD_STORAGE_REMOTE_PORT"] = str(self.config.remote_port)
         environment["CLOUD_STORAGE_REMOTE_PUBLIC_URL"] = self.config.remote_public_url
         environment["CLOUD_STORAGE_REMOTE_PAIRING_ENABLED"] = (
             "1" if self.config.remote_pairing_enabled else "0"
         )
-        environment["CLOUD_STORAGE_ZROK_ENABLED"] = (
-            "1" if self.config.zrok_enabled else "0"
-        )
+        environment["CLOUD_STORAGE_ZROK_ENABLED"] = "1" if self.config.zrok_enabled else "0"
         environment["CLOUD_STORAGE_ZROK_HOST"] = self.config.zrok_host
         environment["CLOUD_STORAGE_ZROK_PORT"] = str(self.config.zrok_port)
         environment["CLOUD_STORAGE_ZROK_EXECUTABLE"] = self.config.zrok_executable

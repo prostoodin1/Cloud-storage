@@ -45,6 +45,7 @@ def _value(value: object | None, suffix: str = "") -> str:
 class DiskDetailDialog(QDialog):
     configuration_saved = Signal(str, object)
     refresh_requested = Signal()
+    cleanup_requested = Signal(str)
 
     def __init__(
         self,
@@ -81,6 +82,7 @@ class DiskDetailDialog(QDialog):
         root.addLayout(header)
 
         tabs = QTabWidget()
+        self.tabs = tabs
         tabs.addTab(self._overview_tab(), "Обзор")
         tabs.addTab(self._configuration_tab(configuration), "Настройка")
         tabs.addTab(self._operations_tab(configuration), "Состояние")
@@ -225,6 +227,30 @@ class DiskDetailDialog(QDialog):
         self.mode.addItem("Отключён в менеджере", DiskMode.DISCONNECTED.value)
         self.mode.setCurrentIndex(max(0, self.mode.findData(configuration.mode.value)))
         layout.addWidget(self.mode)
+
+        actions = QHBoxLayout()
+        stop = QPushButton("Остановить запись")
+        stop.clicked.connect(
+            lambda: self.mode.setCurrentIndex(self.mode.findData(DiskMode.WRITES_PAUSED.value))
+        )
+        maintenance = QPushButton("Обслуживание")
+        maintenance.clicked.connect(
+            lambda: self.mode.setCurrentIndex(self.mode.findData(DiskMode.MAINTENANCE.value))
+        )
+        ignore = QPushButton("Игнорировать")
+        ignore.clicked.connect(
+            lambda: self.role.setCurrentIndex(self.role.findData(DiskRole.UNUSED.value))
+        )
+        check = QPushButton("Проверить")
+        check.clicked.connect(self.refresh_requested)
+        clean = QPushButton("Очистить временное")
+        clean.clicked.connect(lambda: self.cleanup_requested.emit(self.disk.id))
+        reassign = QPushButton("Переназначить")
+        reassign.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
+        for button in (stop, maintenance, ignore, check, clean, reassign):
+            actions.addWidget(button)
+        actions.addStretch()
+        layout.addLayout(actions)
 
         safety = QFrame()
         safety.setProperty("accent", "red")
@@ -395,6 +421,8 @@ class CreateUserDialog(QDialog):
         self.username.setPlaceholderText("ivan")
         self.display_name = QLineEdit()
         self.display_name.setPlaceholderText("Иван")
+        self.email = QLineEdit()
+        self.email.setPlaceholderText("user@example.com (необязательно)")
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         self.password.setPlaceholderText("Минимум 10 символов")
@@ -411,6 +439,7 @@ class CreateUserDialog(QDialog):
         form.addRow("Пароль", self.password)
         form.addRow("Повтор пароля", self.password_confirmation)
         form.addRow("Личное хранилище", self.quota)
+        form.addRow("Email для файла входа", self.email)
         form.addRow("", self.admin)
         layout.addLayout(form)
         safety = QLabel(
@@ -462,6 +491,8 @@ class CreateUserDialog(QDialog):
             "password": self.password.text(),
             "quota_gib": self.quota.value(),
             "role": "admin" if self.admin.isChecked() else "member",
+            "email": self.email.text().strip(),
+            "prepare_access": True,
         }
 
 

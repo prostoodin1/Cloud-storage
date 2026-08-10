@@ -1,3 +1,4 @@
+import os
 import stat
 
 import pytest
@@ -18,6 +19,18 @@ def test_managed_upload_becomes_read_only_and_non_executable(tmp_path) -> None:
     mode = stat.S_IMODE(upload.stat().st_mode)
     assert not mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     assert not mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+    if os.name == "nt":
+        import ntsecuritycon
+        import win32security
+
+        descriptor = win32security.GetNamedSecurityInfo(
+            str(upload),
+            win32security.SE_FILE_OBJECT,
+            win32security.DACL_SECURITY_INFORMATION,
+        )
+        first_ace = descriptor.GetSecurityDescriptorDacl().GetAce(0)
+        assert first_ace[0][0] == win32security.ACCESS_DENIED_ACE_TYPE
+        assert first_ace[1] & ntsecuritycon.FILE_EXECUTE
 
 
 def test_security_policy_rejects_files_outside_storage(tmp_path) -> None:

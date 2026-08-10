@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
+from cloud_storage import __version__
 from cloud_storage.client.settings import ClientSettingsStore
 from cloud_storage.client.window import ClientWindow
 from cloud_storage.models import DiskSnapshot
@@ -94,6 +95,7 @@ def main() -> int:
             "Настройки",
             "Обновления",
             "Помощь",
+            "Система",
         ]
         main_captures: list[tuple[str, QPixmap]] = []
         for index, title in enumerate(main_names):
@@ -116,6 +118,9 @@ def main() -> int:
         save_contact_sheet(
             settings_captures, args.output / "settings-tabs.png", columns=3
         )
+        main_captures[-1][1].save(
+            str(args.output / f"CloudStorage-Server-Manager-{__version__}.png")
+        )
         window.close()
 
         client = ClientWindow(store=ClientSettingsStore(Path(temp) / "client"))
@@ -136,6 +141,9 @@ def main() -> int:
             app.processEvents()
             client_captures.append((title, client.grab()))
         save_contact_sheet(client_captures, args.output / "client-tabs.png", columns=2)
+        client_captures[1][1].save(
+            str(args.output / f"CloudStorage-Desktop-Client-{__version__}.png")
+        )
         client.close()
     print(
         f"Rendered {len(main_captures)} Manager tabs, "

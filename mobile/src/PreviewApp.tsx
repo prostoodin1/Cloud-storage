@@ -32,6 +32,22 @@ const overview: MobileAdminOverview = {
   backup_policies: [],
   backups: [],
   automation: { running: true, enabled: true, interval_seconds: 60 },
+  control: {
+    profile: 'recommended',
+    interface_mode: 'simple',
+    security_mode: 'advanced',
+    browser_access: 'approved',
+    power: {
+      source: 'mains',
+      percent: 100,
+      minutes_left: null,
+      idle_seconds: 42,
+      sleep_armed: false,
+    },
+    report_schedules: 2,
+    sandbox_available: true,
+    sandbox_runtime: 'docker',
+  },
 };
 
 const done = async () => undefined;

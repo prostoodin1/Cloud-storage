@@ -315,6 +315,8 @@ export class CloudApi {
         quota_gib: input.quotaGiB,
         role: input.role,
         password: input.password,
+        email: input.email,
+        prepare_access: true,
       }),
       headers: { 'X-Cloud-Admin-Confirmation': confirmationToken },
     });

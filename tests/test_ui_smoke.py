@@ -32,7 +32,7 @@ def test_main_window_smoke(tmp_path) -> None:
     window.refresh_disks()
     app.processEvents()
 
-    assert window.stack.count() == 7
+    assert window.stack.count() == 8
     assert window.receive_page.direction == "inbound"
     assert window.send_page.direction == "outbound"
     assert window.help_page.article_list.count() > 0
@@ -99,14 +99,9 @@ def test_every_settings_section_is_scrollable_and_has_explanatory_text(tmp_path)
         app.processEvents()
         section = page.stack.currentWidget()
         assert isinstance(section, QScrollArea)
-        assert (
-            section.horizontalScrollBarPolicy()
-            == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        assert section.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         text = " ".join(
-            label.text().strip()
-            for label in section.findChildren(QLabel)
-            if label.text().strip()
+            label.text().strip() for label in section.findChildren(QLabel) if label.text().strip()
         )
         assert len(text) > 40, page.section_list.currentItem().text()
         assert "станет активным" not in text

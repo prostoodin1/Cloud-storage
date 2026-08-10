@@ -41,3 +41,13 @@ coll = COLLECT(
     upx_exclude=[],
     name="CloudStorageClient",
 )
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="Cloud Storage Client.app",
+        bundle_identifier="com.cloudstorage.desktop-client",
+        info_plist={
+            "CFBundleDisplayName": "Cloud Storage Client",
+            "NSHighResolutionCapable": True,
+        },
+    )

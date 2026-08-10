@@ -355,11 +355,13 @@ CREATE TABLE IF NOT EXISTS automation_rules (
     trigger_type TEXT NOT NULL CHECK(trigger_type IN (
         'diagnostic_warning', 'diagnostic_critical', 'storage_low',
         'backup_failed', 'restore_failed', 'mirror_degraded',
-        'maintenance_failed', 'pending_device', 'tunnel_offline', 'scheduled'
+        'maintenance_failed', 'pending_device', 'tunnel_offline', 'power_outage',
+        'scheduled'
     )),
     action_type TEXT NOT NULL CHECK(action_type IN (
         'notify', 'quick_scan', 'full_scan', 'read_only', 'run_backup',
-        'reconcile_mirrors', 'restart_tunnel'
+        'reconcile_mirrors', 'restart_tunnel', 'sleep_after_hour',
+        'shutdown_after_hour'
     )),
     cooldown_seconds INTEGER NOT NULL DEFAULT 3600 CHECK(cooldown_seconds BETWEEN 60 AND 604800),
     system_rule INTEGER NOT NULL DEFAULT 0 CHECK(system_rule IN (0, 1)),
@@ -384,6 +386,51 @@ CREATE TABLE IF NOT EXISTS automation_settings (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     interval_seconds INTEGER NOT NULL DEFAULT 60 CHECK(interval_seconds BETWEEN 10 AND 3600),
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS control_settings (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    settings_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS report_schedules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    interval_hours INTEGER NOT NULL CHECK(interval_hours BETWEEN 1 AND 8760),
+    sections_json TEXT NOT NULL,
+    delivery_channels_json TEXT NOT NULL,
+    next_run_at TEXT,
+    last_run_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS report_runs (
+    id TEXT PRIMARY KEY,
+    schedule_id TEXT REFERENCES report_schedules(id) ON DELETE SET NULL,
+    status TEXT NOT NULL CHECK(status IN ('completed', 'failed')),
+    sections_json TEXT NOT NULL,
+    report_json TEXT NOT NULL,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sandbox_cells (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    image TEXT NOT NULL,
+    command_json TEXT NOT NULL,
+    cpu_limit REAL NOT NULL CHECK(cpu_limit > 0),
+    memory_mib INTEGER NOT NULL CHECK(memory_mib BETWEEN 64 AND 1048576),
+    storage_mib INTEGER NOT NULL CHECK(storage_mib BETWEEN 64 AND 10485760),
+    timeout_seconds INTEGER NOT NULL CHECK(timeout_seconds BETWEEN 1 AND 86400),
+    network_enabled INTEGER NOT NULL DEFAULT 0 CHECK(network_enabled IN (0, 1)),
+    status TEXT NOT NULL CHECK(status IN ('ready', 'running', 'completed', 'failed', 'unsupported')),
+    last_result TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
@@ -430,6 +477,12 @@ CREATE INDEX IF NOT EXISTS idx_automation_rules_enabled
     ON automation_rules(enabled, trigger_type);
 CREATE INDEX IF NOT EXISTS idx_automation_runs_created
     ON automation_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_report_schedules_due
+    ON report_schedules(enabled, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_report_runs_created
+    ON report_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sandbox_cells_updated
+    ON sandbox_cells(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp DESC);
 """
 
@@ -461,7 +514,8 @@ class Database:
             if "pruned_at" not in backup_columns:
                 connection.execute("ALTER TABLE backup_jobs ADD COLUMN pruned_at TEXT")
             upload_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(upload_sessions)").fetchall()
+                row[1]
+                for row in connection.execute("PRAGMA table_info(upload_sessions)").fetchall()
             }
             if "staging_path" not in upload_columns:
                 connection.execute("ALTER TABLE upload_sessions ADD COLUMN staging_path TEXT")
@@ -546,6 +600,14 @@ class Database:
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(14, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(15, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(16, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
             connection.commit()
 
     @staticmethod
@@ -553,7 +615,10 @@ class Database:
         row = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'automation_rules'"
         ).fetchone()
-        if row is None or "scheduled" in str(row["sql"]):
+        if row is None or all(
+            marker in str(row["sql"])
+            for marker in ("scheduled", "sleep_after_hour", "power_outage", "shutdown_after_hour")
+        ):
             return
         connection.execute("PRAGMA foreign_keys = OFF")
         try:
@@ -569,11 +634,13 @@ class Database:
                     trigger_type TEXT NOT NULL CHECK(trigger_type IN (
                         'diagnostic_warning', 'diagnostic_critical', 'storage_low',
                         'backup_failed', 'restore_failed', 'mirror_degraded',
-                        'maintenance_failed', 'pending_device', 'tunnel_offline', 'scheduled'
+                        'maintenance_failed', 'pending_device', 'tunnel_offline',
+                        'power_outage', 'scheduled'
                     )),
                     action_type TEXT NOT NULL CHECK(action_type IN (
                         'notify', 'quick_scan', 'full_scan', 'read_only', 'run_backup',
-                        'reconcile_mirrors', 'restart_tunnel'
+                        'reconcile_mirrors', 'restart_tunnel', 'sleep_after_hour',
+                        'shutdown_after_hour'
                     )),
                     cooldown_seconds INTEGER NOT NULL DEFAULT 3600
                         CHECK(cooldown_seconds BETWEEN 60 AND 604800),

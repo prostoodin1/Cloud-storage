@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import platform
 import time
 from collections.abc import Callable
@@ -108,9 +109,7 @@ class ClientWindow(QMainWindow):
         self.store = store or ClientSettingsStore()
         self.profile: ClientProfile = self.store.load()
         self.vault = DeviceTokenVault(self.store.data_directory, self.profile.profile_id)
-        self.session_vault = RemoteSessionVault(
-            self.store.data_directory, self.profile.profile_id
-        )
+        self.session_vault = RemoteSessionVault(self.store.data_directory, self.profile.profile_id)
         self.knowledge = KnowledgeBase(self.store.data_directory / "knowledge.db")
         self.transfer_store = TransferStore(self.store.data_directory / "transfers.db")
         self.offline_store = OfflineStore(self.store.data_directory / "offline.db")
@@ -311,8 +310,11 @@ class ClientWindow(QMainWindow):
         self.account_login_button.clicked.connect(self.login_new_device)
         self.connect_button = QPushButton("Подключиться по коду")
         self.connect_button.clicked.connect(self.connect_device)
+        self.import_access_button = QPushButton("Импортировать файл входа")
+        self.import_access_button.clicked.connect(self.import_access_file)
         enrollment_controls.addWidget(self.account_login_button)
         enrollment_controls.addWidget(self.connect_button)
+        enrollment_controls.addWidget(self.import_access_button)
         enrollment_controls.addStretch()
         card_layout.addLayout(enrollment_controls)
         controls = QHBoxLayout()
@@ -522,7 +524,9 @@ class ClientWindow(QMainWindow):
         self.offline_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.offline_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.offline_table.verticalHeader().setVisible(False)
-        self.offline_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.offline_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
         self.offline_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.ResizeToContents
         )
@@ -552,6 +556,45 @@ class ClientWindow(QMainWindow):
         layout.addLayout(actions)
         self._update_offline_actions()
         return page
+
+    def import_access_file(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Импортировать файл доступа Cloud Storage",
+            "",
+            "Cloud Storage access (*.cloud-access.json *.json)",
+        )
+        if not selected:
+            return
+        path = Path(selected)
+        try:
+            if path.stat().st_size > 64 * 1024:
+                raise ValueError("файл доступа слишком большой")
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if value.get("format") != "cloud-storage-access-v1":
+                raise ValueError("неподдерживаемый формат файла доступа")
+            addresses = value.get("addresses")
+            if not isinstance(addresses, list) or not addresses:
+                raise ValueError("в файле нет адреса сервера")
+            address = str(addresses[0]).strip()
+            code = str(value.get("one_time_code", "")).strip()
+            username = str(value.get("username", "")).strip()
+            fingerprint = str(value.get("certificate_fingerprint", "")).strip()
+            if not address or not code or not username:
+                raise ValueError("в файле не хватает данных входа")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(self, "Файл не импортирован", str(exc))
+            return
+        self.server_url.setText(address)
+        self.pairing_code.setText(code)
+        self.username.setText(username)
+        self.fingerprint.setText(fingerprint)
+        QMessageBox.information(
+            self,
+            "Данные входа загружены",
+            "Адрес, логин и одноразовый код заполнены. Введите новый пароль для "
+            "этого устройства и нажмите «Подключиться по коду».",
+        )
 
     def _load_profile(self) -> None:
         self._refresh_server_selector()
@@ -603,9 +646,7 @@ class ClientWindow(QMainWindow):
         self._connection_check_running = False
         self.profile = profile
         self.vault = DeviceTokenVault(self.store.data_directory, profile.profile_id)
-        self.session_vault = RemoteSessionVault(
-            self.store.data_directory, profile.profile_id
-        )
+        self.session_vault = RemoteSessionVault(self.store.data_directory, profile.profile_id)
         self.token = self.vault.load()
         self.remote_session = self.session_vault.load()
         self.api = None
@@ -727,7 +768,9 @@ class ClientWindow(QMainWindow):
             QMessageBox.warning(self, "Неверные параметры подключения", str(exc))
             return
         self.account_login_button.setEnabled(False)
-        self.connection_detail.setText("Проверяем логин и отправляем запрос на подтверждение устройства…")
+        self.connection_detail.setText(
+            "Проверяем логин и отправляем запрос на подтверждение устройства…"
+        )
         profile_id = self.profile.profile_id
 
         def login() -> dict[str, Any]:
@@ -998,10 +1041,10 @@ class ClientWindow(QMainWindow):
             return
         current_server = self.profile.server_url.rstrip("/")
         for transfer in self.transfer_store.list():
-            if (
-                transfer.server_url.rstrip("/") == current_server
-                and transfer.status in {"queued", "running"}
-            ):
+            if transfer.server_url.rstrip("/") == current_server and transfer.status in {
+                "queued",
+                "running",
+            }:
                 self.transfer_store.set_status(
                     transfer.id,
                     "paused",
@@ -1553,7 +1596,9 @@ class ClientWindow(QMainWindow):
             "failed": "Ошибка",
             "cancelled": "Отменено",
         }
-        detail = f"{format_bytes(transfer.transferred_bytes)} из {format_bytes(transfer.total_bytes)}"
+        detail = (
+            f"{format_bytes(transfer.transferred_bytes)} из {format_bytes(transfer.total_bytes)}"
+        )
         if transfer.error:
             detail += f" · {transfer.error}"
         state.setText(f"{labels[transfer.status]} · {detail}")
@@ -1565,9 +1610,7 @@ class ClientWindow(QMainWindow):
         progress.setValue(max(0, min(100, percent)))
         widgets["pause"].setVisible(transfer.status == "running")
         widgets["resume"].setVisible(transfer.status in {"paused", "failed"})
-        widgets["cancel"].setVisible(
-            transfer.status in {"queued", "running", "paused", "failed"}
-        )
+        widgets["cancel"].setVisible(transfer.status in {"queued", "running", "paused", "failed"})
         widgets["open"].setVisible(
             transfer.kind == "download"
             and transfer.status == "completed"
@@ -1788,7 +1831,9 @@ class ClientWindow(QMainWindow):
         self._offline_scan_running = False
         self.offline_refresh_button.setEnabled(True)
         self._render_offline_records(self.offline_store.list())
-        self.offline_summary.setText(f"Локальные изменения проверены · сервер недоступен: {message}")
+        self.offline_summary.setText(
+            f"Локальные изменения проверены · сервер недоступен: {message}"
+        )
 
     def _render_offline_records(self, records: list[OfflineRecord]) -> None:
         selected_id = self._selected_offline_id()
@@ -1808,7 +1853,9 @@ class ClientWindow(QMainWindow):
             name = QTableWidgetItem(record.logical_path)
             name.setData(Qt.ItemDataRole.UserRole, record.id)
             self.offline_table.setItem(row, 0, name)
-            self.offline_table.setItem(row, 1, QTableWidgetItem(labels.get(record.status, record.status)))
+            self.offline_table.setItem(
+                row, 1, QTableWidgetItem(labels.get(record.status, record.status))
+            )
             self.offline_table.setItem(row, 2, QTableWidgetItem(format_bytes(record.size_bytes)))
             self.offline_table.setItem(row, 3, QTableWidgetItem(record.server_url))
             if record.id == selected_id:

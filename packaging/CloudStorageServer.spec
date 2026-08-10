@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import sys
 
 project_root = Path(SPECPATH).parent
 
@@ -28,7 +29,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
-    uac_admin=True,
+    uac_admin=sys.platform == "win32",
     icon=str(project_root / "assets" / "cloud-storage.ico"),
 )
 coll = COLLECT(
@@ -40,3 +41,13 @@ coll = COLLECT(
     upx_exclude=[],
     name="CloudStorageServerManager",
 )
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="Cloud Storage Server Manager.app",
+        bundle_identifier="com.cloudstorage.server-manager",
+        info_plist={
+            "CFBundleDisplayName": "Cloud Storage Server Manager",
+            "NSHighResolutionCapable": True,
+        },
+    )

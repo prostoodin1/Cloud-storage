@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import * as Device from 'expo-device';
+import * as DocumentPicker from 'expo-document-picker';
+import { File } from 'expo-file-system';
 
 import { CloudApi } from '../api';
 import { Brand, Button, Card, Field, Notice, Screen, Title } from '../components/Ui';
@@ -23,6 +25,45 @@ export function LoginScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const platformName = useMemo(() => (Platform.OS === 'ios' ? 'iOS' : 'Android'), []);
+
+  const importAccessFile = async () => {
+    setError('');
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        multiple: false,
+        type: 'application/json',
+      });
+      const asset = result.assets?.[0];
+      if (result.canceled || !asset) return;
+      if ((asset.size ?? 0) > 64 * 1024) throw new Error('Файл доступа слишком большой.');
+      const value = JSON.parse(await new File(asset.uri).text()) as {
+        format?: string;
+        addresses?: unknown;
+        username?: unknown;
+        one_time_code?: unknown;
+      };
+      if (value.format !== 'cloud-storage-access-v1') {
+        throw new Error('Это не файл доступа Cloud Storage.');
+      }
+      if (!Array.isArray(value.addresses) || !value.addresses[0]) {
+        throw new Error('В файле нет адреса сервера.');
+      }
+      const importedCode = String(value.one_time_code ?? '').trim();
+      const importedUsername = String(value.username ?? '').trim();
+      if (!importedCode || !importedUsername) {
+        throw new Error('В файле не хватает данных входа.');
+      }
+      setServerUrl(String(value.addresses[0]));
+      setUsername(importedUsername);
+      setCode(importedCode);
+      setMode('code');
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : 'Файл доступа не импортирован.',
+      );
+    }
+  };
 
   const connect = async () => {
     if (password.length < 10 || !deviceName.trim()) {
@@ -123,6 +164,7 @@ export function LoginScreen({
           autoCapitalize="sentences"
         />
         {error ? <Notice tone="red">{error}</Notice> : null}
+        <Button title="Импортировать файл входа" onPress={importAccessFile} />
         <Button title={mode === 'account' ? 'Войти' : 'Подключиться по коду'} onPress={connect} busy={busy} />
       </Card>
       <Notice tone="blue">

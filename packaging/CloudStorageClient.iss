@@ -1,8 +1,11 @@
 #define AppName "Cloud Storage Client"
-#define AppVersion "0.9.0"
+#define AppVersion "0.9.5"
 #define AppPublisher "Cloud Storage"
 #define AppExeName "CloudStorageClient.exe"
 #define WinFspMsi "winfsp-2.1.25156.msi"
+#ifndef BuildRoot
+#define BuildRoot "..\dist"
+#endif
 
 [Setup]
 AppId={{B7B6A410-25AF-47DC-96D6-B40F85E762A8}
@@ -39,7 +42,7 @@ Name: "desktopicon"; Description: "Создать ярлык на рабочем
 Name: "autostart"; Description: "Запускать клиент и подключать диски после входа в Windows"; GroupDescription: "Интеграция с Windows:"; Flags: checkedonce
 
 [Files]
-Source: "..\dist\CloudStorageClient\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BuildRoot}\CloudStorageClient\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "third_party\{#WinFspMsi}"; DestDir: "{tmp}"; Flags: deleteafterinstall dontcopy
 Source: "THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 

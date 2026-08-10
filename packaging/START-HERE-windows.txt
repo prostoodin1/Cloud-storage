@@ -1,9 +1,9 @@
-CLOUD STORAGE SERVER 0.9.0 — MOBILE APPS
+CLOUD STORAGE SERVER 0.9.5 — IDEA 4
 ================================
 
 Обычный запуск
 --------------
-1. Запустите CloudStorage-Server-Setup-0.9.0-windows-x64.exe от администратора.
+1. Запустите CloudStorage-Server-Setup-0.9.5-windows-x64.exe от администратора.
 2. Установщик создаст и автоматически запустит службу CloudStorageServerCore.
 3. Откройте Cloud Storage Server Manager из меню «Пуск».
 4. В разделе «Пользователи» создайте человеку логин с временным паролем.

@@ -1,6 +1,9 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.9.0"
+#define AppVersion "0.9.5"
 #define AppPublisher "Cloud Storage"
+#ifndef BuildRoot
+#define BuildRoot "..\dist"
+#endif
 
 [Setup]
 AppId={{C6C699F4-2F76-4D14-B7A4-A0B120362E1E}
@@ -40,9 +43,9 @@ Name: "privatefirewall"; Description: "Разрешить клиентский H
 Name: "{commonappdata}\CloudStorage"; Permissions: admins-full system-full
 
 [Files]
-Source: "..\dist\CloudStorageServerManager\*"; DestDir: "{app}\Manager"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\dist\CloudStorageServerCore\*"; DestDir: "{app}\CloudStorageServerCore"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\dist\CloudStorageServerService\*"; DestDir: "{app}\Service"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BuildRoot}\CloudStorageServerManager\*"; DestDir: "{app}\Manager"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BuildRoot}\CloudStorageServerCore\*"; DestDir: "{app}\CloudStorageServerCore"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BuildRoot}\CloudStorageServerService\*"; DestDir: "{app}\Service"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

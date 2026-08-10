@@ -2,7 +2,7 @@
 
 Windows-установщик разворачивает Server Manager, Core API и фоновую службу, создаёт каталоги данных и ярлыки, а также настраивает удаление и обновление.
 
-- [Скачать Server Setup 0.9.0](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Server-Setup-0.9.0-windows-x64.exe)
+- [Скачать Server Setup 0.9.5](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.5/CloudStorage-Server-Setup-0.9.5-windows-x64.exe)
 - [Сценарий Inno Setup](../../packaging/CloudStorageServer.iss)
 - [Общий сценарий сборки](../../scripts/build-installers.ps1)
 - [PyInstaller Manager](../../packaging/CloudStorageServer.spec)

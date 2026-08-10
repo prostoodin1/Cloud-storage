@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -26,6 +27,7 @@ TRIGGER_TYPES = {
     "maintenance_failed",
     "pending_device",
     "tunnel_offline",
+    "power_outage",
     "scheduled",
 }
 ACTION_TYPES = {
@@ -36,6 +38,8 @@ ACTION_TYPES = {
     "run_backup",
     "reconcile_mirrors",
     "restart_tunnel",
+    "sleep_after_hour",
+    "shutdown_after_hour",
 }
 ACTION_TYPES_BY_TRIGGER = {
     "diagnostic_warning": {"notify", "quick_scan", "full_scan"},
@@ -47,12 +51,14 @@ ACTION_TYPES_BY_TRIGGER = {
     "maintenance_failed": {"notify", "quick_scan", "full_scan"},
     "pending_device": {"notify"},
     "tunnel_offline": {"notify", "restart_tunnel"},
+    "power_outage": {"notify", "shutdown_after_hour"},
     "scheduled": {
         "notify",
         "quick_scan",
         "full_scan",
         "run_backup",
         "reconcile_mirrors",
+        "sleep_after_hour",
     },
 }
 
@@ -81,6 +87,8 @@ class AutomationService:
     notifications: NotificationService
     storage: StorageService
     backup_automation: BackupAutomationService
+    system_action_handler: Callable[[str], str] | None = None
+    power_state_handler: Callable[[], dict[str, Any]] | None = None
     scheduler_interval_seconds: int = 60
     scheduler_enabled: bool = field(default=True, init=False)
     _evaluation_lock: threading.Lock = field(init=False, repr=False)
@@ -359,8 +367,7 @@ class AutomationService:
         return {
             "scheduler": {
                 "running": bool(
-                    self._scheduler_thread is not None
-                    and self._scheduler_thread.is_alive()
+                    self._scheduler_thread is not None and self._scheduler_thread.is_alive()
                 ),
                 "interval_seconds": self.scheduler_interval_seconds,
                 "enabled": self.scheduler_enabled,
@@ -497,6 +504,23 @@ class AutomationService:
                     "detail": f"Провайдеры: {', '.join(sorted(offline))}",
                 }
             return None
+        if trigger_type == "power_outage":
+            if self.power_state_handler is None:
+                return None
+            power = self.power_state_handler()
+            if power.get("plugged") is False:
+                minutes = power.get("minutes_left")
+                detail = (
+                    f"Осталось примерно {minutes} мин."
+                    if minutes is not None
+                    else "Оставшееся время ИБП не определено."
+                )
+                return {
+                    "severity": "critical",
+                    "summary": "Сервер работает от батареи или ИБП",
+                    "detail": detail,
+                }
+            return None
         queries = {
             "diagnostic_warning": (
                 "SELECT count(*) FROM diagnostic_incidents "
@@ -600,9 +624,7 @@ class AutomationService:
                     )
                     result = f"server_mode:{changed['mode']}"
             elif rule.action_type == "run_backup":
-                policies = [
-                    item for item in self.backup_automation.list_policies() if item.enabled
-                ]
+                policies = [item for item in self.backup_automation.list_policies() if item.enabled]
                 if not policies:
                     status = "skipped"
                     result = "no_enabled_backup_policy"
@@ -621,9 +643,7 @@ class AutomationService:
                     result = f"backup_job:{job.id}"
             elif rule.action_type == "reconcile_mirrors":
                 mirrors = [
-                    item
-                    for item in self.storage.mirror_overview()
-                    if item.get("write_enabled")
+                    item for item in self.storage.mirror_overview() if item.get("write_enabled")
                 ]
                 if not mirrors:
                     status = "skipped"
@@ -655,6 +675,22 @@ class AutomationService:
                     provider_id = sorted(candidates)[0]
                     tunnel_state = self.tunnels.restart(provider_id)
                     result = f"tunnel:{provider_id}:{tunnel_state.get('state', 'starting')}"
+            elif rule.action_type == "sleep_after_hour":
+                if self.system_action_handler is None:
+                    status = "skipped"
+                    result = "system_action_handler_unavailable"
+                else:
+                    result = self.system_action_handler("sleep_after_hour")
+                    if result == "sleep_not_armed":
+                        status = "skipped"
+            elif rule.action_type == "shutdown_after_hour":
+                if self.system_action_handler is None:
+                    status = "skipped"
+                    result = "system_action_handler_unavailable"
+                else:
+                    result = self.system_action_handler("shutdown_after_hour")
+                    if result == "shutdown_not_armed":
+                        status = "skipped"
         except (ConflictError, KeyError, OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
             status = "failed"
             error = str(exc)[:1000]

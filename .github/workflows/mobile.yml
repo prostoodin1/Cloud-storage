@@ -44,9 +44,9 @@ jobs:
       matrix:
         include:
           - variant: client
-            output: CloudStorage-Mobile-Client-0.9.0-android.apk
+            output: CloudStorage-Mobile-Client-0.9.5-android.apk
           - variant: manager
-            output: CloudStorage-Mobile-Manager-0.9.0-android.apk
+            output: CloudStorage-Mobile-Manager-0.9.5-android.apk
     env:
       EXPO_PUBLIC_APP_VARIANT: ${{ matrix.variant }}
     steps:
@@ -92,12 +92,21 @@ jobs:
           cp android/app/build/outputs/apk/release/app-release.apk "release/$MOBILE_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.0-android-release
+          name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.5-android-release
           path: mobile/release/*
           if-no-files-found: error
 
   android-screenshot:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - variant: client
+            package: com.cloudstorage.mobile
+          - variant: manager
+            package: com.cloudstorage.manager
+    env:
+      EXPO_PUBLIC_APP_VARIANT: ${{ matrix.variant }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -135,19 +144,32 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
           script: |
             adb install -r mobile/android/app/build/outputs/apk/release/app-release.apk
-            adb shell am force-stop com.cloudstorage.mobile
-            adb shell monkey -p com.cloudstorage.mobile 1
+            adb shell am force-stop ${{ matrix.package }}
+            adb shell monkey -p ${{ matrix.package }} 1
             sleep 8
             mkdir -p mobile/screenshots
-            adb exec-out screencap -p > mobile/screenshots/CloudStorage-Mobile-0.9.0-android.png
+            adb exec-out screencap -p > mobile/screenshots/CloudStorage-Mobile-${{ matrix.variant }}-0.9.5-android.png
       - uses: actions/upload-artifact@v4
         with:
-          name: CloudStorage-Mobile-0.9.0-android-screenshot
+          name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.5-android-screenshot
           path: mobile/screenshots/*.png
           if-no-files-found: error
 
   ios-simulator:
-    runs-on: macos-26
+    runs-on: macos-15
+    strategy:
+      matrix:
+        include:
+          - variant: client
+            bundle: com.cloudstorage.mobile
+            output: CloudStorage-Mobile-Client-0.9.5-apple-simulator.zip
+            device_output: CloudStorage-Mobile-Client-0.9.5-unsigned.ipa
+          - variant: manager
+            bundle: com.cloudstorage.manager
+            output: CloudStorage-Mobile-Manager-0.9.5-apple-simulator.zip
+            device_output: CloudStorage-Mobile-Manager-0.9.5-unsigned.ipa
+    env:
+      EXPO_PUBLIC_APP_VARIANT: ${{ matrix.variant }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -160,8 +182,6 @@ jobs:
           cache-dependency-path: mobile/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - name: Generate iOS project
-        env:
-          EXPO_PUBLIC_SCREENSHOT_SCREEN: server
         run: pnpm exec expo prebuild --platform ios --no-install --clean
       - run: pod install
         working-directory: mobile/ios
@@ -169,35 +189,75 @@ jobs:
         env:
           EXPO_PUBLIC_SCREENSHOT_SCREEN: server
         run: |
+          WORKSPACE=$(find ios -maxdepth 1 -name '*.xcworkspace' -print -quit)
+          test -n "$WORKSPACE"
+          SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list -json | python3 -c 'import json,sys; print(json.load(sys.stdin)["workspace"]["schemes"][0])')
           xcodebuild \
-            -workspace ios/CloudStorage.xcworkspace \
-            -scheme CloudStorage \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphonesimulator \
             -derivedDataPath build/ios-derived \
             CODE_SIGNING_ALLOWED=NO \
             build
-      - name: Package and capture iPhone application
+      - name: Build unsigned iPhone and iPad package
+        env:
+          MOBILE_DEVICE_OUTPUT: ${{ matrix.device_output }}
         run: |
-          APP_PATH="build/ios-derived/Build/Products/Release-iphonesimulator/CloudStorage.app"
+          WORKSPACE=$(find ios -maxdepth 1 -name '*.xcworkspace' -print -quit)
+          test -n "$WORKSPACE"
+          SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list -json | python3 -c 'import json,sys; print(json.load(sys.stdin)["workspace"]["schemes"][0])')
+          xcodebuild \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios-device \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+          APP_PATH=$(find build/ios-device/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -print -quit)
+          test -d "$APP_PATH"
+          mkdir -p release/Payload
+          cp -R "$APP_PATH" release/Payload/
+          (cd release && zip -qry "$MOBILE_DEVICE_OUTPUT" Payload)
+          rm -rf release/Payload
+      - name: Package and capture iPhone application
+        env:
+          MOBILE_BUNDLE: ${{ matrix.bundle }}
+          MOBILE_OUTPUT: ${{ matrix.output }}
+          MOBILE_VARIANT: ${{ matrix.variant }}
+        run: |
+          APP_PATH=$(find build/ios-derived/Build/Products/Release-iphonesimulator -maxdepth 1 -name '*.app' -print -quit)
           test -d "$APP_PATH"
           mkdir -p release screenshots
-          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" release/CloudStorage-Mobile-0.9.0-iphone-simulator.zip
-          DEVICE_ID=$(xcrun simctl create "Cloud Storage Screenshot" "iPhone 16 Pro" "iOS 18.5" 2>/dev/null || true)
-          if [ -z "$DEVICE_ID" ]; then
-            DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(v["udid"] for values in d.values() for v in values if "iPhone" in v["name"]))')
-          fi
-          xcrun simctl boot "$DEVICE_ID" || true
-          open -a Simulator
-          xcrun simctl bootstatus "$DEVICE_ID" -b
-          xcrun simctl install "$DEVICE_ID" "$APP_PATH"
-          xcrun simctl launch "$DEVICE_ID" com.cloudstorage.mobile
-          sleep 8
-          xcrun simctl io "$DEVICE_ID" screenshot screenshots/CloudStorage-Mobile-0.9.0-iphone.png
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release/$MOBILE_OUTPUT"
+          RUNTIME=$(xcrun simctl list runtimes available -j | python3 -c 'import json,sys; rows=[r for r in json.load(sys.stdin)["runtimes"] if r.get("isAvailable") and r["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS")]; print(rows[-1]["identifier"])')
+          for FAMILY in iPhone iPad; do
+            if [ "$FAMILY" = "iPhone" ]; then
+              MODEL="iPhone 16 Pro"
+            else
+              MODEL="iPad Pro 13-inch (M4)"
+            fi
+            DEVICE_ID=$(xcrun simctl create "Cloud Storage $MOBILE_VARIANT $FAMILY" "$MODEL" "$RUNTIME" 2>/dev/null || true)
+            if [ -z "$DEVICE_ID" ]; then
+              DEVICE_ID=$(xcrun simctl list devices available -j | FAMILY="$FAMILY" python3 -c 'import json,os,sys; d=json.load(sys.stdin)["devices"]; print(next(v["udid"] for values in d.values() for v in values if os.environ["FAMILY"] in v["name"]))')
+            fi
+            xcrun simctl boot "$DEVICE_ID" || true
+            open -a Simulator
+            xcrun simctl bootstatus "$DEVICE_ID" -b
+            xcrun simctl install "$DEVICE_ID" "$APP_PATH"
+            xcrun simctl launch "$DEVICE_ID" "$MOBILE_BUNDLE"
+            sleep 8
+            xcrun simctl io "$DEVICE_ID" screenshot "screenshots/CloudStorage-Mobile-$MOBILE_VARIANT-0.9.5-$FAMILY.png"
+            xcrun simctl shutdown "$DEVICE_ID" || true
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: CloudStorage-Mobile-0.9.0-iphone-simulator
+          name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.5-apple-simulator
           path: |
             mobile/release/*.zip
+            mobile/release/*.ipa
             mobile/screenshots/*.png
           if-no-files-found: error

@@ -1,23 +1,37 @@
 # Cloud Storage Server
 
-Домашний облачный сервер для Windows и Linux. Версия **0.9.0** завершает основной мобильный этап: Android/iPhone-клиент получил автоматическую копию фото и видео, поиск, временные общие ссылки и полноценное защищённое управление сервером и пользователями.
+Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.5 (Idea 4)** добавляет единый системный центр, питание/ИБП, ботов, отчёты, безопасные ячейки, упрощённый интерфейс и Apple-сборки.
+
+Текущая ветка также содержит полный слой **Idea 4**: системные профили, питание/ИБП,
+Telegram/email/webhook, 20 шаблонов автоматизаций, отчёты, безопасные контейнерные
+ячейки, файл входа нового пользователя, простой интерфейс и Apple-сборки для
+MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 ## Скачать приложения и установщики
 
 | № | Приложение | Файл |
 |---:|---|---|
-| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Server-Setup-0.9.0-windows-x64.exe) |
-| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Client-Setup-0.9.0-windows-x64.exe) |
-| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Desktop-Client-0.9.0-windows-x64.zip) |
-| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Server-Manager-0.9.0-windows-x64.zip) |
-| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Mobile-Client-0.9.0-android.apk) |
-| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.0/CloudStorage-Mobile-Manager-0.9.0-android.apk) |
+| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.5/CloudStorage-Server-Setup-0.9.5-windows-x64.exe) |
+| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.5/CloudStorage-Client-Setup-0.9.5-windows-x64.exe) |
+| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.5/CloudStorage-Desktop-Client-0.9.5-windows-x64.zip) |
+| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.5/CloudStorage-Server-Manager-0.9.5-windows-x64.zip) |
+| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.5/CloudStorage-Mobile-Client-0.9.5-android.apk) |
+| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.5/CloudStorage-Mobile-Manager-0.9.5-android.apk) |
 
 ## Шесть приложений проекта
 
 Репозиторий разделён на шесть понятных мини-проектов: установщики сервера и клиента, Desktop Client, Server Manager, мобильный клиент и мобильный менеджер. У каждого раздела есть собственный README, manifest, карта исходников, ссылки на сборки и история изменений.
 
 **[Открыть каталог всех приложений](apps/README.md)**
+
+## Что работает в версии 0.9.5 — Idea 4
+
+- вкладка «Система» объединяет профили, интерфейс, безопасность, питание, zrok, Telegram, email, webhook, отчёты, автоматизации и контейнерные ячейки;
+- 10 аварийных и 10 обычных готовых автоматизаций, включая безопасное выключение через час при потере питания и восстановление зеркала;
+- простой режим оставляет основные разделы и центральное меню «Разделы», подробный режим показывает всю навигацию;
+- создание пользователя сразу готовит личный диск, одноразовый код, файл входа, ссылку скачивания и отправку через настроенный SMTP;
+- Windows-клиент ставит WinFsp и создаёт личные виртуальные диски в Проводнике; zrok публикует только клиентский HTTPS-вход;
+- мобильные Client/Manager имеют раздельные Android и iPhone/iPad сборки, MacBook получает отдельные Manager/Client DMG через CI.
 
 ## Что работает в версии 0.9.0 — мобильные приложения
 

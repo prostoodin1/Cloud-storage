@@ -128,6 +128,22 @@ export interface MobileAdminOverview {
     created_at: string;
   }>;
   automation: { running: boolean; enabled: boolean; interval_seconds: number };
+  control: {
+    profile: string;
+    interface_mode: 'simple' | 'detailed';
+    security_mode: 'basic' | 'advanced';
+    browser_access: 'all' | 'approved' | 'nobody';
+    power: {
+      source: string;
+      percent: number | null;
+      minutes_left: number | null;
+      idle_seconds: number;
+      sleep_armed: boolean;
+    };
+    report_schedules: number;
+    sandbox_available: boolean;
+    sandbox_runtime: string | null;
+  };
 }
 
 export type MobileAdminAction =
@@ -155,6 +171,7 @@ export interface MobileCreateUserInput {
   quotaGiB: number;
   role: 'admin' | 'member';
   password: string;
+  email: string;
 }
 
 export type TransferDirection = 'upload' | 'download';

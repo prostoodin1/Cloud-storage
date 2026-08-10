@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStackedWidget,
@@ -40,6 +41,7 @@ from cloud_storage.services.core_client import (
 )
 from cloud_storage.services.disk_service import DiskService, mark_missing_disks
 from cloud_storage.services.settings_store import SettingsStore
+from cloud_storage.ui.control_page import ControlCenterPage
 from cloud_storage.ui.dialogs import (
     CreateUserDialog,
     DiskDetailDialog,
@@ -108,6 +110,7 @@ class MainWindow(QMainWindow):
         self.core_automation: dict = {"rules": [], "runs": []}
         self.core_notifications: list[dict] = []
         self.core_integrations: dict = {"plugins": []}
+        self.core_control: dict = {}
         self.core_transfers: dict = {
             "settings": {},
             "inbound": [],
@@ -123,6 +126,7 @@ class MainWindow(QMainWindow):
         self._disk_reminder_hidden = False
         self._setup_banner_hidden = False
         self._nav_buttons: list[QPushButton] = []
+        self._nav_pages: list[QWidget] = []
 
         self.setWindowTitle(f"Cloud Storage Server Manager · {__version__}")
         self.setMinimumSize(1040, 700)
@@ -171,6 +175,7 @@ class MainWindow(QMainWindow):
         self.disks_page = DisksPage()
         self.receive_page = TransfersPage("inbound")
         self.send_page = TransfersPage("outbound")
+        self.control_page = ControlCenterPage()
         self.settings_page = SettingsPage()
         self.update_page = UpdatePage(
             "server",
@@ -193,7 +198,16 @@ class MainWindow(QMainWindow):
             button.clicked.connect(lambda checked=False, p=page: self._show_page(p))
             sidebar_layout.addWidget(button)
             self._nav_buttons.append(button)
+            self._nav_pages.append(page)
             self.stack.addWidget(page)
+        system_button = QPushButton("◆   Система")
+        system_button.setProperty("nav", True)
+        system_button.setCheckable(True)
+        system_button.clicked.connect(lambda checked=False: self._show_page(self.control_page))
+        sidebar_layout.addWidget(system_button)
+        self._nav_buttons.append(system_button)
+        self._nav_pages.append(self.control_page)
+        self.stack.addWidget(self.control_page)
         self._nav_buttons[0].setChecked(True)
         sidebar_layout.addStretch()
 
@@ -214,6 +228,33 @@ class MainWindow(QMainWindow):
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(22, 20, 12, 12)
+        quick_row = QHBoxLayout()
+        quick_row.addStretch()
+        self.quick_navigation = QPushButton("Разделы ▾")
+        self.quick_navigation.setProperty("primary", True)
+        self.quick_navigation.setMinimumWidth(220)
+        quick_menu = QMenu(self.quick_navigation)
+        for label, page in zip(
+            (
+                "Основная",
+                "Диски",
+                "Приём",
+                "Отправка",
+                "Настройки",
+                "Обновления",
+                "Помощь",
+                "Система",
+            ),
+            self._nav_pages,
+            strict=True,
+        ):
+            action = quick_menu.addAction(label)
+            action.triggered.connect(lambda checked=False, target=page: self._show_page(target))
+        self.quick_navigation.setMenu(quick_menu)
+        self.quick_navigation.setVisible(False)
+        quick_row.addWidget(self.quick_navigation)
+        quick_row.addStretch()
+        content_layout.addLayout(quick_row)
         content_layout.addWidget(self.stack)
         layout.addWidget(content, 1)
 
@@ -231,6 +272,20 @@ class MainWindow(QMainWindow):
             lambda: self._show_page(self.disks_page)
         )
         self.send_page.refresh_requested.connect(self.refresh_core)
+        self.control_page.refresh_requested.connect(self.refresh_core)
+        self.control_page.settings_save_requested.connect(self.save_control_settings)
+        self.control_page.preset_requested.connect(self.apply_system_preset)
+        self.control_page.template_requested.connect(self.install_automation_template)
+        self.control_page.report_requested.connect(self.create_control_report)
+        self.control_page.cell_create_requested.connect(self.create_sandbox_cell)
+        self.control_page.cell_run_requested.connect(self.run_sandbox_cell)
+        self.control_page.open_updates_requested.connect(lambda: self._show_page(self.update_page))
+        self.control_page.open_network_settings_requested.connect(
+            lambda: self._show_page(self.settings_page)
+        )
+        self.control_page.integration_test_requested.connect(self.test_integration)
+        self.control_page.wake_on_lan_requested.connect(self.send_wake_on_lan)
+        self.help_page.navigate_requested.connect(self.navigate_to_route)
         self.settings_page.save_requested.connect(self.save_general_settings)
         self.settings_page.advanced_mode_changed.connect(self.save_advanced_mode)
         self.settings_page.refresh_requested.connect(self.refresh_disks)
@@ -274,34 +329,16 @@ class MainWindow(QMainWindow):
         )
         self.settings_page.tunnel_restart_requested.connect(self.restart_tunnel)
         self.settings_page.support_bundle_requested.connect(self.export_support_bundle)
-        self.settings_page.automation_rule_create_requested.connect(
-            self.create_automation_rule
-        )
-        self.settings_page.automation_rule_update_requested.connect(
-            self.update_automation_rule
-        )
-        self.settings_page.automation_rule_delete_requested.connect(
-            self.delete_automation_rule
-        )
-        self.settings_page.automation_evaluate_requested.connect(
-            self.evaluate_automation
-        )
-        self.settings_page.automation_preview_requested.connect(
-            self.preview_automation
-        )
-        self.settings_page.automation_rule_preview_requested.connect(
-            self.preview_automation_rule
-        )
-        self.settings_page.automation_settings_requested.connect(
-            self.update_automation_settings
-        )
-        self.settings_page.notification_acknowledge_requested.connect(
-            self.acknowledge_notification
-        )
+        self.settings_page.automation_rule_create_requested.connect(self.create_automation_rule)
+        self.settings_page.automation_rule_update_requested.connect(self.update_automation_rule)
+        self.settings_page.automation_rule_delete_requested.connect(self.delete_automation_rule)
+        self.settings_page.automation_evaluate_requested.connect(self.evaluate_automation)
+        self.settings_page.automation_preview_requested.connect(self.preview_automation)
+        self.settings_page.automation_rule_preview_requested.connect(self.preview_automation_rule)
+        self.settings_page.automation_settings_requested.connect(self.update_automation_settings)
+        self.settings_page.notification_acknowledge_requested.connect(self.acknowledge_notification)
         self.settings_page.integration_test_requested.connect(self.test_integration)
-        self.settings_page.open_updates_requested.connect(
-            lambda: self._show_page(self.update_page)
-        )
+        self.settings_page.open_updates_requested.connect(lambda: self._show_page(self.update_page))
 
     def _prepare_server_update(self) -> None:
         if self.core_health is None:
@@ -318,6 +355,31 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(page)
         for index, button in enumerate(self._nav_buttons):
             button.setChecked(self.stack.widget(index) is page)
+
+    def _apply_interface_mode(self, mode: str) -> None:
+        simple = mode == "simple"
+        visible_in_simple = {
+            self.dashboard_page,
+            self.disks_page,
+            self.help_page,
+            self.control_page,
+        }
+        for button, page in zip(self._nav_buttons, self._nav_pages, strict=True):
+            button.setVisible(not simple or page in visible_in_simple)
+        self.quick_navigation.setVisible(simple)
+
+    def navigate_to_route(self, route: str) -> None:
+        routes = {
+            "dashboard": self.dashboard_page,
+            "disks": self.disks_page,
+            "receive": self.receive_page,
+            "send": self.send_page,
+            "system": self.control_page,
+            "settings": self.settings_page,
+            "updates": self.update_page,
+            "help": self.help_page,
+        }
+        self._show_page(routes.get(route, self.help_page))
 
     def refresh_disks(self) -> None:
         self._refresh_core_state()
@@ -383,6 +445,10 @@ class MainWindow(QMainWindow):
         )
         self.receive_page.update_data(self.core_transfers, online=self.core_health is not None)
         self.send_page.update_data(self.core_transfers, online=self.core_health is not None)
+        self.control_page.update_data(self.core_control, online=self.core_health is not None)
+        self._apply_interface_mode(
+            str(self.core_control.get("settings", {}).get("interface_mode", "detailed"))
+        )
         unconfigured = sum(
             item.available
             and self.settings.configuration_for(item.id).role == DiskRole.UNCONFIGURED
@@ -418,6 +484,7 @@ class MainWindow(QMainWindow):
         self.core_automation = {"rules": [], "runs": []}
         self.core_notifications = []
         self.core_integrations = {"plugins": []}
+        self.core_control = {}
         self.core_transfers = {
             "settings": {},
             "inbound": [],
@@ -443,6 +510,7 @@ class MainWindow(QMainWindow):
             self.core_automation = self.core_client.automation()
             self.core_notifications = self.core_client.list_notifications(limit=100)
             self.core_integrations = self.core_client.integrations()
+            self.core_control = self.core_client.control_center()
             self.core_transfers = self.core_client.transfers(limit=100)
             self.core_server_mode = self.core_client.server_mode()
         except (CoreApiError, CoreUnavailable) as exc:
@@ -499,7 +567,17 @@ class MainWindow(QMainWindow):
         values = dialog.values()
         try:
             created = self.core_client.create_user(**values)
-            invitation = self.core_client.create_invitation(created["user"]["id"])
+            access = created.get("access_package") or {}
+            package = access.get("package") or {}
+            invitation = (
+                {
+                    "id": access["invitation_id"],
+                    "code": package["one_time_code"],
+                    "expires_at": access["expires_at"],
+                }
+                if access
+                else self.core_client.create_invitation(created["user"]["id"])
+            )
         except (CoreApiError, CoreUnavailable) as exc:
             QMessageBox.warning(self, "Пользователь не создан", self._core_error_text(exc))
             return
@@ -536,7 +614,9 @@ class MainWindow(QMainWindow):
         except (CoreApiError, CoreUnavailable) as exc:
             QMessageBox.warning(self, "Пароль не изменён", self._core_error_text(exc))
             return
-        self.audit.record("core.user.password.changed", f"Изменён пароль пользователя {display_name}")
+        self.audit.record(
+            "core.user.password.changed", f"Изменён пароль пользователя {display_name}"
+        )
         QMessageBox.information(
             self,
             "Пароль изменён",
@@ -559,12 +639,16 @@ class MainWindow(QMainWindow):
             (
                 str(remote.get("public_url", ""))
                 if use_remote
-                else str(endpoints[0]) if endpoints else ""
+                else str(endpoints[0])
+                if endpoints
+                else ""
             ),
             (
                 str(remote.get("fingerprint", ""))
                 if use_remote
-                else str(lan.get("fingerprint", "")) if lan else ""
+                else str(lan.get("fingerprint", ""))
+                if lan
+                else ""
             ),
             self,
         )
@@ -732,9 +816,7 @@ class MainWindow(QMainWindow):
                 verification_root_id=values.get("verification_root_id"),
             )
         except (CoreApiError, CoreUnavailable) as exc:
-            QMessageBox.warning(
-                self, "Автоматизация не сохранена", self._core_error_text(exc)
-            )
+            QMessageBox.warning(self, "Автоматизация не сохранена", self._core_error_text(exc))
             return
         self.audit.record(
             "core.backup.policy.updated",
@@ -805,9 +887,7 @@ class MainWindow(QMainWindow):
         try:
             job = self.core_client.create_restore(backup_job_id, target_root_id)
         except (CoreApiError, CoreUnavailable) as exc:
-            QMessageBox.warning(
-                self, "Восстановление не запущено", self._core_error_text(exc)
-            )
+            QMessageBox.warning(self, "Восстановление не запущено", self._core_error_text(exc))
             return
         self.audit.record(
             "core.restore.started",
@@ -820,9 +900,7 @@ class MainWindow(QMainWindow):
         try:
             self.core_client.resume_restore(job_id)
         except (CoreApiError, CoreUnavailable) as exc:
-            QMessageBox.warning(
-                self, "Восстановление не продолжено", self._core_error_text(exc)
-            )
+            QMessageBox.warning(self, "Восстановление не продолжено", self._core_error_text(exc))
             return
         self.refresh_core()
 
@@ -838,9 +916,7 @@ class MainWindow(QMainWindow):
         try:
             self.core_client.cancel_restore(job_id)
         except (CoreApiError, CoreUnavailable) as exc:
-            QMessageBox.warning(
-                self, "Восстановление не остановлено", self._core_error_text(exc)
-            )
+            QMessageBox.warning(self, "Восстановление не остановлено", self._core_error_text(exc))
             return
         self.refresh_core()
 
@@ -889,9 +965,7 @@ class MainWindow(QMainWindow):
         if response != QMessageBox.StandardButton.Yes:
             return
         try:
-            self.core_client.set_server_mode(
-                "normal", "Аварийный режим отключён оператором"
-            )
+            self.core_client.set_server_mode("normal", "Аварийный режим отключён оператором")
         except (CoreApiError, CoreUnavailable) as exc:
             QMessageBox.warning(self, "Режим не изменён", self._core_error_text(exc))
             return
@@ -1107,9 +1181,7 @@ class MainWindow(QMainWindow):
         try:
             self.core_client.update_automation_settings(values)
         except (CoreApiError, CoreUnavailable) as exc:
-            QMessageBox.warning(
-                self, "Режим не сохранён", self._core_error_text(exc)
-            )
+            QMessageBox.warning(self, "Режим не сохранён", self._core_error_text(exc))
             return
         self.refresh_core()
 
@@ -1121,6 +1193,96 @@ class MainWindow(QMainWindow):
             return
         self.refresh_core()
 
+    def save_control_settings(self, values: dict) -> None:
+        payload = dict(values)
+        current_power = self.core_control.get("settings", {}).get("power", {})
+        enabling_system_sleep = (
+            values.get("power", {}).get("allow_os_sleep") is True
+            and current_power.get("allow_os_sleep") is not True
+        )
+        enabling_system_shutdown = (
+            values.get("power", {}).get("allow_os_shutdown") is True
+            and current_power.get("allow_os_shutdown") is not True
+        )
+        if enabling_system_sleep or enabling_system_shutdown:
+            action_text = (
+                "сон и аварийное выключение"
+                if enabling_system_sleep and enabling_system_shutdown
+                else "аварийное выключение"
+                if enabling_system_shutdown
+                else "системный сон"
+            )
+            response = QMessageBox.warning(
+                self,
+                f"Разрешить {action_text}?",
+                "Core сможет выполнить выбранное системное действие только при отсутствии "
+                "активных передач. Аварийное выключение дополнительно требует работы от "
+                "батареи/ИБП и часовой задержки. Пробуждение требует настроенного Wake-on-LAN.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return
+            payload["confirmed"] = True
+        try:
+            saved = self.core_client.update_control_settings(payload)
+        except (CoreApiError, CoreUnavailable, ValueError) as exc:
+            QMessageBox.warning(self, "Настройки Idea 4 не сохранены", self._core_error_text(exc))
+            return
+        self.core_control["settings"] = saved
+        self._apply_interface_mode(str(saved.get("interface_mode", "detailed")))
+        self.refresh_core()
+
+    def apply_system_preset(self, preset_id: str) -> None:
+        try:
+            self.core_client.apply_system_preset(preset_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Профиль не применён", self._core_error_text(exc))
+            return
+        self.refresh_core()
+
+    def install_automation_template(self, template_id: str) -> None:
+        try:
+            created = self.core_client.install_automation_template(template_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Автоматизация не добавлена", self._core_error_text(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Автоматизация добавлена",
+            f"Правило «{created['rule']['name']}» включено и сохранено в Core.",
+        )
+        self.refresh_core()
+
+    def create_control_report(self, values: dict) -> None:
+        try:
+            self.core_client.create_report_schedule(values)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Расписание не создано", self._core_error_text(exc))
+            return
+        self.refresh_core()
+
+    def create_sandbox_cell(self, values: dict) -> None:
+        try:
+            self.core_client.create_sandbox_cell(values)
+        except (CoreApiError, CoreUnavailable, ValueError) as exc:
+            QMessageBox.warning(self, "Ячейка не создана", self._core_error_text(exc))
+            return
+        self.refresh_core()
+
+    def run_sandbox_cell(self, cell_id: str) -> None:
+        try:
+            result = self.core_client.run_sandbox_cell(cell_id)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Ячейка не запущена", self._core_error_text(exc))
+            return
+        self.refresh_core()
+        QMessageBox.information(
+            self,
+            "Запуск завершён",
+            f"Статус: {result.get('status')}\n\n{str(result.get('last_result', ''))[-1200:]}",
+        )
+
     def test_integration(self, provider_id: str) -> None:
         try:
             self.core_client.test_integration(provider_id)
@@ -1131,6 +1293,21 @@ class MainWindow(QMainWindow):
             self,
             "Интеграция работает",
             f"Встроенный провайдер {provider_id} принял тестовое уведомление.",
+        )
+
+    def send_wake_on_lan(self, mac_address: str, broadcast: str) -> None:
+        if not mac_address:
+            QMessageBox.warning(self, "MAC не указан", "Введите MAC-адрес сетевой карты сервера.")
+            return
+        try:
+            result = self.core_client.wake_on_lan(mac_address, broadcast or "255.255.255.255")
+        except (CoreApiError, CoreUnavailable, ValueError) as exc:
+            QMessageBox.warning(self, "Wake-on-LAN не отправлен", self._core_error_text(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Wake-on-LAN отправлен",
+            f"Magic packet отправлен на {result.get('mac_address')} через {result.get('broadcast')}.",
         )
 
     def restart_tunnel(self, provider_id: str) -> None:
@@ -1159,8 +1336,10 @@ class MainWindow(QMainWindow):
         if not self.core_health:
             QMessageBox.information(self, "Ядро выключено", "Сначала запустите серверное ядро.")
             return
-        suggested = Path.home() / "Documents" / (
-            f"CloudStorage-support-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+        suggested = (
+            Path.home()
+            / "Documents"
+            / (f"CloudStorage-support-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip")
         )
         selected, _ = QFileDialog.getSaveFileName(
             self,
@@ -1227,9 +1406,7 @@ class MainWindow(QMainWindow):
                     "priority": config.write_priority,
                     "max_fill_percent": config.max_fill_percent,
                     "min_free_gib": config.min_free_gib,
-                    "write_enabled": (
-                        config.mode == DiskMode.ACTIVE and not config.read_only
-                    ),
+                    "write_enabled": (config.mode == DiskMode.ACTIVE and not config.read_only),
                     "purpose": (
                         "backup"
                         if config.role == DiskRole.BACKUP
@@ -1362,7 +1539,42 @@ class MainWindow(QMainWindow):
         dialog = DiskDetailDialog(disk, self.settings.configuration_for(disk.id), self)
         dialog.configuration_saved.connect(self.save_disk_configuration)
         dialog.refresh_requested.connect(self.refresh_disks)
+        dialog.cleanup_requested.connect(self.cleanup_disk_temporary)
         dialog.exec()
+
+    def cleanup_disk_temporary(self, disk_id: str) -> None:
+        root = next(
+            (item for item in self.core_storage_roots if str(item.get("disk_id") or "") == disk_id),
+            None,
+        )
+        if root is None:
+            QMessageBox.information(
+                self,
+                "Диск ещё не подключён к Core",
+                "Сначала сохраните назначение диска, затем повторите очистку.",
+            )
+            return
+        response = QMessageBox.question(
+            self,
+            "Очистить временные файлы?",
+            "Будут удалены только просроченные сессии загрузки и неиспользуемые "
+            "staging-файлы старше суток. Пользовательские файлы и корзина не удаляются.",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            result = self.core_client.cleanup_storage_root(str(root["id"]))
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Очистка не выполнена", self._core_error_text(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Временные файлы очищены",
+            f"Удалено файлов: {result.get('removed_files', 0)} · "
+            f"освобождено: {result.get('removed_bytes', 0)} байт · "
+            f"просроченных загрузок: {result.get('expired_sessions', 0)}.",
+        )
+        self.refresh_core()
 
     def save_disk_configuration(self, disk_id: str, configuration: DiskConfiguration) -> None:
         old = self.settings.configuration_for(disk_id)
@@ -1385,14 +1597,17 @@ class MainWindow(QMainWindow):
         self._refresh_pages()
 
     def save_general_settings(self, values: dict) -> None:
-        if len(
-            {
-                self.core_client.config.port,
-                values["lan_port"],
-                values["remote_port"],
-                values["zrok_port"],
-            }
-        ) != 4:
+        if (
+            len(
+                {
+                    self.core_client.config.port,
+                    values["lan_port"],
+                    values["remote_port"],
+                    values["zrok_port"],
+                }
+            )
+            != 4
+        ):
             QMessageBox.warning(
                 self,
                 "Неверные сетевые порты",

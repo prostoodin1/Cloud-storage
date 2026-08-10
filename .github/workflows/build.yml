@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +38,9 @@ jobs:
       - name: Build Windows service host
         if: runner.os == 'Windows'
         run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageWindowsService.spec
+      - name: Package MacBook applications
+        if: runner.os == 'macOS'
+        run: bash scripts/package-macos.sh
       - uses: actions/upload-artifact@v4
         with:
           name: CloudStorageServer-${{ runner.os }}
@@ -46,4 +49,8 @@ jobs:
             dist/CloudStorageServerCore/
             dist/CloudStorageServerService/
             dist/CloudStorageClient/
+            dist/Cloud Storage Server Manager.app/
+            dist/Cloud Storage Client.app/
+            dist/macos-release/*.dmg
+            dist/macos-release/SHA256SUMS.txt
           if-no-files-found: warn

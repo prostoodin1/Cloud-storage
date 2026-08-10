@@ -57,6 +57,7 @@ export function ServerControlScreen({
   const [formOpen, setFormOpen] = useState(false);
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
+  const [email, setEmail] = useState('');
   const [quota, setQuota] = useState('100');
   const [role, setRole] = useState<'admin' | 'member'>('member');
   const [userPassword, setUserPassword] = useState('');
@@ -102,6 +103,7 @@ export function ServerControlScreen({
       quotaGiB,
       role,
       password: userPassword,
+      email: email.trim(),
     };
     requestConfirmation(
       'Создать пользователя?',
@@ -110,6 +112,7 @@ export function ServerControlScreen({
         await onCreateUser(input, password);
         setUsername('');
         setDisplayName('');
+        setEmail('');
         setQuota('100');
         setRole('member');
         setUserPassword('');
@@ -159,6 +162,26 @@ export function ServerControlScreen({
           alert={overview.diagnostics.status !== 'healthy'}
         />
       </View>
+
+      <Card>
+        <Text style={styles.section}>Idea 4 · система</Text>
+        <Text style={styles.muted}>
+          Профиль: {overview.control.profile} · защита: {overview.control.security_mode} ·
+          браузер: {overview.control.browser_access}
+        </Text>
+        <Text style={styles.muted}>
+          Питание: {overview.control.power.source} · заряд{' '}
+          {overview.control.power.percent ?? '—'}% · осталось{' '}
+          {overview.control.power.minutes_left ?? '—'} мин · сон{' '}
+          {overview.control.power.sleep_armed ? 'разрешён' : 'не активирован'}
+        </Text>
+        <Text style={styles.muted}>
+          Отчётов: {overview.control.report_schedules} · ячейки:{' '}
+          {overview.control.sandbox_available
+            ? overview.control.sandbox_runtime
+            : 'Docker/Podman не найден'}
+        </Text>
+      </Card>
 
       <Card>
         <Text style={styles.section}>Обслуживание</Text>
@@ -323,6 +346,7 @@ export function ServerControlScreen({
           <Text style={styles.section}>Новый пользователь</Text>
           <Field label="Логин" value={username} onChangeText={setUsername} placeholder="ivan" />
           <Field label="Имя" value={displayName} onChangeText={setDisplayName} placeholder="Иван" autoCapitalize="words" />
+          <Field label="Email для файла входа" value={email} onChangeText={setEmail} placeholder="user@example.com" autoCapitalize="none" keyboardType="email-address" />
           <Field label="Квота, ГБ" value={quota} onChangeText={setQuota} keyboardType="number-pad" />
           <Field label="Временный пароль" value={userPassword} onChangeText={setUserPassword} secureTextEntry />
           <View style={styles.row}>

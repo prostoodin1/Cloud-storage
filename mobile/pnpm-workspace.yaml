@@ -6,3 +6,5 @@ minimumReleaseAgeExclude:
   - expo@57.0.10
 overrides:
   expo-constants: 57.0.9
+patchedDependencies:
+  expo-modules-jsi@57.0.4: patches/expo-modules-jsi@57.0.4.patch

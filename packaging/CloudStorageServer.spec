@@ -9,7 +9,7 @@ a = Analysis(
     [str(project_root / "cloud_storage" / "main.py")],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[],
+    datas=[(str(project_root / "assets" / "cloud-storage.ico"), "assets")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -10,7 +10,7 @@ client = Analysis(
     [str(project_root / "cloud_storage" / "client" / "main.py")],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[],
+    datas=[(icon, "assets")],
     hiddenimports=["win32crypt", "win32com.client"] if sys.platform == "win32" else [],
     hookspath=[],
     hooksconfig={},

@@ -107,3 +107,40 @@ def test_every_settings_section_is_scrollable_and_has_explanatory_text(tmp_path)
         assert "станет активным" not in text
 
     window.close()
+
+
+def test_system_tabs_work_offline_and_settings_links_open_requested_tab(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(store=SettingsStore(tmp_path), disk_service=FakeDiskService())
+    page = window.control_page
+
+    page.update_data({}, online=False)
+    page.open_tab("docker")
+    app.processEvents()
+
+    assert page.isEnabled() is True
+    assert page.tabs.isEnabled() is True
+    assert page.tabs.tabText(page.tabs.currentIndex()) == "Docker"
+
+    window.settings_page.system_section_requested.emit("ssh")
+    app.processEvents()
+    assert window.stack.currentWidget() is page
+    assert page.tabs.tabText(page.tabs.currentIndex()) == "SSH"
+    window.close()
+
+
+def test_save_button_only_appears_after_real_settings_change(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(store=SettingsStore(tmp_path), disk_service=FakeDiskService())
+    page = window.settings_page
+    app.processEvents()
+
+    assert page.save_button.isHidden()
+    page.server_name.setText("Изменённое имя")
+    app.processEvents()
+    assert not page.save_button.isHidden()
+
+    page.load_settings(window.settings, str(window.store.path))
+    app.processEvents()
+    assert page.save_button.isHidden()
+    window.close()

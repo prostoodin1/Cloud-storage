@@ -456,9 +456,13 @@ class SettingsPage(QWidget):
     restore_resume_requested = Signal(str)
     restore_cancel_requested = Signal(str)
     open_updates_requested = Signal()
+    system_section_requested = Signal(str)
 
     _SECTIONS = [
         ("Сервер", False),
+        ("Система", False),
+        ("Docker", False),
+        ("SSH", False),
         ("Хранилище", False),
         ("Диски", False),
         ("Пользователи", False),
@@ -480,6 +484,8 @@ class SettingsPage(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._loading_settings = False
+        self._saved_settings_payload: dict = {}
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 16, 24)
         root.setSpacing(18)
@@ -495,10 +501,11 @@ class SettingsPage(QWidget):
         self.mode.currentIndexChanged.connect(self._mode_changed)
         toolbar.addWidget(self.mode)
         toolbar.addStretch()
-        save = QPushButton("Сохранить настройки")
-        save.setProperty("primary", True)
-        save.clicked.connect(self._emit_save)
-        toolbar.addWidget(save)
+        self.save_button = QPushButton("Сохранить настройки")
+        self.save_button.setProperty("primary", True)
+        self.save_button.clicked.connect(self._emit_save)
+        self.save_button.setVisible(False)
+        toolbar.addWidget(self.save_button)
         root.addLayout(toolbar)
 
         body = QHBoxLayout()
@@ -619,6 +626,7 @@ class SettingsPage(QWidget):
         self._current_settings = AppSettings()
         self._pages_by_name = {name: self._make_section(name) for name, _ in self._SECTIONS}
         self._rebuild_sections()
+        self._connect_settings_tracking()
 
     def update_core_data(
         self,
@@ -1646,6 +1654,7 @@ class SettingsPage(QWidget):
             self.maintenance_rows.addWidget(card)
 
     def load_settings(self, settings: AppSettings, config_path: str) -> None:
+        self._loading_settings = True
         self._current_settings = settings
         self.server_name.setText(settings.server_name)
         self.notifications.setChecked(settings.notifications_enabled)
@@ -1671,6 +1680,9 @@ class SettingsPage(QWidget):
         self.mode.setCurrentIndex(1 if settings.advanced_mode else 0)
         self.mode.blockSignals(False)
         self._rebuild_sections()
+        self._loading_settings = False
+        self._saved_settings_payload = self._settings_payload()
+        self.save_button.setVisible(False)
 
     def _mode_changed(self) -> None:
         self._rebuild_sections()
@@ -1705,7 +1717,33 @@ class SettingsPage(QWidget):
         title = QLabel(name)
         title.setObjectName("PageTitle")
         layout.addWidget(title)
-        if name == "Сервер":
+        if name in {"Система", "Docker", "SSH"}:
+            routes = {"Система": "system", "Docker": "docker", "SSH": "ssh"}
+            descriptions = {
+                "Система": (
+                    "Профили сервера, питание, сеть, отчёты и автоматизации собраны в системном "
+                    "центре. Его вкладки остаются доступными даже при выключенном Core."
+                ),
+                "Docker": (
+                    "Автонастройка Docker Desktop включает проверку платформы, загрузку с "
+                    "официального источника и фоновую установку для контейнеров скриптов и ботов."
+                ),
+                "SSH": (
+                    "Автонастройка SSH устанавливает OpenSSH Server, оставляет вход только по "
+                    "публичному ключу и открывает выбранный порт лишь для частной сети Windows."
+                ),
+            }
+            description = QLabel(descriptions[name])
+            description.setWordWrap(True)
+            description.setProperty("emptyState", True)
+            layout.addWidget(description)
+            open_button = QPushButton(f"Открыть вкладку «{name}»")
+            open_button.setProperty("primary", True)
+            open_button.clicked.connect(
+                lambda _checked=False, route=routes[name]: self.system_section_requested.emit(route)
+            )
+            layout.addWidget(open_button)
+        elif name == "Сервер":
             form = QFormLayout()
             form.setVerticalSpacing(14)
             form.addRow("Название сервера", self.server_name)
@@ -2538,22 +2576,56 @@ class SettingsPage(QWidget):
         if row >= 0:
             self.stack.setCurrentIndex(row)
 
+    def _settings_payload(self) -> dict:
+        return {
+            "server_name": self.server_name.text().strip() or "Домашнее облако",
+            "notifications_enabled": self.notifications.isChecked(),
+            "refresh_interval_seconds": self.refresh_interval.value(),
+            "advanced_mode": bool(self.mode.currentData()),
+            "lan_enabled": self.lan_enabled.isChecked(),
+            "lan_port": self.lan_port.value(),
+            "remote_enabled": self.remote_enabled.isChecked(),
+            "remote_port": self.remote_port.value(),
+            "remote_public_url": self.remote_public_url.text().strip().rstrip("/"),
+            "remote_pairing_enabled": self.remote_pairing_enabled.isChecked(),
+            "zrok_enabled": self.zrok_enabled.isChecked(),
+            "zrok_port": self.zrok_port.value(),
+            "zrok_executable": self.zrok_executable.text().strip() or "zrok",
+            "zrok_share_name": self.zrok_share_name.text().strip(),
+        }
+
     def _emit_save(self) -> None:
-        self.save_requested.emit(
-            {
-                "server_name": self.server_name.text().strip() or "Домашнее облако",
-                "notifications_enabled": self.notifications.isChecked(),
-                "refresh_interval_seconds": self.refresh_interval.value(),
-                "advanced_mode": bool(self.mode.currentData()),
-                "lan_enabled": self.lan_enabled.isChecked(),
-                "lan_port": self.lan_port.value(),
-                "remote_enabled": self.remote_enabled.isChecked(),
-                "remote_port": self.remote_port.value(),
-                "remote_public_url": self.remote_public_url.text().strip().rstrip("/"),
-                "remote_pairing_enabled": self.remote_pairing_enabled.isChecked(),
-                "zrok_enabled": self.zrok_enabled.isChecked(),
-                "zrok_port": self.zrok_port.value(),
-                "zrok_executable": self.zrok_executable.text().strip() or "zrok",
-                "zrok_share_name": self.zrok_share_name.text().strip(),
-            }
-        )
+        self.save_requested.emit(self._settings_payload())
+
+    def mark_settings_saved(self) -> None:
+        self._saved_settings_payload = self._settings_payload()
+        self.save_button.setVisible(False)
+
+    def _connect_settings_tracking(self) -> None:
+        for checkbox in (
+            self.notifications,
+            self.lan_enabled,
+            self.remote_enabled,
+            self.remote_pairing_enabled,
+            self.zrok_enabled,
+        ):
+            checkbox.toggled.connect(self._settings_changed)
+        for spinbox in (
+            self.refresh_interval,
+            self.lan_port,
+            self.remote_port,
+            self.zrok_port,
+        ):
+            spinbox.valueChanged.connect(self._settings_changed)
+        for line_edit in (
+            self.server_name,
+            self.remote_public_url,
+            self.zrok_executable,
+            self.zrok_share_name,
+        ):
+            line_edit.textChanged.connect(self._settings_changed)
+
+    def _settings_changed(self, *_args: object) -> None:
+        if self._loading_settings:
+            return
+        self.save_button.setVisible(self._settings_payload() != self._saved_settings_payload)

@@ -113,6 +113,7 @@ def main() -> int:
             )
 
         settings = window.settings_page
+        window.stack.setCurrentWidget(settings)
         settings.mode.setCurrentIndex(1)
         app.processEvents()
         settings_captures: list[tuple[str, QPixmap]] = []

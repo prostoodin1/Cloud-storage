@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -52,6 +52,26 @@ from cloud_storage.ui.dialogs import (
 from cloud_storage.ui.pages import DashboardPage, DisksPage, SettingsPage
 from cloud_storage.ui.transfer_page import TransfersPage
 from cloud_storage.ui.update_page import UpdatePage
+
+
+class _CoreHealthSignals(QObject):
+    completed = Signal(object)
+    finished = Signal()
+
+
+class _CoreHealthTask(QRunnable):
+    def __init__(self, client: CoreClient) -> None:
+        super().__init__()
+        self.client = client
+        self.signals = _CoreHealthSignals()
+
+    def run(self) -> None:
+        try:
+            self.signals.completed.emit(self.client.try_health(timeout=0.4))
+        except Exception:  # Background health polling must never terminate the UI.
+            self.signals.completed.emit(None)
+        finally:
+            self.signals.finished.emit()
 
 
 class MainWindow(QMainWindow):
@@ -127,6 +147,7 @@ class MainWindow(QMainWindow):
         self._setup_banner_hidden = False
         self._nav_buttons: list[QPushButton] = []
         self._nav_pages: list[QWidget] = []
+        self._health_task: _CoreHealthTask | None = None
 
         self.setWindowTitle(f"Cloud Storage Server Manager · {__version__}")
         self.setMinimumSize(1040, 700)
@@ -135,7 +156,7 @@ class MainWindow(QMainWindow):
         self._connect_pages()
 
         self.refresh_timer = QTimer(self)
-        self.refresh_timer.timeout.connect(self.refresh_disks)
+        self.refresh_timer.timeout.connect(self._poll_core_health)
         self._reset_refresh_timer()
         QTimer.singleShot(0, self.refresh_disks)
 
@@ -342,6 +363,7 @@ class MainWindow(QMainWindow):
         self.settings_page.notification_acknowledge_requested.connect(self.acknowledge_notification)
         self.settings_page.integration_test_requested.connect(self.test_integration)
         self.settings_page.open_updates_requested.connect(lambda: self._show_page(self.update_page))
+        self.settings_page.system_section_requested.connect(self._open_system_section)
 
     def _prepare_server_update(self) -> None:
         if self.core_health is None:
@@ -358,6 +380,10 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(page)
         for index, button in enumerate(self._nav_buttons):
             button.setChecked(self.stack.widget(index) is page)
+
+    def _open_system_section(self, route: str) -> None:
+        self.control_page.open_tab(route)
+        self._show_page(self.control_page)
 
     def _apply_interface_mode(self, mode: str) -> None:
         simple = mode == "simple"
@@ -525,11 +551,45 @@ class MainWindow(QMainWindow):
         self._refresh_core_state()
         self._refresh_pages()
 
+    def _poll_core_health(self) -> None:
+        """Poll the lightweight endpoint off the UI thread.
+
+        Heavy disk discovery and the full set of administrative endpoints are refreshed on
+        startup, after mutations, and when the user presses Refresh. This prevents a periodic
+        PowerShell/API burst from freezing open tabs or discarding unsaved edits.
+        """
+
+        if self._health_task is not None:
+            return
+        task = _CoreHealthTask(self.core_client)
+        self._health_task = task
+        task.signals.completed.connect(self._apply_polled_health)
+        task.signals.finished.connect(self._health_poll_finished)
+        QThreadPool.globalInstance().start(task)
+
+    def _apply_polled_health(self, health: object) -> None:
+        was_online = self.core_health is not None
+        now_online = isinstance(health, dict)
+        if was_online == now_online:
+            if now_online:
+                self.core_health = health
+            return
+        # A state transition is rare and deserves one complete refresh so every page agrees.
+        self.refresh_core()
+
+    def _health_poll_finished(self) -> None:
+        self._health_task = None
+
     def start_core(self) -> None:
         try:
             health = self.core_supervisor.start()
         except (CoreApiError, CoreUnavailable, OSError) as exc:
-            QMessageBox.critical(self, "Ядро не запущено", str(exc))
+            self.audit.record("core.start.failed", f"Ядро не запущено: {exc}", "error")
+            QMessageBox.critical(
+                self,
+                "Ядро не запущено",
+                f"{exc}\n\nПодробный журнал: {self.core_client.config.log_path}",
+            )
             return
         self.audit.record("core.started", f"Серверное ядро {health.get('version', '')} запущено")
         self.core_health = health
@@ -1233,6 +1293,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Настройки Idea 4 не сохранены", self._core_error_text(exc))
             return
         self.core_control["settings"] = saved
+        self.control_page.mark_settings_saved()
         self._apply_interface_mode(str(saved.get("interface_mode", "detailed")))
         self.refresh_core()
 
@@ -1792,6 +1853,7 @@ class MainWindow(QMainWindow):
         self.settings.zrok_executable = values["zrok_executable"]
         self.settings.zrok_share_name = values["zrok_share_name"]
         self.store.save(self.settings)
+        self.settings_page.mark_settings_saved()
         if network_changed:
             self.core_client = CoreClient(
                 replace(

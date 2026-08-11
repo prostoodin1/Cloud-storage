@@ -1,9 +1,21 @@
 minimumReleaseAgeExclude:
-  - '@expo/cli@57.0.12'
+  - '@expo/cli@57.0.12 || 57.0.14'
   - '@expo/router-server@57.0.5'
   - expo-constants@57.0.9
   - expo-modules-core@57.0.9
-  - expo@57.0.10
+  - expo@57.0.10 || 57.0.12
+  - '@expo/fingerprint@0.20.7'
+  - '@expo/inline-modules@0.1.5'
+  - '@expo/local-build-cache-provider@57.0.6'
+  - '@expo/metro-config@57.0.8'
+  - '@expo/prebuild-config@57.0.11'
+  - expo-asset@57.0.10
+  - expo-background-task@57.0.9
+  - expo-image-picker@57.0.9
+  - expo-server@57.0.2
+  - expo-sharing@57.0.11
+  - expo-splash-screen@57.0.6
+  - expo-task-manager@57.0.9
 overrides:
   expo-constants: 57.0.9
 patchedDependencies:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import QApplication
@@ -175,6 +178,10 @@ QListWidget#SettingsSections::item:selected {{
     background: #322024;
     color: white;
 }}
+QListWidget#SettingsSections::item:hover {{
+    background: #252a31;
+    color: white;
+}}
 QCheckBox {{ spacing: 9px; }}
 QCheckBox::indicator {{
     width: 17px;
@@ -215,12 +222,17 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QTabWidget::pane {{ border: 0; }}
 QTabBar::tab {{
     color: {COLORS["muted"]};
-    padding: 10px 16px;
+    font-size: 13px;
+    padding: 9px 10px;
     border-bottom: 2px solid transparent;
 }}
 QTabBar::tab:selected {{
     color: white;
     border-bottom: 2px solid {COLORS["red"]};
+}}
+QTabBar::tab:hover:!selected {{
+    color: white;
+    background: #1a1d22;
 }}
 QToolTip {{
     background: #22262d;
@@ -247,6 +259,15 @@ def apply_theme(app: QApplication) -> None:
 
 
 def create_app_icon() -> QIcon:
+    roots = []
+    bundled = getattr(sys, "_MEIPASS", None)
+    if bundled:
+        roots.append(Path(bundled))
+    roots.append(Path(__file__).resolve().parents[2])
+    for root in roots:
+        icon = QIcon(str(root / "assets" / "cloud-storage.ico"))
+        if not icon.isNull():
+            return icon
     pixmap = QPixmap(256, 256)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)

@@ -44,6 +44,9 @@ class ControlCenterPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._data: dict = {}
+        self._loading_settings = False
+        self._saved_settings_payload: dict = {}
+        self._save_buttons: list[QPushButton] = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 16, 18)
         layout.setSpacing(14)
@@ -65,14 +68,28 @@ class ControlCenterPage(QWidget):
         layout.addLayout(top)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_profile_tab(), "Режим и профиль")
+        self.tabs.setDocumentMode(True)
+        self._tab_indexes: dict[str, int] = {}
+        self._add_tab("system", self._build_profile_tab(), "Система")
+        self._add_tab("interface", self._build_interface_tab(), "Интерфейс")
         self.tabs.addTab(self._build_power_tab(), "Питание")
-        self.tabs.addTab(self._build_network_tab(), "Сеть и боты")
-        self.tabs.addTab(self._build_automation_tab(), "Автоматизации")
+        self.tabs.addTab(self._build_network_tab(), "Сеть")
+        self.tabs.addTab(self._build_automation_tab(), "Авто")
         self.tabs.addTab(self._build_report_tab(), "Отчёты")
-        self.tabs.addTab(self._build_host_tools_tab(), "Docker и SSH")
+        self._add_tab("docker", self._build_docker_tab(), "Docker")
+        self._add_tab("ssh", self._build_ssh_tab(), "SSH")
         self.tabs.addTab(self._build_cell_tab(), "Контейнеры")
         layout.addWidget(self.tabs, 1)
+        self._connect_settings_tracking()
+        self._set_save_buttons_visible(False)
+
+    def _add_tab(self, route: str, widget: QWidget, label: str) -> None:
+        self._tab_indexes[route] = self.tabs.addTab(widget, label)
+
+    def open_tab(self, route: str) -> None:
+        """Open a system subsection from Settings or Help."""
+
+        self.tabs.setCurrentIndex(self._tab_indexes.get(route, self._tab_indexes["system"]))
 
     @staticmethod
     def _scroll(widget: QWidget) -> QScrollArea:
@@ -90,9 +107,6 @@ class ControlCenterPage(QWidget):
         profile_card.setProperty("card", True)
         form = QFormLayout(profile_card)
         self.profile = QComboBox()
-        self.interface_mode = QComboBox()
-        self.interface_mode.addItem("Простой — меньше пунктов меню", "simple")
-        self.interface_mode.addItem("Подробный — все разделы отдельно", "detailed")
         self.security_mode = QComboBox()
         self.security_mode.addItem("Базовая защита", "basic")
         self.security_mode.addItem("Расширенная защита", "advanced")
@@ -101,15 +115,15 @@ class ControlCenterPage(QWidget):
         self.storage_strategy.addItem("SSD-кэш → HDD", "staging")
         self.storage_strategy.addItem("Зеркало", "mirror")
         form.addRow("Готовый профиль", self.profile)
-        form.addRow("Интерфейс", self.interface_mode)
         form.addRow("Безопасность", self.security_mode)
         form.addRow("Стратегия дисков", self.storage_strategy)
         apply_preset = QPushButton("Применить выбранный профиль")
         apply_preset.setProperty("primary", True)
         apply_preset.clicked.connect(self._emit_preset)
-        save = QPushButton("Сохранить режимы")
-        save.clicked.connect(self._emit_settings)
-        form.addRow(apply_preset, save)
+        self.profile_save_button = QPushButton("Сохранить настройки системы")
+        self.profile_save_button.clicked.connect(self._emit_settings)
+        self._save_buttons.append(self.profile_save_button)
+        form.addRow(apply_preset, self.profile_save_button)
         layout.addWidget(profile_card)
         self.profile_description = QLabel()
         self.profile_description.setWordWrap(True)
@@ -117,6 +131,33 @@ class ControlCenterPage(QWidget):
         layout.addWidget(self.profile_description)
         layout.addStretch()
         self.profile.currentIndexChanged.connect(self._update_profile_description)
+        return self._scroll(content)
+
+    def _build_interface_tab(self) -> QWidget:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(16, 16, 16, 24)
+        card = QFrame()
+        card.setProperty("card", True)
+        form = QFormLayout(card)
+        self.interface_mode = QComboBox()
+        self.interface_mode.addItem("Простой — основные безопасные разделы", "simple")
+        self.interface_mode.addItem("Подробный — все разделы отдельно", "detailed")
+        form.addRow("Режим интерфейса", self.interface_mode)
+        self.interface_save_button = QPushButton("Сохранить интерфейс")
+        self.interface_save_button.setProperty("primary", True)
+        self.interface_save_button.clicked.connect(self._emit_settings)
+        self._save_buttons.append(self.interface_save_button)
+        form.addRow(self.interface_save_button)
+        layout.addWidget(card)
+        note = QLabel(
+            "Выбранный режим хранится в Core и не сбрасывается при автоматическом обновлении "
+            "страницы или повторном запуске Manager."
+        )
+        note.setWordWrap(True)
+        note.setProperty("emptyState", True)
+        layout.addWidget(note)
+        layout.addStretch()
         return self._scroll(content)
 
     def _build_power_tab(self) -> QWidget:
@@ -144,10 +185,11 @@ class ControlCenterPage(QWidget):
         form.addRow("Сон через", self.idle_minutes)
         form.addRow(self.power_notify)
         form.addRow("Повторная тревога", self.power_threshold)
-        save = QPushButton("Сохранить питание")
-        save.setProperty("primary", True)
-        save.clicked.connect(self._emit_settings)
-        form.addRow(save)
+        self.power_save_button = QPushButton("Сохранить питание")
+        self.power_save_button.setProperty("primary", True)
+        self.power_save_button.clicked.connect(self._emit_settings)
+        self._save_buttons.append(self.power_save_button)
+        form.addRow(self.power_save_button)
         layout.addWidget(card)
         self.power_status = QLabel("Данные питания недоступны")
         self.power_status.setWordWrap(True)
@@ -242,10 +284,11 @@ class ControlCenterPage(QWidget):
             )
             tests.addWidget(button)
         bot_form.addRow("Тест после сохранения", tests)
-        save = QPushButton("Сохранить сеть и ботов")
-        save.setProperty("primary", True)
-        save.clicked.connect(self._emit_settings)
-        bot_form.addRow(save)
+        self.network_save_button = QPushButton("Сохранить сеть и ботов")
+        self.network_save_button.setProperty("primary", True)
+        self.network_save_button.clicked.connect(self._emit_settings)
+        self._save_buttons.append(self.network_save_button)
+        bot_form.addRow(self.network_save_button)
         layout.addWidget(bot)
         layout.addStretch()
         return self._scroll(content)
@@ -335,6 +378,9 @@ class ControlCenterPage(QWidget):
         form.addRow("Рабочее место MiB", self.cell_storage)
         form.addRow("Сеть", self.cell_network)
         layout.addLayout(form)
+        auto_limits = QPushButton("Автонастройка безопасных лимитов")
+        auto_limits.clicked.connect(self._apply_cell_automatic_limits)
+        layout.addWidget(auto_limits)
         row = QHBoxLayout()
         create = QPushButton("Создать ячейку")
         create.setProperty("primary", True)
@@ -348,7 +394,7 @@ class ControlCenterPage(QWidget):
         layout.addWidget(self.cell_list, 1)
         return self._scroll(content)
 
-    def _build_host_tools_tab(self) -> QWidget:
+    def _build_docker_tab(self) -> QWidget:
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 16, 16, 24)
@@ -372,7 +418,7 @@ class ControlCenterPage(QWidget):
             "Условия и официальная инструкция Docker Desktop</a>"
         )
         docker_docs.setOpenExternalLinks(True)
-        install_docker = QPushButton("Скачать и установить Docker Desktop")
+        install_docker = QPushButton("Автонастройка: скачать и установить Docker Desktop")
         install_docker.setProperty("primary", True)
         install_docker.clicked.connect(self.docker_install_requested)
         self.install_docker_button = install_docker
@@ -382,7 +428,14 @@ class ControlCenterPage(QWidget):
         docker_layout.addWidget(docker_docs)
         docker_layout.addWidget(install_docker)
         layout.addWidget(docker_card)
+        layout.addStretch()
+        return self._scroll(content)
 
+    def _build_ssh_tab(self) -> QWidget:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(16, 16, 16, 24)
+        layout.setSpacing(14)
         ssh_card = QFrame()
         ssh_card.setProperty("card", True)
         ssh_layout = QVBoxLayout(ssh_card)
@@ -416,7 +469,7 @@ class ControlCenterPage(QWidget):
         ssh_help.setWordWrap(True)
         ssh_help.setProperty("muted", True)
         ssh_actions = QHBoxLayout()
-        enable_ssh = QPushButton("Установить и включить SSH")
+        enable_ssh = QPushButton("Автонастройка: установить и защитить SSH")
         enable_ssh.setProperty("primary", True)
         enable_ssh.clicked.connect(self._emit_ssh_enable)
         disable_ssh = QPushButton("Отключить SSH")
@@ -436,9 +489,11 @@ class ControlCenterPage(QWidget):
     def update_data(self, data: dict, *, online: bool) -> None:
         self._data = data or {}
         self.status.setText("Core работает · Idea 4 активна" if online else "Core выключен")
-        self.setEnabled(online)
+        for button in self._save_buttons:
+            button.setEnabled(online)
         if not online:
             return
+        self._loading_settings = True
         settings = data.get("settings", {})
         self.profile.blockSignals(True)
         self.profile.clear()
@@ -486,6 +541,9 @@ class ControlCenterPage(QWidget):
         self._render_cells(data.get("cells", []), data.get("sandbox", {}))
         self._render_host_tools(data.get("host_tools", {}))
         self._update_profile_description()
+        self._loading_settings = False
+        self._saved_settings_payload = self._settings_payload()
+        self._set_save_buttons_visible(False)
 
     @staticmethod
     def _select(combo: QComboBox, value: object) -> None:
@@ -579,49 +637,96 @@ class ControlCenterPage(QWidget):
         if ssh.get("username") and not self.ssh_username.text().strip():
             self.ssh_username.setText(str(ssh.get("username")))
 
-    def _emit_settings(self) -> None:
+    def _settings_payload(self) -> dict:
         secrets = {}
         if self.telegram_token.text():
             secrets["telegram_bot_token"] = self.telegram_token.text()
         if self.email_password.text():
             secrets["smtp_password"] = self.email_password.text()
-        self.settings_save_requested.emit(
-            {
-                "profile": self.profile.currentData(),
-                "interface_mode": self.interface_mode.currentData(),
-                "storage_strategy": self.storage_strategy.currentData(),
-                "browser_access": self.browser_access.currentData(),
-                "security": {"mode": self.security_mode.currentData()},
-                "power": {
-                    "idle_sleep_enabled": self.idle_sleep.isChecked(),
-                    "allow_os_sleep": self.allow_os_sleep.isChecked(),
-                    "allow_os_shutdown": self.allow_os_shutdown.isChecked(),
-                    "idle_minutes": self.idle_minutes.value(),
-                    "notify_on_outage": self.power_notify.isChecked(),
-                    "notify_below_minutes": self.power_threshold.value(),
+        return {
+            "profile": self.profile.currentData(),
+            "interface_mode": self.interface_mode.currentData(),
+            "storage_strategy": self.storage_strategy.currentData(),
+            "browser_access": self.browser_access.currentData(),
+            "security": {"mode": self.security_mode.currentData()},
+            "power": {
+                "idle_sleep_enabled": self.idle_sleep.isChecked(),
+                "allow_os_sleep": self.allow_os_sleep.isChecked(),
+                "allow_os_shutdown": self.allow_os_shutdown.isChecked(),
+                "idle_minutes": self.idle_minutes.value(),
+                "notify_on_outage": self.power_notify.isChecked(),
+                "notify_below_minutes": self.power_threshold.value(),
+            },
+            "integrations": {
+                "telegram": {
+                    "enabled": self.telegram_enabled.isChecked(),
+                    "chat_id": self.telegram_chat.text().strip(),
                 },
-                "integrations": {
-                    "telegram": {
-                        "enabled": self.telegram_enabled.isChecked(),
-                        "chat_id": self.telegram_chat.text().strip(),
-                    },
-                    "email": {
-                        "enabled": self.email_enabled.isChecked(),
-                        "host": self.email_host.text().strip(),
-                        "port": self.email_port.value(),
-                        "username": self.email_user.text().strip(),
-                        "sender": self.email_sender.text().strip(),
-                        "recipient": self.email_recipient.text().strip(),
-                        "starttls": True,
-                    },
-                    "webhook": {
-                        "enabled": self.webhook_enabled.isChecked(),
-                        "url": self.webhook_url.text().strip(),
-                    },
+                "email": {
+                    "enabled": self.email_enabled.isChecked(),
+                    "host": self.email_host.text().strip(),
+                    "port": self.email_port.value(),
+                    "username": self.email_user.text().strip(),
+                    "sender": self.email_sender.text().strip(),
+                    "recipient": self.email_recipient.text().strip(),
+                    "starttls": True,
                 },
-                "secrets": secrets,
-            }
-        )
+                "webhook": {
+                    "enabled": self.webhook_enabled.isChecked(),
+                    "url": self.webhook_url.text().strip(),
+                },
+            },
+            "secrets": secrets,
+        }
+
+    def _emit_settings(self) -> None:
+        self.settings_save_requested.emit(self._settings_payload())
+
+    def mark_settings_saved(self) -> None:
+        self._saved_settings_payload = self._settings_payload()
+        self._set_save_buttons_visible(False)
+
+    def _connect_settings_tracking(self) -> None:
+        for combo in (
+            self.profile,
+            self.interface_mode,
+            self.security_mode,
+            self.storage_strategy,
+            self.browser_access,
+        ):
+            combo.currentIndexChanged.connect(self._settings_changed)
+        for checkbox in (
+            self.idle_sleep,
+            self.allow_os_sleep,
+            self.allow_os_shutdown,
+            self.power_notify,
+            self.telegram_enabled,
+            self.email_enabled,
+            self.webhook_enabled,
+        ):
+            checkbox.toggled.connect(self._settings_changed)
+        for spinbox in (self.idle_minutes, self.power_threshold, self.email_port):
+            spinbox.valueChanged.connect(self._settings_changed)
+        for line_edit in (
+            self.telegram_chat,
+            self.telegram_token,
+            self.email_host,
+            self.email_user,
+            self.email_password,
+            self.email_sender,
+            self.email_recipient,
+            self.webhook_url,
+        ):
+            line_edit.textChanged.connect(self._settings_changed)
+
+    def _settings_changed(self, *_args: object) -> None:
+        if self._loading_settings:
+            return
+        self._set_save_buttons_visible(self._settings_payload() != self._saved_settings_payload)
+
+    def _set_save_buttons_visible(self, visible: bool) -> None:
+        for button in self._save_buttons:
+            button.setVisible(visible)
 
     def _copy_local_address(self) -> None:
         self.local_address.selectAll()
@@ -667,6 +772,15 @@ class ControlCenterPage(QWidget):
                 "network_enabled": self.cell_network.isChecked(),
             }
         )
+
+    def _apply_cell_automatic_limits(self) -> None:
+        maximum = self._data.get("sandbox", {}).get("automatic_max", {})
+        cpu = max(0.25, min(1.0, float(maximum.get("cpu", 1.0))))
+        memory = max(64, min(512, int(maximum.get("memory_mib", 512))))
+        self.cell_cpu.setText(f"{cpu:g}")
+        self.cell_memory.setValue(memory)
+        self.cell_storage.setValue(512)
+        self.cell_network.setChecked(False)
 
     def _emit_cell_run(self) -> None:
         current = self.cell_list.currentItem()

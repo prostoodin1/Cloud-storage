@@ -13,4 +13,4 @@
 
 GitHub не поддерживает пользовательские верхние вкладки внутри одного репозитория. Эти каталоги выполняют ту же задачу: каждый открывается как отдельный мини-проект со своими файлами, README и историей коммитов, а общий код не дублируется.
 
-[Релиз 0.9.7 с single-instance защитой всех приложений](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.9.7)
+[Релиз 0.9.8 — Upgrade Log 001](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.9.8)

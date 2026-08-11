@@ -1,6 +1,6 @@
 # Cloud Storage Server
 
-Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.7 (Idea 4)** гарантирует один экземпляр каждого приложения и фонового процесса.
+Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.8 (Upgrade Log 001)** исправляет навигацию, запуск Core, установщик, иконки и подвисания интерфейса.
 
 Текущая ветка также содержит полный слой **Idea 4**: системные профили, питание/ИБП,
 Telegram/email/webhook, 20 шаблонов автоматизаций, отчёты, безопасные контейнерные
@@ -11,12 +11,12 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 | № | Приложение | Файл |
 |---:|---|---|
-| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.7/CloudStorage-Server-Setup-0.9.7-windows-x64.exe) |
-| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.7/CloudStorage-Client-Setup-0.9.7-windows-x64.exe) |
-| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.7/CloudStorage-Desktop-Client-0.9.7-windows-x64.zip) |
-| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.7/CloudStorage-Server-Manager-0.9.7-windows-x64.zip) |
-| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.7/CloudStorage-Mobile-Client-0.9.7-android.apk) |
-| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.7/CloudStorage-Mobile-Manager-0.9.7-android.apk) |
+| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Server-Setup-0.9.8-windows-x64.exe) |
+| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Client-Setup-0.9.8-windows-x64.exe) |
+| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Desktop-Client-0.9.8-windows-x64.zip) |
+| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Server-Manager-0.9.8-windows-x64.zip) |
+| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Mobile-Client-0.9.8-android.apk) |
+| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Mobile-Manager-0.9.8-android.apk) |
 
 ## Шесть приложений проекта
 
@@ -24,7 +24,15 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 **[Открыть каталог всех приложений](apps/README.md)**
 
-## Что работает в версии 0.9.7 — Idea 4
+## Что работает в версии 0.9.8 — Upgrade Log 001
+
+- все системные вкладки открываются без запущенного Core и подсвечиваются при наведении;
+- в Настройках есть прямые разделы Система, Интерфейс, Docker и SSH;
+- кнопка сохранения показывается только после реального изменения;
+- диагностика запуска Core объясняет причину и показывает путь к журналу;
+- Docker, SSH и лимиты контейнера имеют безопасную автонастройку;
+- периодический health-check вынесен из UI-потока, поэтому открытые вкладки не подвисают;
+- post-install запуск Manager использует UAC-совместимый ShellExecute, а runtime-иконки берутся из общего ресурса;
 
 - повторный запуск Manager или Desktop Client активирует существующее окно и не создаёт новый процесс;
 - Core/Service, виртуальный диск, установщики и мобильный фоновый worker защищены от параллельных копий;

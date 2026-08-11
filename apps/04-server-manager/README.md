@@ -2,7 +2,7 @@
 
 Server Manager — главное административное приложение: пользователи, устройства, накопители, очереди приёма/отправки, резервные копии, автоматизация, обновления, диагностика и удалённый доступ.
 
-- [Скачать менеджер на ПК 0.9.7](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.7/CloudStorage-Server-Manager-0.9.7-windows-x64.zip)
+- [Скачать менеджер на ПК 0.9.8](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Server-Manager-0.9.8-windows-x64.zip)
 - [Интерфейс Manager](../../cloud_storage/ui)
 - [Службы Manager](../../cloud_storage/services)
 - [Core API](../../cloud_storage/core)

@@ -3,14 +3,14 @@
     "name": "Cloud Storage",
     "slug": "cloud-storage-mobile",
     "scheme": "cloudstorage",
-    "version": "0.9.7",
+    "version": "0.9.8",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.cloudstorage.mobile",
-      "buildNumber": "11",
+      "buildNumber": "12",
       "infoPlist": {
         "NSFaceIDUsageDescription": "Cloud Storage защищает токены подключения в системном хранилище.",
         "NSPhotoLibraryUsageDescription": "Cloud Storage выбирает фотографии только для загрузки в ваше личное хранилище."
@@ -18,7 +18,7 @@
     },
     "android": {
       "package": "com.cloudstorage.mobile",
-      "versionCode": 11,
+      "versionCode": 12,
       "adaptiveIcon": {
         "backgroundColor": "#e2383f",
         "foregroundImage": "./assets/android-icon-foreground.png",

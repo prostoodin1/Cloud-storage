@@ -600,17 +600,28 @@ class CoreSupervisor:
                 completed = subprocess.run(
                     ["sc.exe", "start", "CloudStorageServerCore"],
                     stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=15,
                     check=False,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
-                raise CoreUnavailable("Windows service could not be started") from exc
-            if completed.returncode not in {0, 1056}:
                 raise CoreUnavailable(
-                    f"Windows service start failed with code {completed.returncode}"
+                    f"Не удалось выполнить команду запуска службы Windows: {exc}. "
+                    "Проверьте, что Manager запущен с правами администратора."
+                ) from exc
+            if completed.returncode not in {0, 1056}:
+                details = (completed.stderr or completed.stdout).strip()
+                reason = {
+                    5: "Windows отказала в доступе — нужны права администратора",
+                    1060: "служба CloudStorageServerCore не установлена",
+                }.get(completed.returncode, "Service Control Manager отклонил запуск")
+                raise CoreUnavailable(
+                    f"Служба Windows не запущена: {reason} (код {completed.returncode})."
+                    + (f" Ответ системы: {details}" if details else "")
                 )
             deadline = time.monotonic() + timeout_seconds
             while time.monotonic() < deadline:
@@ -618,7 +629,11 @@ class CoreSupervisor:
                 if health:
                     return health
                 time.sleep(0.15)
-            raise CoreUnavailable("Windows service did not become ready in time")
+            state = self._windows_service_state()
+            raise CoreUnavailable(
+                "Служба была запущена, но API ядра не ответил за "
+                f"{timeout_seconds:g} с. Состояние службы: {state}. {self._log_tail()}"
+            )
         command = self._core_command()
         environment = os.environ.copy()
         environment["CLOUD_STORAGE_CORE_DATA_DIR"] = str(self.config.data_directory)
@@ -659,20 +674,56 @@ class CoreSupervisor:
                 )
             else:
                 arguments["start_new_session"] = True
-            process = subprocess.Popen(command, **arguments)
+            try:
+                process = subprocess.Popen(command, **arguments)
+            except OSError as exc:
+                raise CoreUnavailable(
+                    f"Не удалось создать процесс Server Core ({command[0]}): {exc}"
+                ) from exc
         finally:
             log_handle.close()
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise CoreUnavailable(
-                    f"server core exited during startup with code {process.returncode}"
+                    f"Server Core завершился во время запуска с кодом {process.returncode}. "
+                    f"{self._log_tail()}"
                 )
             health = self.client.try_health(timeout=0.4)
             if health:
                 return health
             time.sleep(0.15)
-        raise CoreUnavailable("server core did not become ready in time")
+        raise CoreUnavailable(
+            f"Процесс Server Core работает, но API не ответил за {timeout_seconds:g} с. "
+            f"Возможны занятый порт, ошибка конфигурации или недоступный каталог. {self._log_tail()}"
+        )
+
+    def _log_tail(self, maximum_lines: int = 8) -> str:
+        try:
+            lines = self.config.log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return f"Журнал недоступен: {self.config.log_path}"
+        tail = " | ".join(line.strip() for line in lines[-maximum_lines:] if line.strip())
+        return f"Последние записи: {tail}" if tail else f"Журнал пуст: {self.config.log_path}"
+
+    @staticmethod
+    def _windows_service_state() -> str:
+        try:
+            result = subprocess.run(
+                ["sc.exe", "query", "CloudStorageServerCore"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"не удалось проверить ({exc})"
+        text = " ".join((result.stdout or result.stderr).split())
+        return text[-500:] or f"код {result.returncode}"
 
     def stop(self, timeout_seconds: float = 8.0) -> bool:
         if not self.client.try_health():

@@ -240,9 +240,10 @@ class DashboardPage(QWidget):
 
         if core_health:
             uptime = int(core_health.get("uptime_seconds", 0))
+            runtime = "Go Core" if core_health.get("runtime") == "go" else "Core"
             self.server_card.set_value(
                 "Ядро работает",
-                f"Версия {core_health.get('version', '—')} · {uptime // 60} мин",
+                f"{runtime} {core_health.get('version', '—')} · {uptime // 60} мин",
             )
         elif settings.setup_complete:
             self.server_card.set_value("Ядро выключено", "Запускается в настройках сервера")
@@ -655,11 +656,19 @@ class SettingsPage(QWidget):
                 "color: #43c778; font-weight: 700;" if online else "color: #949ca8;"
             )
         if self.core_details_label is not None:
-            self.core_details_label.setText(
-                f"API {health.get('bind')} · версия {health.get('version')}"
-                if health
-                else "Ядро запускается отдельным процессом и продолжает работу после закрытия менеджера."
-            )
+            if health and health.get("runtime") == "go":
+                details = (
+                    f"API {health.get('bind')} · Go runtime {health.get('supervisor_version')} · "
+                    f"совместимый API {health.get('version')}"
+                )
+            elif health:
+                details = f"API {health.get('bind')} · версия {health.get('version')}"
+            else:
+                details = (
+                    "Go-ядро запускается отдельной службой и продолжает работу после "
+                    "закрытия менеджера."
+                )
+            self.core_details_label.setText(details)
         if self.core_start_button is not None:
             self.core_start_button.setEnabled(not online)
         if self.core_stop_button is not None:

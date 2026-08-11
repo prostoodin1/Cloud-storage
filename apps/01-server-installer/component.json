@@ -1,14 +1,15 @@
 {
   "id": "server-installer",
   "name": "Cloud Storage Server Setup",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "platforms": ["windows-x64"],
   "source_paths": [
     "packaging/CloudStorageServer.iss",
     "packaging/CloudStorageServer.spec",
-    "packaging/CloudStorageCore.spec",
-    "packaging/CloudStorageWindowsService.spec",
+    "packaging/CloudStorageLegacyCore.spec",
+    "core_go",
+    "scripts/build-core-go.ps1",
     "scripts/build-installers.ps1"
   ],
-  "release_asset": "CloudStorage-Server-Setup-0.9.8-windows-x64.exe"
+  "release_asset": "CloudStorage-Server-Setup-0.9.9-windows-x64.exe"
 }

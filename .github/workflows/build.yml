@@ -18,6 +18,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: |
+            core_go/go.sum
+            drive_windows/go.sum
       - name: Install Linux Qt runtime libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0
@@ -29,15 +35,26 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest
+      - name: Test native Go Core
+        working-directory: core_go
+        run: go test ./...
+      - name: Vet native Go Core
+        working-directory: core_go
+        run: go vet ./...
       - name: Build standalone manager
         run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageServer.spec
-      - name: Build standalone core
+      - name: Build Python compatibility core on Windows
+        if: runner.os == 'Windows'
+        run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageLegacyCore.spec
+      - name: Build native Go Core and Windows service
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/build-core-go.ps1
+      - name: Build standalone core on Unix
+        if: runner.os != 'Windows'
         run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageCore.spec
       - name: Build standalone desktop client
         run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageClient.spec
-      - name: Build Windows service host
-        if: runner.os == 'Windows'
-        run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageWindowsService.spec
       - name: Package MacBook applications
         if: runner.os == 'macOS'
         run: bash scripts/package-macos.sh
@@ -47,6 +64,7 @@ jobs:
           path: |
             dist/CloudStorageServerManager/
             dist/CloudStorageServerCore/
+            dist/CloudStorageLegacyCore/
             dist/CloudStorageServerService/
             dist/CloudStorageClient/
             dist/Cloud Storage Server Manager.app/

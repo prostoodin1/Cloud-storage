@@ -19,6 +19,39 @@ class AlreadyRunningError(RuntimeError):
     pass
 
 
+def _process_is_cloud_storage_core(pid: int) -> bool:
+    """Return true only when a PID still belongs to one of our Core executables.
+
+    Windows reuses process identifiers aggressively.  Treating any live PID as
+    Core left installations permanently locked when a stale PID was reassigned
+    to svchost.exe.
+    """
+
+    try:
+        process = psutil.Process(pid)
+    except (psutil.Error, OSError):
+        return False
+    identity_parts: list[str] = []
+    for reader in (process.name, process.exe):
+        try:
+            identity_parts.append(reader())
+        except (psutil.Error, OSError):
+            continue
+    try:
+        identity_parts.extend(process.cmdline())
+    except (psutil.Error, OSError):
+        pass
+    identity = " ".join(identity_parts).casefold()
+    markers = (
+        "cloudstorageservercore",
+        "cloudstoragelegacycore",
+        "cloud_storage.core",
+        "cloud_storage/core/main.py",
+        "cloud_storage\\core\\main.py",
+    )
+    return any(marker in identity for marker in markers)
+
+
 class PidGuard:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -31,7 +64,7 @@ class PidGuard:
                 existing_pid = int(self.path.read_text(encoding="ascii").strip())
             except (OSError, ValueError):
                 existing_pid = 0
-            if existing_pid and psutil.pid_exists(existing_pid):
+            if existing_pid and _process_is_cloud_storage_core(existing_pid):
                 raise AlreadyRunningError(f"server core is already running with PID {existing_pid}")
             self.path.unlink(missing_ok=True)
         try:
@@ -129,6 +162,10 @@ class CoreServerGroup:
             ssl_certfile=certificate,
             ssl_keyfile=private_key,
             lifespan="off" if certificate or secondary else "auto",
+            # PyInstaller GUI and Windows Service processes do not have a
+            # console stream. Uvicorn's default formatter probes stderr and
+            # raises "Unable to configure formatter 'default'" there.
+            log_config=None,
         )
 
     def run(self) -> None:

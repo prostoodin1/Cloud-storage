@@ -34,6 +34,7 @@ Compress-Archive -Path (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageCli
 Compress-Archive -Path @(
     (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageServerManager'),
     (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageServerCore'),
+    (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageLegacyCore'),
     (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageServerService')
 ) -DestinationPath $serverZip -CompressionLevel Optimal -Force
 Write-Host "Installers ready in $projectRoot\outputs"

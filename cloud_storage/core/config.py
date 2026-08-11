@@ -349,13 +349,17 @@ def _restrict_secret_file(path: Path) -> None:
         user_name = win32api.GetUserName()
         user_sid, _, _ = win32security.LookupAccountName(None, user_name)
         system_sid = win32security.CreateWellKnownSid(win32security.WinLocalSystemSid, None)
+        administrators_sid = win32security.CreateWellKnownSid(
+            win32security.WinBuiltinAdministratorsSid, None
+        )
         dacl = win32security.ACL()
-        dacl.AddAccessAllowedAce(
-            win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, user_sid
-        )
-        dacl.AddAccessAllowedAce(
-            win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, system_sid
-        )
+        unique_sids = {bytes(user_sid): user_sid}
+        unique_sids[bytes(system_sid)] = system_sid
+        unique_sids[bytes(administrators_sid)] = administrators_sid
+        for sid in unique_sids.values():
+            dacl.AddAccessAllowedAce(
+                win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, sid
+            )
         win32security.SetNamedSecurityInfo(
             str(path),
             win32security.SE_FILE_OBJECT,

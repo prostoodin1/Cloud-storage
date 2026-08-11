@@ -1,6 +1,6 @@
 # Cloud Storage Server
 
-Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.8 (Upgrade Log 001)** исправляет навигацию, запуск Core, установщик, иконки и подвисания интерфейса.
+Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.9 (Native Go Core)** переносит жизненный цикл ядра и Windows-службу в нативный Go-процесс, исправляет запуск Core 0.9.8 и сохраняет совместимость всех клиентов.
 
 Текущая ветка также содержит полный слой **Idea 4**: системные профили, питание/ИБП,
 Telegram/email/webhook, 20 шаблонов автоматизаций, отчёты, безопасные контейнерные
@@ -11,12 +11,12 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 | № | Приложение | Файл |
 |---:|---|---|
-| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Server-Setup-0.9.8-windows-x64.exe) |
-| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Client-Setup-0.9.8-windows-x64.exe) |
-| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Desktop-Client-0.9.8-windows-x64.zip) |
-| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Server-Manager-0.9.8-windows-x64.zip) |
-| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Mobile-Client-0.9.8-android.apk) |
-| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.8/CloudStorage-Mobile-Manager-0.9.8-android.apk) |
+| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Server-Setup-0.9.9-windows-x64.exe) |
+| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Client-Setup-0.9.9-windows-x64.exe) |
+| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Desktop-Client-0.9.9-windows-x64.zip) |
+| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Server-Manager-0.9.9-windows-x64.zip) |
+| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Mobile-Client-0.9.9-android.apk) |
+| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Mobile-Manager-0.9.9-android.apk) |
 
 ## Шесть приложений проекта
 
@@ -24,7 +24,16 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 **[Открыть каталог всех приложений](apps/README.md)**
 
-## Что работает в версии 0.9.8 — Upgrade Log 001
+## Что работает в версии 0.9.9 — Native Go Core
+
+- `CloudStorageServerCore.exe` и `CloudStorageServerService.exe` собраны на Go и работают без Python-консоли;
+- системный mutex гарантирует один экземпляр Core без накопления процессов;
+- Go-watchdog запускает внутренний compatibility engine, контролирует его и восстанавливает после сбоя;
+- старый `core.pid` проверяется по реальному имени процесса и больше не блокирует запуск из-за PID `svchost.exe`;
+- Uvicorn не использует несовместимый с Windows Service консольный formatter;
+- холодный запуск получает до 30 секунд, а локализованный вывод `sc.exe` декодируется через OEM-кодировку Windows;
+- установщик обновляет службу, удаляет устаревшую PID-блокировку и сохраняет базу, пользователей и настройки;
+- публичный API `v1` не изменён, поэтому Manager, Desktop Client и мобильные приложения совместимы без перенастройки;
 
 - все системные вкладки открываются без запущенного Core и подсвечиваются при наведении;
 - в Настройках есть прямые разделы Система, Интерфейс, Docker и SSH;

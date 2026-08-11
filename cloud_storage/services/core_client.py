@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import locale
 import os
 import secrets
 import subprocess
@@ -589,7 +590,7 @@ class CoreSupervisor:
         self.client = client
         self.config = client.config
 
-    def start(self, timeout_seconds: float = 10.0) -> dict[str, Any]:
+    def start(self, timeout_seconds: float = 30.0) -> dict[str, Any]:
         current = self.client.try_health()
         if current:
             return current
@@ -601,9 +602,7 @@ class CoreSupervisor:
                     ["sc.exe", "start", "CloudStorageServerCore"],
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+                    text=False,
                     timeout=15,
                     check=False,
                     creationflags=subprocess.CREATE_NO_WINDOW,
@@ -614,7 +613,7 @@ class CoreSupervisor:
                     "Проверьте, что Manager запущен с правами администратора."
                 ) from exc
             if completed.returncode not in {0, 1056}:
-                details = (completed.stderr or completed.stdout).strip()
+                details = self._decode_command_output(completed.stderr or completed.stdout).strip()
                 reason = {
                     5: "Windows отказала в доступе — нужны права администратора",
                     1060: "служба CloudStorageServerCore не установлена",
@@ -713,17 +712,37 @@ class CoreSupervisor:
                 ["sc.exe", "query", "CloudStorageServerCore"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                text=False,
                 timeout=5,
                 check=False,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return f"не удалось проверить ({exc})"
-        text = " ".join((result.stdout or result.stderr).split())
+        text = " ".join(CoreSupervisor._decode_command_output(result.stdout or result.stderr).split())
         return text[-500:] or f"код {result.returncode}"
+
+    @staticmethod
+    def _decode_command_output(payload: bytes | str | None) -> str:
+        if payload is None:
+            return ""
+        if isinstance(payload, str):
+            return payload
+        encodings: list[str] = []
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                encodings.append(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
+            except (AttributeError, OSError, ValueError):
+                pass
+        encodings.extend([locale.getpreferredencoding(False), "utf-8"])
+        for encoding in encodings:
+            try:
+                return payload.decode(encoding)
+            except (LookupError, UnicodeDecodeError):
+                continue
+        return payload.decode("utf-8", errors="replace")
 
     def stop(self, timeout_seconds: float = 8.0) -> bool:
         if not self.client.try_health():

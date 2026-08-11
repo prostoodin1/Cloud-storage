@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.9.8"
+#define AppVersion "0.9.9"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
 #define BuildRoot "..\dist"
@@ -25,7 +25,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
-CloseApplicationsFilter=CloudStorageServerManager.exe,CloudStorageServerCore.exe,CloudStorageServerService.exe
+CloseApplicationsFilter=CloudStorageServerManager.exe,CloudStorageServerCore.exe,CloudStorageLegacyCore.exe,CloudStorageServerService.exe
 RestartApplications=no
 RestartIfNeededByRun=no
 UsePreviousAppDir=yes
@@ -46,6 +46,7 @@ Name: "{commonappdata}\CloudStorage"; Permissions: admins-full system-full
 [Files]
 Source: "{#BuildRoot}\CloudStorageServerManager\*"; DestDir: "{app}\Manager"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\CloudStorageServerCore\*"; DestDir: "{app}\CloudStorageServerCore"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BuildRoot}\CloudStorageLegacyCore\*"; DestDir: "{app}\CloudStorageLegacyCore"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\CloudStorageServerService\*"; DestDir: "{app}\Service"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -55,7 +56,7 @@ Name: "{autodesktop}\Cloud Storage Server Manager"; Filename: "{app}\Manager\Clo
 
 [Run]
 Filename: "{app}\CloudStorageServerCore\CloudStorageServerCore.exe"; Parameters: "--initialize-only"; StatusMsg: "Создаём защищённую базу сервера…"; Flags: runhidden waituntilterminated
-Filename: "{app}\Service\CloudStorageServerService.exe"; Parameters: "--startup auto install"; StatusMsg: "Устанавливаем службу Cloud Storage…"; Flags: runhidden waituntilterminated; Check: not IsServerServiceInstalled
+Filename: "{app}\Service\CloudStorageServerService.exe"; Parameters: "--startup auto install"; StatusMsg: "Устанавливаем службу Cloud Storage…"; Flags: runhidden waituntilterminated
 Filename: "{sys}\sc.exe"; Parameters: "config CloudStorageServerCore start= auto"; Flags: runhidden waituntilterminated
 Filename: "{sys}\sc.exe"; Parameters: "failure CloudStorageServerCore reset= 86400 actions= restart/5000/restart/15000/restart/60000"; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Cloud Storage HTTPS (Private)"" dir=in action=allow protocol=TCP localport=8766 profile=private"; Flags: runhidden waituntilterminated; Tasks: privatefirewall
@@ -106,6 +107,9 @@ begin
   Result := '';
   Exec(ExpandConstant('{sys}\net.exe'), 'stop CloudStorageServerCore /y', '',
     SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  { The native Go supervisor validates process identity and no longer trusts
+    stale numeric PID files from 0.9.x. Remove the legacy lock after stopping. }
+  DeleteFile(ExpandConstant('{commonappdata}\CloudStorage\core.pid'));
   BackupServerData;
 end;
 

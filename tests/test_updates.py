@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -12,6 +13,7 @@ from cloud_storage.updates import (
     UpdateError,
     UpdatePreferences,
     UpdateService,
+    _launch_elevated_windows,
     canonical_manifest_payload,
     parse_signed_catalog,
     parse_signed_manifest,
@@ -132,16 +134,48 @@ def test_update_installer_is_reverified_immediately_before_launch(
     installer.write_bytes(payload)
     launched: list[list[str]] = []
 
-    monkeypatch.setattr(
-        "cloud_storage.updates.subprocess.Popen",
-        lambda arguments, **_kwargs: launched.append(arguments),
-    )
+    if os.name == "nt":
+        monkeypatch.setattr(
+            "cloud_storage.updates._launch_elevated_windows",
+            lambda arguments: launched.append(arguments),
+        )
+    else:
+        monkeypatch.setattr(
+            "cloud_storage.updates.subprocess.Popen",
+            lambda arguments, **_kwargs: launched.append(arguments),
+        )
     service.launch_installer(installer, info)
     assert launched and launched[0][0] == str(installer.resolve())
 
     installer.write_bytes(b"modified!")
     with pytest.raises(UpdateError, match="изменён"):
         service.launch_installer(installer, info)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ShellExecute API")
+def test_windows_installer_launch_uses_runas_and_quotes_parameters(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class ShellExecute:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, *arguments: object) -> int:
+            calls.append(arguments)
+            return 42
+
+    shell_execute = ShellExecute()
+    monkeypatch.setattr(
+        "cloud_storage.updates.ctypes.windll.shell32.ShellExecuteW",
+        shell_execute,
+    )
+    installer = tmp_path / "Cloud Storage Setup.exe"
+    _launch_elevated_windows([str(installer), "/VERYSILENT", "/LOG=install log.txt"])
+
+    assert calls
+    assert calls[0][1] == "runas"
+    assert calls[0][2] == str(installer.resolve())
+    assert '"/LOG=install log.txt"' in str(calls[0][3])
 
 
 @pytest.mark.parametrize(

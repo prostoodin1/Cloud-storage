@@ -1,7 +1,7 @@
 {
   "id": "mobile-client",
   "name": "Cloud Storage Mobile Client",
-  "version": "0.9.9",
+  "version": "0.9.10",
   "platforms": ["android", "ios"],
   "role": "user",
   "source_paths": [
@@ -12,8 +12,8 @@
     "mobile/src/transfers.ts"
   ],
   "release_assets": [
-    "CloudStorage-Mobile-Client-0.9.9-android.apk",
-    "CloudStorage-Mobile-Client-0.9.9-apple-simulator.zip",
-    "CloudStorage-Mobile-Client-0.9.9-unsigned.ipa"
+    "CloudStorage-Mobile-Client-0.9.10-android.apk",
+    "CloudStorage-Mobile-Client-0.9.10-apple-simulator.zip",
+    "CloudStorage-Mobile-Client-0.9.10-unsigned.ipa"
   ]
 }

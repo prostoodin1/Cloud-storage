@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -346,7 +347,10 @@ class UpdateService:
             f"/LOG={log_path}",
         ]
         try:
-            subprocess.Popen(arguments, close_fds=True)
+            if os.name == "nt":
+                _launch_elevated_windows(arguments)
+            else:
+                subprocess.Popen(arguments, close_fds=True)
         except OSError as exc:
             raise UpdateError("не удалось запустить установщик обновления") from exc
 
@@ -411,6 +415,40 @@ def _file_digest(path: Path) -> tuple[int, str]:
                 raise UpdateError("установщик превышает допустимый размер")
             digest.update(chunk)
     return size, digest.hexdigest()
+
+
+def _launch_elevated_windows(arguments: list[str]) -> None:
+    """Launch a verified installer through the Windows UAC broker.
+
+    CreateProcess (and therefore ``subprocess.Popen``) returns Windows error 740
+    for an installer whose manifest requires administrator privileges. ShellExecute
+    with the ``runas`` verb is the supported way to display the UAC prompt.
+    """
+    if not arguments:
+        raise OSError("installer command is empty")
+    executable = str(Path(arguments[0]).resolve())
+    parameters = subprocess.list2cmdline(arguments[1:])
+    shell_execute = ctypes.windll.shell32.ShellExecuteW
+    shell_execute.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+        ctypes.c_int,
+    ]
+    shell_execute.restype = ctypes.c_void_p
+    result = shell_execute(
+        None,
+        "runas",
+        executable,
+        parameters,
+        str(Path(executable).parent),
+        1,
+    )
+    result_code = int(result or 0)
+    if result_code <= 32:
+        raise OSError(result_code, "Windows rejected the elevated installer launch")
 
 
 def is_frozen_windows() -> bool:

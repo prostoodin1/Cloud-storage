@@ -1,6 +1,6 @@
 # Cloud Storage Server
 
-Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.9 (Native Go Core)** переносит жизненный цикл ядра и Windows-службу в нативный Go-процесс, исправляет запуск Core 0.9.8 и сохраняет совместимость всех клиентов.
+Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.10** исправляет центр обновлений, запуск установщика через Windows UAC и сохраняет нативный Go Core из 0.9.9.
 
 Текущая ветка также содержит полный слой **Idea 4**: системные профили, питание/ИБП,
 Telegram/email/webhook, 20 шаблонов автоматизаций, отчёты, безопасные контейнерные
@@ -11,12 +11,12 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 | № | Приложение | Файл |
 |---:|---|---|
-| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Server-Setup-0.9.9-windows-x64.exe) |
-| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Client-Setup-0.9.9-windows-x64.exe) |
-| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Desktop-Client-0.9.9-windows-x64.zip) |
-| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Server-Manager-0.9.9-windows-x64.zip) |
-| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Mobile-Client-0.9.9-android.apk) |
-| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.9/CloudStorage-Mobile-Manager-0.9.9-android.apk) |
+| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.10/CloudStorage-Server-Setup-0.9.10-windows-x64.exe) |
+| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.10/CloudStorage-Client-Setup-0.9.10-windows-x64.exe) |
+| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.10/CloudStorage-Desktop-Client-0.9.10-windows-x64.zip) |
+| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.10/CloudStorage-Server-Manager-0.9.10-windows-x64.zip) |
+| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.10/CloudStorage-Mobile-Client-0.9.10-android.apk) |
+| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.10/CloudStorage-Mobile-Manager-0.9.10-android.apk) |
 
 ## Шесть приложений проекта
 
@@ -24,7 +24,14 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 **[Открыть каталог всех приложений](apps/README.md)**
 
-## Что работает в версии 0.9.9 — Native Go Core
+## Что работает в версии 0.9.10
+
+- вкладка обновлений снова получает подписанный список версий с GitHub;
+- скачанный установщик запускается через Windows UAC без ошибки 740;
+- полный путь к EXE виден в интерфейсе, папку можно открыть отдельной кнопкой;
+- Native Go Core из версии 0.9.9 сохранён.
+
+## Native Go Core
 
 - `CloudStorageServerCore.exe` и `CloudStorageServerService.exe` собраны на Go и работают без Python-консоли;
 - системный mutex гарантирует один экземпляр Core без накопления процессов;

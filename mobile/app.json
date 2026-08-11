@@ -3,7 +3,7 @@
     "name": "Cloud Storage",
     "slug": "cloud-storage-mobile",
     "scheme": "cloudstorage",
-    "version": "0.9.9",
+    "version": "0.9.10",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -18,7 +18,7 @@
     },
     "android": {
       "package": "com.cloudstorage.mobile",
-      "versionCode": 13,
+      "versionCode": 14,
       "adaptiveIcon": {
         "backgroundColor": "#e2383f",
         "foregroundImage": "./assets/android-icon-foreground.png",

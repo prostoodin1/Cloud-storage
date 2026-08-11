@@ -4,7 +4,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -154,9 +155,13 @@ class UpdatePage(QWidget):
         self.install_button = QPushButton("Установить и перезапустить")
         self.install_button.clicked.connect(self.install)
         self.install_button.setEnabled(False)
+        self.reveal_button = QPushButton("Показать установщик")
+        self.reveal_button.clicked.connect(self.reveal_installer)
+        self.reveal_button.setEnabled(False)
         buttons.addWidget(self.check_button)
         buttons.addWidget(self.download_button)
         buttons.addWidget(self.install_button)
+        buttons.addWidget(self.reveal_button)
         buttons.addStretch()
         card_layout.addWidget(self.version_label)
         card_layout.addWidget(self.status_label)
@@ -197,6 +202,7 @@ class UpdatePage(QWidget):
         self.version_combo.setEnabled(False)
         self.download_button.setEnabled(False)
         self.install_button.setEnabled(False)
+        self.reveal_button.setEnabled(False)
         self.notes.clear()
         self.status_label.setText("Настройка сохранена. Нажмите «Проверить версии».")
 
@@ -271,6 +277,7 @@ class UpdatePage(QWidget):
         self.info = self.versions[index]
         self.installer = None
         self.install_button.setEnabled(False)
+        self.reveal_button.setEnabled(False)
         self.download_button.setEnabled(True)
         self.notes.setPlainText(self.info.release_notes or "Описание версии не добавлено.")
         if self.info.newer_than_current:
@@ -299,10 +306,11 @@ class UpdatePage(QWidget):
         self.installer = result
         self.status_label.setText(
             f"Версия {self.info.version if self.info else '—'} скачана. "
-            "Подпись каталога и SHA-256 установщика проверены."
+            f"Подпись каталога и SHA-256 проверены. Файл: {result}"
         )
         self.download_button.setEnabled(self.info is not None)
         self.install_button.setEnabled(is_frozen_windows())
+        self.reveal_button.setEnabled(True)
         if not is_frozen_windows():
             self.status_label.setText(
                 self.status_label.text() + " Установка доступна в собранном Windows-приложении."
@@ -312,6 +320,17 @@ class UpdatePage(QWidget):
 
     def install(self) -> None:
         self._launch_install(require_confirmation=True)
+
+    def reveal_installer(self) -> None:
+        if self.installer is None or not self.installer.is_file():
+            QMessageBox.warning(self, "Установщик не найден", "Сначала скачайте выбранную версию.")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.installer.parent))):
+            QMessageBox.warning(
+                self,
+                "Не удалось открыть папку",
+                f"Установщик сохранён здесь:\n{self.installer}",
+            )
 
     def _launch_install(self, *, require_confirmation: bool) -> None:
         if self.installer is None or self.info is None:
@@ -342,10 +361,12 @@ class UpdatePage(QWidget):
         self.version_combo.setEnabled(False)
         self.download_button.setEnabled(False)
         self.install_button.setEnabled(False)
+        self.reveal_button.setEnabled(False)
 
     def _idle(self) -> None:
         self.check_button.setEnabled(True)
         self.version_combo.setEnabled(bool(self.versions))
+        self.reveal_button.setEnabled(self.installer is not None and self.installer.is_file())
 
     def _run(self, function: Callable[[], Any], success: Callable[[object], None]) -> None:
         task = _Task(function)

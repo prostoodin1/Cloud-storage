@@ -2,7 +2,7 @@
 
 Desktop Client подключается к домашнему серверу, показывает личные и общие пространства, управляет приёмом/отправкой, хранит офлайн-индекс и подключает облако как диск в Проводнике Windows.
 
-- [Скачать клиент на ПК 0.9.6](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.6/CloudStorage-Desktop-Client-0.9.6-windows-x64.zip)
+- [Скачать клиент на ПК 0.9.7](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.7/CloudStorage-Desktop-Client-0.9.7-windows-x64.zip)
 - [Исходники Desktop Client](../../cloud_storage/client)
 - [Исходники Windows Drive](../../drive_windows)
 - [Общие обновления](../../cloud_storage/updates.py)

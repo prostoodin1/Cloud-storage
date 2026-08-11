@@ -7,7 +7,7 @@ import win32service
 import win32serviceutil
 
 from cloud_storage.core.config import CoreConfig
-from cloud_storage.core.main import CoreServerGroup
+from cloud_storage.core.main import AlreadyRunningError, CoreServerGroup, PidGuard
 
 
 class CloudStorageCoreService(win32serviceutil.ServiceFramework):
@@ -29,11 +29,15 @@ class CloudStorageCoreService(win32serviceutil.ServiceFramework):
     def SvcDoRun(self) -> None:
         servicemanager.LogInfoMsg("Cloud Storage Server Core is starting")
         config = CoreConfig.from_environment()
-        while not self.stop_requested:
-            self.servers = CoreServerGroup(config)
-            self.servers.run()
-            if not self.servers.restart_requested:
-                break
+        try:
+            with PidGuard(config.pid_path):
+                while not self.stop_requested:
+                    self.servers = CoreServerGroup(config)
+                    self.servers.run()
+                    if not self.servers.restart_requested:
+                        break
+        except AlreadyRunningError as exc:
+            servicemanager.LogErrorMsg(f"Cloud Storage Server Core did not start: {exc}")
         servicemanager.LogInfoMsg("Cloud Storage Server Core has stopped")
 
 

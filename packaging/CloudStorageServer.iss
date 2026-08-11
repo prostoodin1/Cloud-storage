@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.9.6"
+#define AppVersion "0.9.7"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
 #define BuildRoot "..\dist"
@@ -30,6 +30,7 @@ RestartApplications=no
 RestartIfNeededByRun=no
 UsePreviousAppDir=yes
 MinVersion=10.0.17763
+AppMutex=CloudStorageServerSetup-SingleInstance
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"

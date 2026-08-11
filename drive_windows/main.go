@@ -36,6 +36,7 @@ import (
 const (
 	maxResponseBytes = 16 * 1024 * 1024
 	stillActive      = 259
+	driveMutexName   = `Local\CloudStorageDrive-SingleInstance`
 )
 
 type settingsDocument struct {
@@ -754,6 +755,21 @@ func run() error {
 	if *smokeTest {
 		return nil
 	}
+	mutexName, err := windows.UTF16PtrFromString(driveMutexName)
+	if err != nil {
+		return err
+	}
+	mutex, mutexErr := windows.CreateMutex(nil, false, mutexName)
+	if errors.Is(mutexErr, windows.ERROR_ALREADY_EXISTS) {
+		if mutex != 0 {
+			windows.CloseHandle(mutex)
+		}
+		return errors.New("Cloud Storage Drive is already running")
+	}
+	if mutexErr != nil {
+		return mutexErr
+	}
+	defer windows.CloseHandle(mutex)
 	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`).MatchString(*profileID) {
 		return errors.New("invalid profile identifier")
 	}

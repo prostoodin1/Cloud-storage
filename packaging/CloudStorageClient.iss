@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Client"
-#define AppVersion "0.9.6"
+#define AppVersion "0.9.7"
 #define AppPublisher "Cloud Storage"
 #define AppExeName "CloudStorageClient.exe"
 #define WinFspMsi "winfsp-2.1.25156.msi"
@@ -32,6 +32,7 @@ RestartApplications=no
 RestartIfNeededByRun=no
 UsePreviousAppDir=yes
 MinVersion=10.0.17763
+AppMutex=CloudStorageClientSetup-SingleInstance
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"

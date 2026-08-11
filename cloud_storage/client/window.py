@@ -1675,7 +1675,9 @@ class ClientWindow(QMainWindow):
             self.drive_status.setText("Диски с буквами поддерживаются только в Windows.")
             self.drive_open_button.setEnabled(False)
             return
-        statuses = self.drive_manager.reconcile(self.store.list_profiles())
+        # One active Client and one active virtual-drive helper are enough. Other
+        # profiles stay configured and are mounted when the user switches to them.
+        statuses = self.drive_manager.reconcile([self.profile])
         status = statuses.get(self.profile.profile_id)
         if status is None:
             self.drive_status.setText("Диск отключён в настройках.")

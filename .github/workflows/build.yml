@@ -43,6 +43,8 @@ jobs:
         run: go vet ./...
       - name: Build standalone manager
         run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageServer.spec
+      - name: Build standalone container manager
+        run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageContainerManager.spec
       - name: Build Python compatibility core on Windows
         if: runner.os == 'Windows'
         run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageLegacyCore.spec
@@ -63,6 +65,7 @@ jobs:
           name: CloudStorageServer-${{ runner.os }}
           path: |
             dist/CloudStorageServerManager/
+            dist/CloudStorageContainerManager/
             dist/CloudStorageServerCore/
             dist/CloudStorageLegacyCore/
             dist/CloudStorageServerService/

@@ -20,11 +20,12 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from cloud_storage.models import AppSettings, DiskRole, DiskSnapshot, DiskStatus
+from cloud_storage.models import ROLE_LABELS, AppSettings, DiskRole, DiskSnapshot, DiskStatus
 from cloud_storage.services.audit_log import AuditEvent
 from cloud_storage.services.disk_service import evaluate_status
 from cloud_storage.ui.connection_page import ConnectionCodePanel
@@ -349,6 +350,22 @@ class DisksPage(QWidget):
             )
         )
 
+        view_controls = QHBoxLayout()
+        self.physical_view_button = QPushButton("Физические диски")
+        self.roles_view_button = QPushButton("Назначения и роли")
+        self.physical_view_button.setCheckable(True)
+        self.roles_view_button.setCheckable(True)
+        self.physical_view_button.clicked.connect(lambda: self._set_view("physical"))
+        self.roles_view_button.clicked.connect(lambda: self._set_view("roles"))
+        view_controls.addWidget(self.physical_view_button)
+        view_controls.addWidget(self.roles_view_button)
+        view_controls.addStretch()
+        self.layout.addLayout(view_controls)
+        self._view = "physical"
+        self._disks: list[DiskSnapshot] = []
+        self._settings = AppSettings()
+        self._reminder_hidden = False
+
         self.new_disk_banner = QFrame()
         self.new_disk_banner.setProperty("accent", "blue")
         banner_layout = QHBoxLayout(self.new_disk_banner)
@@ -388,6 +405,18 @@ class DisksPage(QWidget):
     def update_data(
         self, disks: list[DiskSnapshot], settings: AppSettings, reminder_hidden=False
     ) -> None:
+        self._disks = disks
+        self._settings = settings
+        self._reminder_hidden = bool(reminder_hidden)
+        self._render_cards()
+
+    def _set_view(self, view: str) -> None:
+        self._view = view if view in {"physical", "roles"} else "physical"
+        self._render_cards()
+
+    def _render_cards(self) -> None:
+        disks = self._disks
+        settings = self._settings
         while self.cards.count():
             item = self.cards.takeAt(0)
             if item.widget():
@@ -399,16 +428,51 @@ class DisksPage(QWidget):
             and disk.id not in settings.ignored_disk_ids
             and disk.available
         ]
-        self.new_disk_banner.setVisible(bool(pending) and not reminder_hidden)
+        self.new_disk_banner.setVisible(bool(pending) and not self._reminder_hidden)
         self.new_disk_title.setText(
             "Обнаружен новый диск"
             if len(pending) == 1
             else f"Обнаружено новых дисков: {len(pending)}"
         )
+        self.physical_view_button.setChecked(self._view == "physical")
+        self.roles_view_button.setChecked(self._view == "roles")
         self.empty.setVisible(not disks)
-        for index, disk in enumerate(disks):
-            card = DiskCard(disk, settings.configuration_for(disk.id))
-            card.selected.connect(self.disk_selected)
+        if self._view == "physical":
+            for index, disk in enumerate(disks):
+                card = DiskCard(disk, settings.configuration_for(disk.id))
+                card.selected.connect(self.disk_selected)
+                self.cards.addWidget(card, index // 2, index % 2)
+            return
+        grouped: list[tuple[DiskRole, list[DiskSnapshot]]] = []
+        for role in DiskRole:
+            assigned = [
+                disk for disk in disks if settings.configuration_for(disk.id).role == role
+            ]
+            if assigned:
+                grouped.append((role, assigned))
+        for index, (role, assigned) in enumerate(grouped):
+            card = QFrame()
+            card.setProperty("card", True)
+            card_layout = QVBoxLayout(card)
+            heading = QLabel(ROLE_LABELS[role])
+            heading.setStyleSheet("font-size: 16px; font-weight: 700;")
+            total = sum(item.total_bytes for item in assigned if item.available)
+            detail = QLabel(
+                f"Дисков: {len(assigned)} · Объём: {format_bytes(total)}\n"
+                + "\n".join(
+                    f"• {settings.configuration_for(item.id).display_name or item.label or item.mountpoint} ({item.mountpoint})"
+                    for item in assigned
+                )
+            )
+            detail.setWordWrap(True)
+            detail.setProperty("muted", True)
+            card_layout.addWidget(heading)
+            card_layout.addWidget(detail)
+            open_first = QPushButton("Открыть первый диск")
+            open_first.clicked.connect(
+                lambda _checked=False, disk_id=assigned[0].id: self.disk_selected.emit(disk_id)
+            )
+            card_layout.addWidget(open_first)
             self.cards.addWidget(card, index // 2, index % 2)
 
 
@@ -459,6 +523,7 @@ class SettingsPage(QWidget):
     restore_cancel_requested = Signal(str)
     open_updates_requested = Signal()
     system_section_requested = Signal(str)
+    disks_requested = Signal()
     connection_generation_requested = Signal(str, str, str)
 
     _SECTIONS = [
@@ -628,6 +693,13 @@ class SettingsPage(QWidget):
         self.diagnostics_quick_button: QPushButton | None = None
         self.diagnostics_full_button: QPushButton | None = None
         self.support_bundle_button: QPushButton | None = None
+        self.security_overall_label: QLabel | None = None
+        self.security_network_label: QLabel | None = None
+        self.security_files_label: QLabel | None = None
+        self.security_connection_label: QLabel | None = None
+        self.storage_status_label: QLabel | None = None
+        self.disk_settings_status_label: QLabel | None = None
+        self.access_status_label: QLabel | None = None
         self._current_settings = AppSettings()
         self._pages_by_name = {name: self._make_section(name) for name, _ in self._SECTIONS}
         self._rebuild_sections()
@@ -703,6 +775,100 @@ class SettingsPage(QWidget):
             self.read_only_button.setEnabled(online and not read_only)
         if self.normal_mode_button is not None:
             self.normal_mode_button.setEnabled(online and read_only)
+        if self.security_overall_label is not None:
+            incidents = (diagnostics or {}).get("incidents") or []
+            critical = sum(
+                str(item.get("severity", "")).casefold() == "critical"
+                and str(item.get("status", "open")).casefold() not in {"resolved", "closed"}
+                for item in incidents
+            )
+            self.security_overall_label.setText(
+                "Защита активна · критических инцидентов нет"
+                if online and not critical
+                else f"Требуется внимание · критических инцидентов: {critical}"
+                if online
+                else "Ядро выключено — проверка недоступна"
+            )
+            self.security_overall_label.setStyleSheet(
+                "color: #43c778; font-weight: 700;"
+                if online and not critical
+                else "color: #e2383f; font-weight: 700;"
+            )
+        if self.security_network_label is not None:
+            lan = (health or {}).get("lan") or {}
+            remote_security = (health or {}).get("remote") or {}
+            zrok_security = (tunnels or {}).get("zrok") or {}
+            lan_active = bool(lan.get("enabled", lan.get("endpoints")))
+            remote_active = bool(remote_security.get("enabled"))
+            zrok_active = zrok_security.get("state") == "online"
+            self.security_network_label.setText(
+                f"LAN HTTPS: {'включён' if lan_active else 'выключен'}\n"
+                f"Интернет-вход: {'активен' if remote_active or zrok_active else 'выключен'}\n"
+                "Manager API: только 127.0.0.1\n"
+                "Передача: TLS; сертификат проверяется по SHA-256"
+            )
+        if self.security_files_label is not None:
+            configured = [
+                config
+                for config in self._current_settings.disk_configurations.values()
+                if config.role not in {DiskRole.UNCONFIGURED, DiskRole.UNUSED}
+            ]
+            encrypted = sum(config.encryption_requested for config in configured)
+            writable = sum(
+                config.mode.value == "active" and not config.read_only for config in configured
+            )
+            self.security_files_label.setText(
+                "Загруженные файлы не запускаются на сервере.\n"
+                "Запись атомарная, SHA-256 проверяется при фиксации.\n"
+                f"Дисков с записью: {writable} · запрошено шифрование: {encrypted}.\n"
+                f"Режим сервера: {'только чтение' if read_only else 'обычный'}"
+            )
+        if self.security_connection_label is not None:
+            trusted = sum(item.get("status") == "trusted" for item in devices)
+            pending = sum(item.get("status") == "pending" for item in devices)
+            lan = (health or {}).get("lan") or {}
+            remote_security = (health or {}).get("remote") or {}
+            pairing_enabled = bool(remote_security.get("pairing_enabled"))
+            fingerprint = str(
+                remote_security.get("display_fingerprint")
+                or lan.get("display_fingerprint")
+                or "—"
+            )
+            self.security_connection_label.setText(
+                f"Доверенных устройств: {trusted} · ожидают: {pending}\n"
+                f"Удалённые одноразовые коды: {'разрешены' if pairing_enabled else 'закрыты'}\n"
+                "Пароли: Argon2id; токены устройств хранятся отдельно.\n"
+                f"TLS SHA-256: {fingerprint}"
+            )
+        roots = list(storage_roots or [])
+        if self.storage_status_label is not None:
+            writable_roots = sum(bool(item.get("write_enabled", True)) for item in roots)
+            backup_roots = sum(item.get("purpose") == "backup" for item in roots)
+            self.storage_status_label.setText(
+                f"Ядро: {'работает' if online else 'выключено'}\n"
+                f"Активных путей хранения: {len(roots)} · с записью: {writable_roots}\n"
+                f"Путей резервных копий: {backup_roots}"
+            )
+        if self.disk_settings_status_label is not None:
+            configurations = list(self._current_settings.disk_configurations.values())
+            configured_count = sum(
+                item.role not in {DiskRole.UNCONFIGURED, DiskRole.UNUSED}
+                for item in configurations
+            )
+            cache_count = sum(item.role == DiskRole.CACHE for item in configurations)
+            self.disk_settings_status_label.setText(
+                f"Обнаружено конфигураций: {len(configurations)} · назначено: {configured_count}\n"
+                f"Кэш-дисков: {cache_count} · синхронизировано с Core: {len(roots)}"
+            )
+        if self.access_status_label is not None:
+            trusted = sum(item.get("status") == "trusted" for item in devices)
+            pending = sum(item.get("status") == "pending" for item in devices)
+            admins = sum(item.get("role") == "admin" for item in users)
+            self.access_status_label.setText(
+                f"Пользователей: {len(users)} · администраторов: {admins}\n"
+                f"Доверенных устройств: {trusted} · ожидают подтверждения: {pending}\n"
+                "Изоляция личных пространств выполняется серверным ядром."
+            )
         if self.lan_status_label is not None:
             lan = health.get("lan") if health else None
             if lan:
@@ -1820,6 +1986,7 @@ class SettingsPage(QWidget):
             self.connection_panel.generation_requested.connect(
                 self.connection_generation_requested
             )
+            self.connection_panel.create_user_requested.connect(self.add_user_requested)
             self.connection_panel.refresh_button.clicked.connect(self.core_refresh_requested)
             layout.addWidget(self.connection_panel)
         elif name == "Пользователи":
@@ -2039,22 +2206,68 @@ class SettingsPage(QWidget):
             layout.addWidget(info)
             layout.addWidget(self.config_path)
         elif name == "Безопасность":
-            card = QFrame()
-            card.setProperty("accent", "blue")
-            card_layout = QVBoxLayout(card)
-            heading = QLabel("Политика загруженных файлов")
-            heading.setStyleSheet("font-weight: 700; font-size: 16px;")
-            body = QLabel(
-                "Серверное ядро хранит загрузки как данные: без запуска на сервере, "
-                "с удалёнными флагами выполнения, атомарной фиксацией и выдачей только "
-                "на чтение. Файловый API Beta 0.2 уже применяет эту политику."
-            )
-            body.setWordWrap(True)
-            body.setProperty("muted", True)
-            card_layout.addWidget(heading)
-            card_layout.addWidget(body)
-            layout.addWidget(card)
+            self.security_overall_label = QLabel("Проверка ещё не запускалась")
+            self.security_overall_label.setWordWrap(True)
+            self.security_overall_label.setStyleSheet("font-size: 17px; font-weight: 700;")
+            layout.addWidget(self.security_overall_label)
+            tabs = QTabWidget()
+            for title, attribute in (
+                ("Безопасность в сети", "security_network_label"),
+                ("Безопасность файлов", "security_files_label"),
+                ("Безопасность подключений", "security_connection_label"),
+            ):
+                tab = QWidget()
+                tab_layout = QVBoxLayout(tab)
+                status_label = QLabel("Ядро не опрошено")
+                status_label.setWordWrap(True)
+                status_label.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                )
+                setattr(self, attribute, status_label)
+                tab_layout.addWidget(status_label)
+                if attribute == "security_network_label":
+                    configure = QPushButton("Открыть сетевые настройки")
+                    configure.clicked.connect(lambda: self.show_section("Сеть"))
+                    tab_layout.addWidget(configure)
+                elif attribute == "security_files_label":
+                    controls = QHBoxLayout()
+                    read_only_button = QPushButton("Аварийный режим «только чтение»")
+                    read_only_button.clicked.connect(self.server_read_only_requested)
+                    normal_button = QPushButton("Вернуть обычный режим")
+                    normal_button.clicked.connect(self.server_normal_requested)
+                    disk_security_button = QPushButton("Шифрование и режимы дисков")
+                    disk_security_button.clicked.connect(self.disks_requested)
+                    controls.addWidget(read_only_button)
+                    controls.addWidget(normal_button)
+                    controls.addWidget(disk_security_button)
+                    tab_layout.addLayout(controls)
+                else:
+                    devices_button = QPushButton("Открыть доверенные устройства")
+                    devices_button.clicked.connect(
+                        lambda: self.show_section("Доверенные устройства")
+                    )
+                    tab_layout.addWidget(devices_button)
+                    invitation_button = QPushButton("Создать безопасное подключение")
+                    invitation_button.clicked.connect(lambda: self.show_section("Подключение"))
+                    tab_layout.addWidget(invitation_button)
+                tab_layout.addStretch()
+                tabs.addTab(tab, title)
+            layout.addWidget(tabs)
+            scan_controls = QHBoxLayout()
+            quick = QPushButton("Быстрая проверка")
+            quick.clicked.connect(self.diagnostics_quick_requested)
+            full = QPushButton("Полная проверка защиты")
+            full.setProperty("primary", True)
+            full.clicked.connect(self.diagnostics_full_requested)
+            scan_controls.addWidget(quick)
+            scan_controls.addWidget(full)
+            scan_controls.addStretch()
+            layout.addLayout(scan_controls)
         elif name == "Хранилище":
+            self.storage_status_label = QLabel("Ядро ещё не опрошено")
+            self.storage_status_label.setWordWrap(True)
+            self.storage_status_label.setProperty("emptyState", True)
+            layout.addWidget(self.storage_status_label)
             body = QLabel(
                 "Порог заполнения, минимальный резерв и приоритет записи задаются отдельно "
                 "для каждого диска на его подробной странице."
@@ -2070,7 +2283,21 @@ class SettingsPage(QWidget):
             guide.setWordWrap(True)
             guide.setProperty("emptyState", True)
             layout.addWidget(guide)
+            storage_controls = QHBoxLayout()
+            open_disks = QPushButton("Настроить диски и роли")
+            open_disks.setProperty("primary", True)
+            open_disks.clicked.connect(self.disks_requested)
+            open_backups = QPushButton("Открыть резервные копии")
+            open_backups.clicked.connect(lambda: self.show_section("Резервные копии"))
+            storage_controls.addWidget(open_disks)
+            storage_controls.addWidget(open_backups)
+            storage_controls.addStretch()
+            layout.addLayout(storage_controls)
         elif name == "Диски":
+            self.disk_settings_status_label = QLabel("Данные дисков ещё не загружены")
+            self.disk_settings_status_label.setWordWrap(True)
+            self.disk_settings_status_label.setProperty("emptyState", True)
+            layout.addWidget(self.disk_settings_status_label)
             body = QLabel(
                 "Менеджер читает реальные сведения Windows и не форматирует накопители. "
                 "Назначение, порог заполнения и приоритет задаются во вкладке «Диски»: "
@@ -2085,7 +2312,21 @@ class SettingsPage(QWidget):
             note.setWordWrap(True)
             note.setProperty("emptyState", True)
             layout.addWidget(note)
+            disk_controls = QHBoxLayout()
+            open_disks = QPushButton("Открыть диски")
+            open_disks.setProperty("primary", True)
+            open_disks.clicked.connect(self.disks_requested)
+            refresh_disks = QPushButton("Повторить обнаружение")
+            refresh_disks.clicked.connect(self.refresh_requested)
+            disk_controls.addWidget(open_disks)
+            disk_controls.addWidget(refresh_disks)
+            disk_controls.addStretch()
+            layout.addLayout(disk_controls)
         elif name == "Права доступа":
+            self.access_status_label = QLabel("Ядро ещё не опрошено")
+            self.access_status_label.setWordWrap(True)
+            self.access_status_label.setProperty("emptyState", True)
+            layout.addWidget(self.access_status_label)
             description = QLabel(
                 "Права применяются серверным ядром, а не интерфейсом клиента. Пользователь не "
                 "может увидеть чужое личное пространство или административные функции."
@@ -2105,6 +2346,16 @@ class SettingsPage(QWidget):
             matrix.setWordWrap(True)
             matrix.setProperty("emptyState", True)
             layout.addWidget(matrix)
+            access_controls = QHBoxLayout()
+            open_users = QPushButton("Управлять пользователями")
+            open_users.setProperty("primary", True)
+            open_users.clicked.connect(lambda: self.show_section("Пользователи"))
+            open_devices = QPushButton("Управлять устройствами")
+            open_devices.clicked.connect(lambda: self.show_section("Доверенные устройства"))
+            access_controls.addWidget(open_users)
+            access_controls.addWidget(open_devices)
+            access_controls.addStretch()
+            layout.addLayout(access_controls)
         elif name == "Журналы":
             description = QLabel(
                 "Здесь показываются последние административные и защитные события Core. "
@@ -2597,6 +2848,12 @@ class SettingsPage(QWidget):
     def _show_section(self, row: int) -> None:
         if row >= 0:
             self.stack.setCurrentIndex(row)
+
+    def show_section(self, name: str) -> None:
+        for row in range(self.section_list.count()):
+            if self.section_list.item(row).text() == name:
+                self.section_list.setCurrentRow(row)
+                return
 
     def _settings_payload(self) -> dict:
         return {

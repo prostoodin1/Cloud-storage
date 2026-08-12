@@ -264,8 +264,23 @@ class ClientWindow(QMainWindow):
         form_card.setProperty("card", True)
         card_layout = QVBoxLayout(form_card)
         card_layout.setContentsMargins(18, 18, 18, 18)
-        form = QFormLayout()
-        form.setVerticalSpacing(12)
+        mode_controls = QHBoxLayout()
+        self.connection_mode_buttons: list[QPushButton] = []
+        for index, text in enumerate(
+            ("1. Логин и пароль", "2. Ссылка", "3. QR-code")
+        ):
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, page=index: self._set_connection_mode(page))
+            mode_controls.addWidget(button)
+            self.connection_mode_buttons.append(button)
+        mode_controls.addStretch()
+        card_layout.addLayout(mode_controls)
+
+        self.connection_modes = QStackedWidget()
+        login_page = QWidget()
+        login_form = QFormLayout(login_page)
+        login_form.setVerticalSpacing(12)
         self.server_selector = QComboBox()
         self.server_selector.setMinimumWidth(280)
         self.server_selector.currentIndexChanged.connect(self.switch_server)
@@ -286,29 +301,58 @@ class ClientWindow(QMainWindow):
         address_row.addWidget(self.discover_button)
         self.fingerprint = QLineEdit()
         self.fingerprint.setPlaceholderText("SHA-256 сертификата — для HTTPS")
+        self.username = QLineEdit()
+        self.username.setPlaceholderText("Логин, созданный администратором")
+        login_form.addRow("Логин", self.username)
+        login_form.addRow("Сохранённый сервер", profile_row)
+        login_form.addRow("Адрес сервера", address_row)
+        login_form.addRow("Отпечаток TLS", self.fingerprint)
+        self.connection_modes.addWidget(login_page)
+
+        link_page = QWidget()
+        link_form = QFormLayout(link_page)
+        link_help = QLabel(
+            "Вставьте рабочую ссылку cloudstorage://pair?… из Server Manager. IP, TLS и логин заполнятся автоматически."
+        )
+        link_help.setWordWrap(True)
+        link_help.setProperty("muted", True)
         self.pairing_code = QLineEdit()
-        self.pairing_code.setPlaceholderText("Вставьте код CS1.… из Server Manager")
+        self.pairing_code.setPlaceholderText("cloudstorage://pair?… или CS1.…")
         self.pairing_code.setMaxLength(4096)
+        link_form.addRow(link_help)
+        link_form.addRow("Ссылка", self.pairing_code)
+        self.connection_modes.addWidget(link_page)
+
+        qr_page = QWidget()
+        qr_form = QFormLayout(qr_page)
+        qr_help = QLabel(
+            "На телефоне отсканируйте QR камерой Client. На ПК вставьте текст QR из буфера — это та же защищённая ссылка."
+        )
+        qr_help.setWordWrap(True)
+        qr_help.setProperty("muted", True)
+        self.qr_payload = QLineEdit()
+        self.qr_payload.setPlaceholderText("Текст QR: cloudstorage://pair?…")
+        self.qr_payload.setMaxLength(4096)
+        qr_form.addRow(qr_help)
+        qr_form.addRow("Данные QR", self.qr_payload)
+        self.connection_modes.addWidget(qr_page)
+        card_layout.addWidget(self.connection_modes)
+
+        common_form = QFormLayout()
+        common_form.setVerticalSpacing(12)
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         self.password.setPlaceholderText("Минимум 10 символов")
         self.device_name = QLineEdit(platform.node() or "Мой компьютер")
-        self.username = QLineEdit()
-        self.username.setPlaceholderText("Логин, созданный администратором")
-        form.addRow("Код подключения", self.pairing_code)
-        form.addRow("Пароль", self.password)
-        form.addRow("Название устройства", self.device_name)
-        form.addRow("Логин", self.username)
-        form.addRow("Сохранённые серверы", profile_row)
-        form.addRow("Ручной адрес (для старых версий)", address_row)
-        form.addRow("Ручной отпечаток TLS", self.fingerprint)
-        card_layout.addLayout(form)
+        common_form.addRow("Пароль", self.password)
+        common_form.addRow("Название устройства", self.device_name)
+        card_layout.addLayout(common_form)
         enrollment_controls = QHBoxLayout()
         self.account_login_button = QPushButton("Войти по логину")
         self.account_login_button.clicked.connect(self.login_new_device)
         self.connect_button = QPushButton("Подключиться по коду")
         self.connect_button.setProperty("primary", True)
-        self.connect_button.clicked.connect(self.connect_device)
+        self.connect_button.clicked.connect(self.connect_selected_invitation)
         self.import_access_button = QPushButton("Импортировать файл входа")
         self.import_access_button.clicked.connect(self.import_access_file)
         enrollment_controls.addWidget(self.account_login_button)
@@ -316,6 +360,7 @@ class ClientWindow(QMainWindow):
         enrollment_controls.addWidget(self.import_access_button)
         enrollment_controls.addStretch()
         card_layout.addLayout(enrollment_controls)
+        self._set_connection_mode(0)
         controls = QHBoxLayout()
         self.status_button = QPushButton("Проверить подтверждение")
         self.status_button.clicked.connect(self.refresh_connection)
@@ -331,6 +376,30 @@ class ClientWindow(QMainWindow):
         layout.addWidget(form_card)
         layout.addStretch()
         return page
+
+    def _set_connection_mode(self, index: int) -> None:
+        if not hasattr(self, "connection_modes"):
+            return
+        safe_index = max(0, min(index, self.connection_modes.count() - 1))
+        self.connection_modes.setCurrentIndex(safe_index)
+        for button_index, button in enumerate(self.connection_mode_buttons):
+            button.setChecked(button_index == safe_index)
+            button.setProperty("primary", button_index == safe_index)
+            button.style().unpolish(button)
+            button.style().polish(button)
+        if hasattr(self, "account_login_button"):
+            self.account_login_button.setVisible(safe_index == 0)
+            self.connect_button.setVisible(safe_index in {1, 2})
+            self.connect_button.setText(
+                "Подключиться по ссылке"
+                if safe_index == 1
+                else "Подключиться по QR"
+            )
+
+    def connect_selected_invitation(self) -> None:
+        if self.connection_modes.currentIndex() == 2:
+            self.pairing_code.setText(self.qr_payload.text().strip())
+        self.connect_device()
 
     def _make_files_page(self) -> QWidget:
         page = QWidget()

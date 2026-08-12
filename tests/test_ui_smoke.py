@@ -7,7 +7,8 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
 
 from cloud_storage.container_manager.window import ContainerManagerWindow
-from cloud_storage.models import DiskSnapshot
+from cloud_storage.models import AppSettings, DiskConfiguration, DiskRole, DiskSnapshot
+from cloud_storage.pairing import build_connection_code
 from cloud_storage.services.settings_store import SettingsStore
 from cloud_storage.ui.connection_page import ConnectionCodePanel
 from cloud_storage.ui.main_window import MainWindow
@@ -120,6 +121,41 @@ def test_connection_panel_generates_without_manual_ip() -> None:
     assert panel.endpoint.text() == "https://192.168.1.20:8766"
     assert spy.count() == 1
     assert list(spy.at(0)) == ["user-1", "alex", "lan"]
+
+    panel.show_code(
+        build_connection_code(
+            "ABCD-2345",
+            "https://192.168.1.20:8766",
+            "ab" * 32,
+            "alex",
+        ),
+        "Готово",
+    )
+    assert panel.generated_username.text() == "alex"
+    assert "username=alex" in panel.invitation_link.text()
+    assert panel.qr_label.pixmap() is not None
+
+
+def test_disk_role_survives_a_changed_windows_disk_id(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = SettingsStore(tmp_path)
+    settings = AppSettings()
+    settings.disk_configurations["old-transient-id"] = DiskConfiguration(
+        role=DiskRole.CACHE,
+        identity_mountpoint="X:\\",
+        identity_device="fake",
+    )
+    settings.known_disk_ids.append("old-transient-id")
+    store.save(settings)
+
+    window = MainWindow(store=store, disk_service=FakeDiskService())
+    app.processEvents()
+
+    restored = store.load()
+    assert "old-transient-id" not in restored.disk_configurations
+    assert restored.disk_configurations["disk-test"].role == DiskRole.CACHE
+    assert restored.disk_configurations["disk-test"].identity_mountpoint == "X:\\"
+    window.close()
 
 
 def test_separate_container_manager_renders_resource_boxes() -> None:

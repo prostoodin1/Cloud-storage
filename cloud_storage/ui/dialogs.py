@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import secrets
+import string
 from datetime import UTC, datetime
 
 import qrcode
@@ -304,6 +306,9 @@ class DiskDetailDialog(QDialog):
             read_only=self.read_only.isChecked(),
             encryption_requested=self.encryption.isChecked(),
             last_check_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            identity_mountpoint=self.disk.mountpoint,
+            identity_device=self.disk.device,
+            identity_serial=self.disk.serial or "",
         )
         self.configuration_saved.emit(self.disk.id, configuration)
         self.accept()
@@ -424,8 +429,12 @@ class CreateUserDialog(QDialog):
         self.email = QLineEdit()
         self.email.setPlaceholderText("user@example.com (необязательно)")
         self.password = QLineEdit()
-        self.password.setEchoMode(QLineEdit.EchoMode.Password)
         self.password.setPlaceholderText("Минимум 10 символов")
+        password_row = QHBoxLayout()
+        password_row.addWidget(self.password, 1)
+        generate_password = QPushButton("Создать надёжный")
+        generate_password.clicked.connect(self.generate_password)
+        password_row.addWidget(generate_password)
         self.password_confirmation = QLineEdit()
         self.password_confirmation.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_confirmation.setPlaceholderText("Повторите пароль")
@@ -436,7 +445,7 @@ class CreateUserDialog(QDialog):
         self.admin = QCheckBox("Администратор сервера")
         form.addRow("Логин", self.username)
         form.addRow("Имя", self.display_name)
-        form.addRow("Пароль", self.password)
+        form.addRow("Пароль", password_row)
         form.addRow("Повтор пароля", self.password_confirmation)
         form.addRow("Личное хранилище", self.quota)
         form.addRow("Email для файла входа", self.email)
@@ -457,6 +466,13 @@ class CreateUserDialog(QDialog):
         buttons.accepted.connect(self._validate)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.generate_password()
+
+    def generate_password(self) -> None:
+        alphabet = string.ascii_letters + string.digits + "-_!@"
+        value = "Cs!" + "".join(secrets.choice(alphabet) for _ in range(17))
+        self.password.setText(value)
+        self.password_confirmation.setText(value)
 
     def _validate(self) -> None:
         username = self.username.text().strip()
@@ -564,6 +580,8 @@ class InvitationDialog(QDialog):
         expires_at: str,
         server_url: str = "",
         certificate_fingerprint: str = "",
+        username: str = "",
+        password: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -571,7 +589,11 @@ class InvitationDialog(QDialog):
         self.code = code
         self.server_url = server_url
         self.certificate_fingerprint = certificate_fingerprint
-        self.pairing_uri = build_pairing_uri(code, server_url, certificate_fingerprint)
+        self.username = username
+        self.password = password
+        self.pairing_uri = build_pairing_uri(
+            code, server_url, certificate_fingerprint, username
+        )
         self.setWindowTitle("Код подключения")
         self.setMinimumWidth(470)
         layout = QVBoxLayout(self)
@@ -585,6 +607,21 @@ class InvitationDialog(QDialog):
         description.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(description)
+
+        if username:
+            credentials = QFrame()
+            credentials.setProperty("accent", "blue")
+            credentials_layout = QFormLayout(credentials)
+            username_value = QLineEdit(username)
+            username_value.setReadOnly(True)
+            password_value = QLineEdit(password or "пароль уже задан пользователю")
+            password_value.setReadOnly(True)
+            credentials_layout.addRow("Логин", username_value)
+            credentials_layout.addRow("Пароль", password_value)
+            copy_credentials = QPushButton("Скопировать логин и пароль")
+            copy_credentials.clicked.connect(self._copy_credentials)
+            credentials_layout.addRow("", copy_credentials)
+            layout.addWidget(credentials)
 
         row = QHBoxLayout()
         qr_label = QLabel()
@@ -646,6 +683,12 @@ class InvitationDialog(QDialog):
 
     def _copy_invitation(self) -> None:
         QApplication.clipboard().setText(self.pairing_uri)
+
+    def _copy_credentials(self) -> None:
+        password = self.password or "(пароль, который вы задали ранее)"
+        QApplication.clipboard().setText(
+            f"Логин: {self.username}\nПароль: {password}"
+        )
 
     def _short_fingerprint(self) -> str:
         normalized = self.certificate_fingerprint.replace(":", "").upper()

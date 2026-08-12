@@ -73,6 +73,7 @@ def build_pairing_uri(
     code: str,
     server_url: str = "",
     certificate_fingerprint: str = "",
+    username: str = "",
 ) -> str:
     parameters = {"code": code.strip().upper()}
     if server_url:
@@ -82,6 +83,11 @@ def build_pairing_uri(
         if not _FINGERPRINT.fullmatch(fingerprint):
             raise ValueError("certificate fingerprint must be 64 hexadecimal characters")
         parameters["fingerprint"] = fingerprint
+    clean_username = username.strip()
+    if clean_username:
+        if len(clean_username) > 128:
+            raise ValueError("invalid username")
+        parameters["username"] = clean_username
     return "cloudstorage://pair?" + urllib.parse.urlencode(parameters)
 
 
@@ -103,7 +109,10 @@ def parse_pairing_uri(value: str) -> PairingInvitation | None:
     fingerprint = _single(parameters, "fingerprint", required=False).replace(":", "").lower()
     if fingerprint and not _FINGERPRINT.fullmatch(fingerprint):
         raise ValueError("invalid certificate fingerprint in invitation")
-    return PairingInvitation(code, server_url, fingerprint)
+    username = _single(parameters, "username", required=False).strip()
+    if len(username) > 128:
+        raise ValueError("invalid username in invitation")
+    return PairingInvitation(code, server_url, fingerprint, username)
 
 
 def _validated_invitation(

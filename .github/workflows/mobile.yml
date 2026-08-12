@@ -44,9 +44,9 @@ jobs:
       matrix:
         include:
           - variant: client
-            output: CloudStorage-Mobile-Client-0.9.11-android.apk
+            output: CloudStorage-Mobile-Client-0.9.12-android.apk
           - variant: manager
-            output: CloudStorage-Mobile-Manager-0.9.11-android.apk
+            output: CloudStorage-Mobile-Manager-0.9.12-android.apk
     env:
       EXPO_PUBLIC_APP_VARIANT: ${{ matrix.variant }}
     steps:
@@ -92,7 +92,7 @@ jobs:
           cp android/app/build/outputs/apk/release/app-release.apk "release/$MOBILE_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.11-android-release
+          name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.12-android-release
           path: mobile/release/*
           if-no-files-found: error
 
@@ -150,10 +150,10 @@ jobs:
             adb shell monkey -p ${{ matrix.package }} 1
             sleep 8
             mkdir -p mobile/screenshots
-            adb exec-out screencap -p > mobile/screenshots/CloudStorage-Mobile-${{ matrix.variant }}-0.9.11-android.png
+            adb exec-out screencap -p > mobile/screenshots/CloudStorage-Mobile-${{ matrix.variant }}-0.9.12-android.png
       - uses: actions/upload-artifact@v4
         with:
-          name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.11-android-screenshot
+          name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.12-android-screenshot
           path: mobile/screenshots/*.png
           if-no-files-found: error
 
@@ -166,13 +166,13 @@ jobs:
         include:
           - variant: client
             bundle: com.cloudstorage.mobile
-            output: CloudStorage-Mobile-Client-0.9.11-apple-simulator.zip
-            device_output: CloudStorage-Mobile-Client-0.9.11-unsigned.ipa
+            output: CloudStorage-Mobile-Client-0.9.12-apple-simulator.zip
+            device_output: CloudStorage-Mobile-Client-0.9.12-unsigned.ipa
             screenshot_screen: files
           - variant: manager
             bundle: com.cloudstorage.manager
-            output: CloudStorage-Mobile-Manager-0.9.11-apple-simulator.zip
-            device_output: CloudStorage-Mobile-Manager-0.9.11-unsigned.ipa
+            output: CloudStorage-Mobile-Manager-0.9.12-apple-simulator.zip
+            device_output: CloudStorage-Mobile-Manager-0.9.12-unsigned.ipa
             screenshot_screen: server
     env:
       EXPO_PUBLIC_APP_VARIANT: ${{ matrix.variant }}
@@ -261,12 +261,12 @@ jobs:
             xcrun simctl install "$DEVICE_ID" "$APP_PATH"
             xcrun simctl launch "$DEVICE_ID" "$MOBILE_BUNDLE"
             sleep 8
-            xcrun simctl io "$DEVICE_ID" screenshot "screenshots/CloudStorage-Mobile-$MOBILE_VARIANT-0.9.11-$FAMILY.png"
+            xcrun simctl io "$DEVICE_ID" screenshot "screenshots/CloudStorage-Mobile-$MOBILE_VARIANT-0.9.12-$FAMILY.png"
             xcrun simctl shutdown "$DEVICE_ID" || true
           done
       - uses: actions/upload-artifact@v4
         with:
-          name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.11-apple-simulator
+          name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.12-apple-simulator
           path: |
             mobile/release/*.zip
             mobile/release/*.ipa

@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
 import * as Device from 'expo-device';
 import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
@@ -9,7 +10,28 @@ import { Brand, Button, Card, Field, Notice, Screen, Title } from '../components
 import { colors, radius, spacing } from '../theme';
 import type { ConnectionProfile, PairingResult } from '../types';
 
-type Mode = 'account' | 'code';
+type Mode = 'account' | 'link' | 'qr';
+
+type Invitation = {
+  code: string;
+  serverUrl: string;
+  username: string;
+};
+
+function parseInvitation(value: string): Invitation {
+  const candidate = value.trim();
+  if (!candidate.toLocaleLowerCase().startsWith('cloudstorage://pair?')) {
+    throw new Error('Нужна ссылка cloudstorage://pair из Server Manager.');
+  }
+  const parsed = new URL(candidate);
+  const code = (parsed.searchParams.get('code') ?? '').trim().toLocaleUpperCase();
+  const serverUrl = (parsed.searchParams.get('server') ?? '').trim().replace(/\/$/, '');
+  const username = (parsed.searchParams.get('username') ?? '').trim();
+  if (code.replace(/[-\s]/g, '').length !== 8 || !/^https?:\/\//i.test(serverUrl)) {
+    throw new Error('Ссылка подключения повреждена или не содержит адрес сервера.');
+  }
+  return { code, serverUrl, username };
+}
 
 export function LoginScreen({
   onConnected,
@@ -21,6 +43,9 @@ export function LoginScreen({
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
+  const [link, setLink] = useState('');
+  const [qrScanned, setQrScanned] = useState(false);
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [deviceName, setDeviceName] = useState(Device.deviceName ?? 'Мой телефон');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -42,6 +67,7 @@ export function LoginScreen({
         addresses?: unknown;
         username?: unknown;
         one_time_code?: unknown;
+        login_link?: unknown;
       };
       if (value.format !== 'cloud-storage-access-v1') {
         throw new Error('Это не файл доступа Cloud Storage.');
@@ -57,11 +83,36 @@ export function LoginScreen({
       setServerUrl(String(value.addresses[0]));
       setUsername(importedUsername);
       setCode(importedCode);
-      setMode('code');
+      setLink(
+        typeof value.login_link === 'string' && value.login_link
+          ? value.login_link
+          : `cloudstorage://pair?code=${encodeURIComponent(importedCode)}&server=${encodeURIComponent(String(value.addresses[0]))}&username=${encodeURIComponent(importedUsername)}`,
+      );
+      setMode('link');
     } catch (reason) {
       setError(
         reason instanceof Error ? reason.message : 'Файл доступа не импортирован.',
       );
+    }
+  };
+
+  const applyInvitation = (value: string) => {
+    const invitation = parseInvitation(value);
+    setServerUrl(invitation.serverUrl);
+    setCode(invitation.code);
+    if (invitation.username) setUsername(invitation.username);
+    setLink(value.trim());
+    return invitation;
+  };
+
+  const scanQr = ({ data }: BarcodeScanningResult) => {
+    if (qrScanned) return;
+    try {
+      applyInvitation(data);
+      setQrScanned(true);
+      setError('');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'QR-код не распознан.');
     }
   };
 
@@ -70,18 +121,30 @@ export function LoginScreen({
       setError('Введите пароль минимум из 10 символов и название телефона.');
       return;
     }
+    let targetServer = serverUrl;
+    let targetCode = code;
+    if (mode !== 'account') {
+      try {
+        const invitation = applyInvitation(link);
+        targetServer = invitation.serverUrl;
+        targetCode = invitation.code;
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : 'Приглашение не распознано.');
+        return;
+      }
+    }
     if (mode === 'account' && username.trim().length < 3) {
       setError('Введите логин, созданный администратором.');
       return;
     }
-    if (mode === 'code' && code.replace(/[-\s]/g, '').length !== 8) {
-      setError('Введите восьмизначный одноразовый код.');
+    if (mode !== 'account' && targetCode.replace(/[-\s]/g, '').length !== 8) {
+      setError('В приглашении нет рабочего одноразового кода.');
       return;
     }
     setBusy(true);
     setError('');
     try {
-      const api = new CloudApi(serverUrl);
+      const api = new CloudApi(targetServer);
       const health = await api.health();
       const result =
         mode === 'account'
@@ -91,7 +154,12 @@ export function LoginScreen({
               deviceName.trim(),
               platformName,
             )
-          : await api.redeemInvitation(code.trim(), password, deviceName.trim(), platformName);
+          : await api.redeemInvitation(
+              targetCode.trim(),
+              password,
+              deviceName.trim(),
+              platformName,
+            );
       await onConnected(
         {
           serverUrl: api.serverUrl,
@@ -119,34 +187,54 @@ export function LoginScreen({
       </Title>
       <View style={styles.switcher}>
         <ModeButton active={mode === 'account'} title="Логин и пароль" onPress={() => setMode('account')} />
-        <ModeButton active={mode === 'code'} title="Одноразовый код" onPress={() => setMode('code')} />
+        <ModeButton active={mode === 'link'} title="Ссылка" onPress={() => setMode('link')} />
+        <ModeButton active={mode === 'qr'} title="QR-code" onPress={() => setMode('qr')} />
       </View>
       <Card>
-        <Field
-          label="HTTPS-адрес сервера"
-          value={serverUrl}
-          onChangeText={setServerUrl}
-          placeholder="https://ваш-сервер.zrok.io"
-          keyboardType="url"
-          autoCorrect={false}
-        />
         {mode === 'account' ? (
+          <>
+            <Field
+              label="HTTPS-адрес сервера"
+              value={serverUrl}
+              onChangeText={setServerUrl}
+              placeholder="https://ваш-сервер.zrok.io"
+              keyboardType="url"
+              autoCorrect={false}
+            />
+            <Field
+              label="Логин"
+              value={username}
+              onChangeText={setUsername}
+              placeholder="ivan"
+              autoCorrect={false}
+            />
+          </>
+        ) : mode === 'link' ? (
           <Field
-            label="Логин"
-            value={username}
-            onChangeText={setUsername}
-            placeholder="ivan"
+            label="Ссылка из Server Manager"
+            value={link}
+            onChangeText={(value) => {
+              setLink(value);
+              setQrScanned(false);
+            }}
+            placeholder="cloudstorage://pair?…"
+            keyboardType="url"
             autoCorrect={false}
           />
+        ) : cameraPermission?.granted && !qrScanned ? (
+          <View style={styles.cameraBox}>
+            <CameraView
+              style={styles.camera}
+              facing="back"
+              barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+              onBarcodeScanned={scanQr}
+            />
+            <Text style={styles.cameraHelp}>Наведите камеру на QR в Server Manager</Text>
+          </View>
+        ) : qrScanned ? (
+          <Notice tone="green">QR распознан. Адрес и одноразовый код готовы.</Notice>
         ) : (
-          <Field
-            label="Код подключения"
-            value={code}
-            onChangeText={setCode}
-            placeholder="ABCD-2345"
-            autoCorrect={false}
-            autoCapitalize="characters"
-          />
+          <Button title="Разрешить камеру и сканировать QR" onPress={() => void requestCameraPermission()} />
         )}
         <Field
           label="Пароль"
@@ -165,7 +253,22 @@ export function LoginScreen({
         />
         {error ? <Notice tone="red">{error}</Notice> : null}
         <Button title="Импортировать файл входа" onPress={importAccessFile} />
-        <Button title={mode === 'account' ? 'Войти' : 'Подключиться по коду'} onPress={connect} busy={busy} />
+        {mode === 'qr' && qrScanned ? (
+          <Button
+            title="Сканировать другой QR"
+            secondary
+            onPress={() => {
+              setQrScanned(false);
+              setLink('');
+            }}
+          />
+        ) : null}
+        <Button
+          title={mode === 'account' ? 'Войти' : mode === 'link' ? 'Подключиться по ссылке' : 'Подключиться по QR'}
+          onPress={connect}
+          busy={busy}
+          disabled={mode === 'qr' && !qrScanned}
+        />
       </Card>
       <Notice tone="blue">
         Пароль не сохраняется в приложении. Токен устройства хранится в Android Keystore или iOS Keychain. Для доступа через интернет используйте публичный HTTPS-адрес zrok.
@@ -195,4 +298,13 @@ const styles = StyleSheet.create({
   modeButtonActive: { backgroundColor: colors.red },
   modeText: { color: colors.muted, fontWeight: '700' },
   modeTextActive: { color: colors.white },
+  cameraBox: {
+    overflow: 'hidden',
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceAlt,
+  },
+  camera: { width: '100%', height: 280 },
+  cameraHelp: { color: colors.muted, textAlign: 'center', padding: spacing.sm },
 });

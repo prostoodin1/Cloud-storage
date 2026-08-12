@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
-from PySide6.QtGui import QGuiApplication
+import qrcode
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -10,15 +11,18 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from cloud_storage.pairing import build_pairing_uri, parse_connection_code
 from cloud_storage.ui.widgets import make_header
 
 
 class ConnectionCodePanel(QFrame):
     generation_requested = Signal(str, str, str)
+    create_user_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -57,26 +61,70 @@ class ConnectionCodePanel(QFrame):
         layout.addLayout(form)
 
         controls = QHBoxLayout()
+        self.create_user_button = QPushButton("+ Новый пользователь")
+        self.create_user_button.clicked.connect(self.create_user_requested)
         self.generate_button = QPushButton("Создать код на 15 минут")
         self.generate_button.setProperty("primary", True)
         self.generate_button.clicked.connect(self._request_generation)
         self.refresh_button = QPushButton("Обновить состояние")
+        controls.addWidget(self.create_user_button)
         controls.addWidget(self.generate_button)
         controls.addWidget(self.refresh_button)
         controls.addStretch()
         layout.addLayout(controls)
 
+        self.access_tabs = QTabWidget()
+        credentials_tab = QWidget()
+        credentials_layout = QFormLayout(credentials_tab)
+        self.generated_username = QLineEdit()
+        self.generated_username.setReadOnly(True)
+        self.generated_username.setPlaceholderText("Логин пользователя")
         self.code = QLineEdit()
         self.code.setReadOnly(True)
         self.code.setPlaceholderText("Здесь появится код вида CS1.…")
         self.code.setMinimumHeight(42)
-        code_row = QHBoxLayout()
-        code_row.addWidget(self.code, 1)
-        self.copy_button = QPushButton("Копировать")
+        self.copy_button = QPushButton("Скопировать логин и код")
         self.copy_button.setEnabled(False)
         self.copy_button.clicked.connect(self.copy_code)
-        code_row.addWidget(self.copy_button)
-        layout.addLayout(code_row)
+        credentials_layout.addRow("Логин", self.generated_username)
+        credentials_layout.addRow("Код", self.code)
+        credentials_layout.addRow("", self.copy_button)
+        self.access_tabs.addTab(credentials_tab, "1. Логин и код")
+
+        link_tab = QWidget()
+        link_layout = QVBoxLayout(link_tab)
+        link_help = QLabel(
+            "Вставьте эту ссылку в отдельное поле «Ссылка» в Client. Адрес, TLS, логин и одноразовый код заполнятся сами."
+        )
+        link_help.setWordWrap(True)
+        link_help.setProperty("muted", True)
+        self.invitation_link = QLineEdit()
+        self.invitation_link.setReadOnly(True)
+        self.invitation_link.setPlaceholderText("cloudstorage://pair?…")
+        self.copy_link_button = QPushButton("Скопировать ссылку")
+        self.copy_link_button.setEnabled(False)
+        self.copy_link_button.clicked.connect(self.copy_link)
+        link_layout.addWidget(link_help)
+        link_layout.addWidget(self.invitation_link)
+        link_layout.addWidget(self.copy_link_button)
+        link_layout.addStretch()
+        self.access_tabs.addTab(link_tab, "2. Ссылка")
+
+        qr_tab = QWidget()
+        qr_layout = QHBoxLayout(qr_tab)
+        self.qr_label = QLabel("Сначала создайте доступ")
+        self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr_label.setMinimumSize(220, 220)
+        self.qr_label.setProperty("muted", True)
+        qr_help = QLabel(
+            "Отсканируйте QR мобильным Client. QR содержит ту же рабочую ссылку и не требует ручного ввода IP."
+        )
+        qr_help.setWordWrap(True)
+        qr_help.setProperty("muted", True)
+        qr_layout.addWidget(self.qr_label)
+        qr_layout.addWidget(qr_help, 1)
+        self.access_tabs.addTab(qr_tab, "3. QR-code")
+        layout.addWidget(self.access_tabs)
 
         self.result_detail = QLabel(
             "Интернет-код станет доступен после запуска zrok или настройки публичного HTTPS-входа."
@@ -144,6 +192,26 @@ class ConnectionCodePanel(QFrame):
     def show_code(self, code: str, detail: str) -> None:
         self.code.setText(code)
         self.copy_button.setEnabled(bool(code))
+        try:
+            invitation = parse_connection_code(code)
+            if invitation is None:
+                raise ValueError("invalid connection code")
+            link = build_pairing_uri(
+                invitation.code,
+                invitation.server_url,
+                invitation.certificate_fingerprint,
+                invitation.username,
+            )
+            self.generated_username.setText(invitation.username)
+            self.invitation_link.setText(link)
+            self.copy_link_button.setEnabled(True)
+            self.qr_label.setText("")
+            self.qr_label.setPixmap(self._qr_pixmap(link))
+        except ValueError as exc:
+            self.invitation_link.clear()
+            self.copy_link_button.setEnabled(False)
+            self.qr_label.setPixmap(QPixmap())
+            self.qr_label.setText(str(exc))
         self.result_detail.setText(detail)
 
     def show_error(self, message: str) -> None:
@@ -152,8 +220,34 @@ class ConnectionCodePanel(QFrame):
     def copy_code(self) -> None:
         if not self.code.text():
             return
-        QGuiApplication.clipboard().setText(self.code.text())
+        payload = f"Логин: {self.generated_username.text()}\nКод: {self.code.text()}"
+        QGuiApplication.clipboard().setText(payload)
         self.copy_button.setText("Скопировано")
+
+    def copy_link(self) -> None:
+        if self.invitation_link.text():
+            QGuiApplication.clipboard().setText(self.invitation_link.text())
+            self.copy_link_button.setText("Скопировано")
+
+    @staticmethod
+    def _qr_pixmap(payload: str) -> QPixmap:
+        qr = qrcode.QRCode(version=None, box_size=7, border=2)
+        qr.add_data(payload)
+        qr.make(fit=True)
+        matrix = qr.get_matrix()
+        size = len(matrix)
+        image = QImage(size, size, QImage.Format.Format_RGB32)
+        white = QColor("white").rgb()
+        black = QColor("black").rgb()
+        for y, row in enumerate(matrix):
+            for x, enabled in enumerate(row):
+                image.setPixel(x, y, black if enabled else white)
+        return QPixmap.fromImage(image).scaled(
+            220,
+            220,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
 
     def _request_generation(self) -> None:
         user = self.user.currentData() or {}

@@ -36,7 +36,7 @@ def test_atomic_settings_save_and_load(tmp_path) -> None:
     assert restored.zrok_port == 9878
     assert restored.zrok_executable == "C:/tools/zrok.exe"
     assert restored.zrok_share_name == "home-cloud"
-    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 4
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 5
     assert not list(tmp_path.glob("*.tmp"))
 
 

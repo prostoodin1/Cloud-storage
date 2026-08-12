@@ -83,6 +83,9 @@ class DiskConfiguration:
     check_schedule: str = "Еженедельно"
     maintenance_schedule: str = "Вручную"
     last_check_at: str | None = None
+    identity_mountpoint: str = ""
+    identity_device: str = ""
+    identity_serial: str = ""
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> DiskConfiguration:
@@ -105,7 +108,7 @@ class DiskConfiguration:
 
 @dataclass(slots=True)
 class AppSettings:
-    schema_version: int = 4
+    schema_version: int = 5
     server_name: str = "Домашнее облако"
     setup_complete: bool = False
     setup_reminded_later: bool = False
@@ -130,7 +133,7 @@ class AppSettings:
     def from_dict(cls, value: dict[str, Any] | None) -> AppSettings:
         value = value or {}
         result = cls()
-        result.schema_version = 4
+        result.schema_version = 5
         result.server_name = str(value.get("server_name", result.server_name))[:80]
         result.setup_complete = bool(value.get("setup_complete", False))
         result.setup_reminded_later = bool(value.get("setup_reminded_later", False))

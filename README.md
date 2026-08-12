@@ -1,6 +1,6 @@
 # Cloud Storage Server
 
-Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.11** исправляет перезапуск Windows-службы, добавляет подключение единым кодом без ручного IP и отдельный менеджер контейнеров.
+Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.12** упрощает вход по логину, ссылке или QR, стабилизирует назначения дисков и превращает раздел безопасности в рабочий центр проверки.
 
 Текущая ветка также содержит полный слой **Idea 4**: системные профили, питание/ИБП,
 Telegram/email/webhook, 20 шаблонов автоматизаций, отчёты, безопасные контейнерные
@@ -11,12 +11,12 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 | № | Приложение | Файл |
 |---:|---|---|
-| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.11/CloudStorage-Server-Setup-0.9.11-windows-x64.exe) |
-| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.11/CloudStorage-Client-Setup-0.9.11-windows-x64.exe) |
-| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.11/CloudStorage-Desktop-Client-0.9.11-windows-x64.zip) |
-| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.11/CloudStorage-Server-Manager-0.9.11-windows-x64.zip) |
-| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.11/CloudStorage-Mobile-Client-0.9.11-android.apk) |
-| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.11/CloudStorage-Mobile-Manager-0.9.11-android.apk) |
+| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Server-Setup-0.9.12-windows-x64.exe) |
+| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Client-Setup-0.9.12-windows-x64.exe) |
+| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Desktop-Client-0.9.12-windows-x64.zip) |
+| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Server-Manager-0.9.12-windows-x64.zip) |
+| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Mobile-Client-0.9.12-android.apk) |
+| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Mobile-Manager-0.9.12-android.apk) |
 
 ## Шесть приложений проекта
 
@@ -24,7 +24,19 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 **[Открыть каталог всех приложений](apps/README.md)**
 
-## Что работает в версии 0.9.11
+## Что работает в версии 0.9.12
+
+- Server Manager создаёт пользователя с надёжным паролем и сразу выдаёт три равноправных способа входа: логин/код, рабочую `cloudstorage://`-ссылку и QR;
+- Desktop Client разделяет вход на три понятных режима, а мобильный Client сканирует QR камерой;
+- ссылка и QR переносят адрес, одноразовый код, TLS-отпечаток и логин, поэтому IP вручную вводить не нужно;
+- вкладка «Диски» переключается между физическими накопителями и назначениями/ролями;
+- назначение диска сохраняет его системную идентичность и восстанавливается, если Windows изменит временный ID;
+- роли общих папок, архива и временного хранилища синхронизируются с Core, а кэш используется как staging для приёма;
+- «Безопасность» показывает реальное состояние сети, файлов и подключений и запускает настоящую быструю или полную SHA-256 диагностику;
+- разделы «Хранилище», «Диски» и «Права доступа» показывают живые показатели и содержат рабочие переходы к настройке;
+- весь интерфейс прошёл автоматический визуальный аудит, а тесты проверяют API, настройки, диски и подключение.
+
+## Что работало в версии 0.9.11
 
 - перезапуск Core ждёт полного состояния `STOPPED` службы и больше не попадает в 30-секундную гонку;
 - Server Manager создаёт единый код `CS1.…` для локальной сети или интернета без ручного IP;

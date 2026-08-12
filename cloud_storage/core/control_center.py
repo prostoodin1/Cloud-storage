@@ -1043,7 +1043,12 @@ class ControlCenterService:
                 and f":{self.config.lan_port}" in address
                 and self.tls_fingerprint
             },
-            "login_link": build_pairing_uri(code, primary_address, pairing_fingerprint),
+            "login_link": build_pairing_uri(
+                code,
+                primary_address,
+                pairing_fingerprint,
+                user.username,
+            ),
             "personal_drive_name": f"Личный диск — {user.display_name}",
             "instructions": "Откройте Client, выберите 'Подключиться по коду' и импортируйте этот файл.",
         }

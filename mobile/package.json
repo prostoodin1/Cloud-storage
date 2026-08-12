@@ -1,6 +1,6 @@
 {
   "name": "cloud-storage-mobile",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "private": true,
   "main": "index.ts",
   "scripts": {
@@ -15,6 +15,7 @@
     "expo": "~57.0.12",
     "expo-background-task": "~57.0.9",
     "expo-battery": "~57.0.1",
+    "expo-camera": "~57.0.3",
     "expo-device": "~57.0.1",
     "expo-document-picker": "~57.0.1",
     "expo-file-system": "~57.0.2",

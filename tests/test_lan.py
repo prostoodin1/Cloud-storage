@@ -37,7 +37,12 @@ def _free_udp_port() -> int:
 
 def test_pairing_uri_round_trip_contains_tls_identity() -> None:
     fingerprint = "ab" * 32
-    uri = build_pairing_uri("ABCD-2345", "https://192.168.1.20:8766", fingerprint)
+    uri = build_pairing_uri(
+        "ABCD-2345",
+        "https://192.168.1.20:8766",
+        fingerprint,
+        "alex",
+    )
 
     invitation = parse_pairing_uri(uri)
 
@@ -45,6 +50,7 @@ def test_pairing_uri_round_trip_contains_tls_identity() -> None:
     assert invitation.code == "ABCD-2345"
     assert invitation.server_url == "https://192.168.1.20:8766"
     assert invitation.certificate_fingerprint == fingerprint
+    assert invitation.username == "alex"
 
 
 def test_connection_code_contains_address_tls_identity_and_username() -> None:

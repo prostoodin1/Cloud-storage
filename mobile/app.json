@@ -3,14 +3,14 @@
     "name": "Cloud Storage",
     "slug": "cloud-storage-mobile",
     "scheme": "cloudstorage",
-    "version": "0.9.11",
+    "version": "0.9.12",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.cloudstorage.mobile",
-      "buildNumber": "13",
+      "buildNumber": "14",
       "infoPlist": {
         "NSFaceIDUsageDescription": "Cloud Storage защищает токены подключения в системном хранилище.",
         "NSPhotoLibraryUsageDescription": "Cloud Storage выбирает фотографии только для загрузки в ваше личное хранилище."
@@ -18,7 +18,7 @@
     },
     "android": {
       "package": "com.cloudstorage.mobile",
-      "versionCode": 14,
+      "versionCode": 15,
       "adaptiveIcon": {
         "backgroundColor": "#e2383f",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -28,6 +28,13 @@
       "predictiveBackGestureEnabled": true
     },
     "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Cloud Storage сканирует только QR-код подключения, показанный вашим Server Manager.",
+          "recordAudioAndroid": false
+        }
+      ],
       "expo-secure-store",
       "expo-document-picker",
       [

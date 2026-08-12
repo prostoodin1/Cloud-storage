@@ -293,6 +293,7 @@ class MainWindow(QMainWindow):
         self.connection_page.panel.generation_requested.connect(
             self.generate_connection_code
         )
+        self.connection_page.panel.create_user_requested.connect(self.add_user)
         self.connection_page.panel.refresh_button.clicked.connect(self.refresh_core)
         self.disks_page.disk_selected.connect(self.open_disk)
         self.disks_page.refresh_requested.connect(self.refresh_disks)
@@ -378,6 +379,7 @@ class MainWindow(QMainWindow):
         self.settings_page.notification_acknowledge_requested.connect(self.acknowledge_notification)
         self.settings_page.integration_test_requested.connect(self.test_integration)
         self.settings_page.open_updates_requested.connect(lambda: self._show_page(self.update_page))
+        self.settings_page.disks_requested.connect(lambda: self._show_page(self.disks_page))
         self.settings_page.system_section_requested.connect(self._open_system_section)
         self.settings_page.connection_generation_requested.connect(
             self.generate_connection_code
@@ -476,6 +478,7 @@ class MainWindow(QMainWindow):
             )
             self._refresh_pages()
             return
+        self._reconcile_disk_identities(discovered)
         new_ids = [item.id for item in discovered if item.id not in self.settings.known_disk_ids]
         if new_ids:
             self.settings.known_disk_ids.extend(new_ids)
@@ -489,6 +492,46 @@ class MainWindow(QMainWindow):
             self.store.save(self.settings)
         self.disks = mark_missing_disks(discovered, self.settings)
         self._refresh_pages()
+
+    def _reconcile_disk_identities(self, discovered: list[DiskSnapshot]) -> None:
+        """Move saved roles when Windows reports the same volume under a new transient id."""
+        changed = False
+        for disk in discovered:
+            if disk.id in self.settings.disk_configurations:
+                continue
+            mount = os.path.normcase(os.path.abspath(disk.mountpoint))
+            serial = (disk.serial or "").strip().casefold()
+            matches: list[str] = []
+            for old_id, config in self.settings.disk_configurations.items():
+                old_mount = (
+                    os.path.normcase(os.path.abspath(config.identity_mountpoint))
+                    if config.identity_mountpoint
+                    else ""
+                )
+                old_serial = config.identity_serial.strip().casefold()
+                if (serial and old_serial == serial) or (old_mount and old_mount == mount):
+                    matches.append(old_id)
+            if len(matches) != 1:
+                continue
+            old_id = matches[0]
+            config = self.settings.disk_configurations.pop(old_id)
+            config.identity_mountpoint = disk.mountpoint
+            config.identity_device = disk.device
+            config.identity_serial = disk.serial or ""
+            self.settings.disk_configurations[disk.id] = config
+            self.settings.known_disk_ids = [
+                disk.id if item == old_id else item for item in self.settings.known_disk_ids
+            ]
+            self.settings.ignored_disk_ids = [
+                disk.id if item == old_id else item for item in self.settings.ignored_disk_ids
+            ]
+            self.audit.record(
+                "disk.identity.migrated",
+                f"Восстановлено назначение диска {disk.mountpoint} после смены системного ID",
+            )
+            changed = True
+        if changed:
+            self.store.save(self.settings)
 
     def _refresh_pages(self) -> None:
         events = self.audit.recent()
@@ -710,6 +753,8 @@ class MainWindow(QMainWindow):
             created["user"]["display_name"],
             invitation["code"],
             invitation["expires_at"],
+            str(created["user"].get("username") or values["username"]),
+            str(values["password"]),
         )
         self.refresh_core()
 
@@ -719,11 +764,15 @@ class MainWindow(QMainWindow):
         except (CoreApiError, CoreUnavailable) as exc:
             QMessageBox.warning(self, "Код не создан", self._core_error_text(exc))
             return
+        selected_user = next(
+            (item for item in self.core_users if str(item.get("id")) == user_id), {}
+        )
         self._show_invitation(
             invitation["id"],
             display_name,
             invitation["code"],
             invitation["expires_at"],
+            str(selected_user.get("username") or ""),
         )
 
     def generate_connection_code(self, user_id: str, username: str, mode: str) -> None:
@@ -783,7 +832,13 @@ class MainWindow(QMainWindow):
         self.refresh_core()
 
     def _show_invitation(
-        self, invitation_id: str, display_name: str, code: str, expires_at: str
+        self,
+        invitation_id: str,
+        display_name: str,
+        code: str,
+        expires_at: str,
+        username: str = "",
+        password: str = "",
     ) -> None:
         lan = self.core_health.get("lan") if self.core_health else None
         remote = self.core_health.get("remote") if self.core_health else None
@@ -808,7 +863,9 @@ class MainWindow(QMainWindow):
                 if lan
                 else ""
             ),
-            self,
+            username=username,
+            password=password,
+            parent=self,
         )
         dialog.cancel_requested.connect(self.cancel_invitation)
         dialog.exec()
@@ -1621,9 +1678,12 @@ class MainWindow(QMainWindow):
         eligible_roles = {
             DiskRole.SHARED,
             DiskRole.PERSONAL,
+            DiskRole.SHARED_FOLDERS,
             DiskRole.OVERFLOW,
             DiskRole.BACKUP,
             DiskRole.MIRROR,
+            DiskRole.ARCHIVE,
+            DiskRole.TEMPORARY,
         }
         for disk in self.disks:
             config = self.settings.configuration_for(disk.id)
@@ -1705,6 +1765,11 @@ class MainWindow(QMainWindow):
         dialog = SetupDialog(available, self.settings, self)
         if dialog.exec():
             configured = dialog.apply_to(self.settings)
+            for disk in available:
+                config = self.settings.configuration_for(disk.id)
+                config.identity_mountpoint = disk.mountpoint
+                config.identity_device = disk.device
+                config.identity_serial = disk.serial or ""
             self.store.save(self.settings)
             self.audit.record(
                 "setup.completed" if configured else "setup.deferred",
@@ -1815,6 +1880,14 @@ class MainWindow(QMainWindow):
 
     def save_disk_configuration(self, disk_id: str, configuration: DiskConfiguration) -> None:
         old = self.settings.configuration_for(disk_id)
+        disk = next((item for item in self.disks if item.id == disk_id), None)
+        if disk is not None:
+            configuration = replace(
+                configuration,
+                identity_mountpoint=disk.mountpoint,
+                identity_device=disk.device,
+                identity_serial=disk.serial or "",
+            )
         self.settings.disk_configurations[disk_id] = configuration
         if disk_id in self.settings.ignored_disk_ids and configuration.role != DiskRole.UNUSED:
             self.settings.ignored_disk_ids.remove(disk_id)

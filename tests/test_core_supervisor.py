@@ -55,6 +55,6 @@ def test_start_waits_out_previous_stop_pending_before_sc_start() -> None:
         patch.object(supervisor, "_wait_for_windows_service_state", return_value=True),
         patch("cloud_storage.services.core_client.subprocess.run", return_value=started) as run,
     ):
-    assert supervisor.start(timeout_seconds=1) == health
+        assert supervisor.start(timeout_seconds=1) == health
 
     assert run.call_args.args[0][:2] == ["sc.exe", "start"]

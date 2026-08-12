@@ -17,6 +17,8 @@ from typing import Any
 
 from cloud_storage.core.config import CoreConfig, CoreSecrets
 
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
 class CoreUnavailable(ConnectionError):
     pass
@@ -646,7 +648,7 @@ class CoreSupervisor:
                     text=False,
                     timeout=15,
                     check=False,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    creationflags=_CREATE_NO_WINDOW,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise CoreUnavailable(
@@ -710,7 +712,7 @@ class CoreSupervisor:
                 arguments["creationflags"] = (
                     subprocess.CREATE_NEW_PROCESS_GROUP
                     | subprocess.DETACHED_PROCESS
-                    | subprocess.CREATE_NO_WINDOW
+                    | _CREATE_NO_WINDOW
                 )
             else:
                 arguments["start_new_session"] = True
@@ -756,7 +758,7 @@ class CoreSupervisor:
                 text=False,
                 timeout=5,
                 check=False,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_CREATE_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return f"не удалось проверить ({exc})"
@@ -774,7 +776,7 @@ class CoreSupervisor:
                 text=False,
                 timeout=5,
                 check=False,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_CREATE_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -808,7 +810,7 @@ class CoreSupervisor:
                 text=False,
                 timeout=15,
                 check=False,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_CREATE_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise CoreUnavailable(f"Не удалось выполнить sc.exe {command}: {exc}") from exc
@@ -912,7 +914,7 @@ class CoreSupervisor:
                 stderr=subprocess.DEVNULL,
                 timeout=5,
                 check=False,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_CREATE_NO_WINDOW,
             )
             return result.returncode == 0
         except (OSError, subprocess.TimeoutExpired):

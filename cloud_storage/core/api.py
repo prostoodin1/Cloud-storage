@@ -464,6 +464,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
 
     def remote_client_path_allowed(path: str) -> bool:
         if path in {
+            "/",
             "/v1/health",
             "/v1/auth/device-login",
             "/v1/pairing/redeem",
@@ -719,6 +720,15 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     async def conflict_handler(request: Request, exc: ConflictError) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
+    @app.get("/", tags=["system"])
+    def root_status() -> dict[str, str]:
+        return {
+            "service": "Cloud Storage Server",
+            "status": "ok",
+            "version": __version__,
+            "health": "/v1/health",
+        }
+
     @app.exception_handler(InvalidCredential)
     @app.exception_handler(InvalidLogicalPath)
     @app.exception_handler(InvalidStorageRoot)
@@ -774,6 +784,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "process_running": zrok_status["process_running"],
             "listener_port": runtime.config.zrok_port,
             "public_url": zrok_status["public_url"],
+            "pairing_enabled": runtime.config.remote_pairing_enabled,
             "share_type": zrok_status["share_type"],
             "login_required": True,
             "manager_api_exposed": False,
@@ -942,6 +953,27 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     )
     def create_sandbox_cell(body: SandboxCellRequest) -> dict[str, Any]:
         return runtime.control.create_cell(**body.model_dump())
+
+    @app.put(
+        "/v1/admin/control-center/cells/{cell_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def update_sandbox_cell(cell_id: str, body: SandboxCellRequest) -> dict[str, Any]:
+        return runtime.control.update_cell(cell_id, **body.model_dump())
+
+    @app.delete(
+        "/v1/admin/control-center/cells/{cell_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def delete_sandbox_cell(cell_id: str) -> Response:
+        try:
+            runtime.control.delete_cell(cell_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post(
         "/v1/admin/control-center/cells/{cell_id}/run",

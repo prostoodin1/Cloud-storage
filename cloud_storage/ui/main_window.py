@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +35,7 @@ from cloud_storage.models import (
     DiskRole,
     DiskSnapshot,
 )
+from cloud_storage.pairing import build_connection_code
 from cloud_storage.services.audit_log import AuditLog
 from cloud_storage.services.core_client import (
     CoreApiError,
@@ -41,6 +45,7 @@ from cloud_storage.services.core_client import (
 )
 from cloud_storage.services.disk_service import DiskService, mark_missing_disks
 from cloud_storage.services.settings_store import SettingsStore
+from cloud_storage.ui.connection_page import ConnectionPage
 from cloud_storage.ui.control_page import ControlCenterPage
 from cloud_storage.ui.dialogs import (
     CreateUserDialog,
@@ -193,6 +198,7 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.dashboard_page = DashboardPage()
+        self.connection_page = ConnectionPage()
         self.disks_page = DisksPage()
         self.receive_page = TransfersPage("inbound")
         self.send_page = TransfersPage("outbound")
@@ -206,6 +212,7 @@ class MainWindow(QMainWindow):
         self.help_page = HelpPage(self.knowledge, "server")
         for label, page in (
             ("⌂   Основная", self.dashboard_page),
+            ("⌁   Подключение", self.connection_page),
             ("▣   Диски", self.disks_page),
             ("↓   Приём", self.receive_page),
             ("↑   Отправка", self.send_page),
@@ -258,6 +265,7 @@ class MainWindow(QMainWindow):
         for label, page in zip(
             (
                 "Основная",
+                "Подключение",
                 "Диски",
                 "Приём",
                 "Отправка",
@@ -282,6 +290,10 @@ class MainWindow(QMainWindow):
     def _connect_pages(self) -> None:
         self.dashboard_page.setup_requested.connect(self.open_setup)
         self.dashboard_page.remind_later_requested.connect(self.hide_setup_reminder)
+        self.connection_page.panel.generation_requested.connect(
+            self.generate_connection_code
+        )
+        self.connection_page.panel.refresh_button.clicked.connect(self.refresh_core)
         self.disks_page.disk_selected.connect(self.open_disk)
         self.disks_page.refresh_requested.connect(self.refresh_disks)
         self.disks_page.configure_first_requested.connect(self.configure_first_unconfigured)
@@ -300,6 +312,9 @@ class MainWindow(QMainWindow):
         self.control_page.report_requested.connect(self.create_control_report)
         self.control_page.cell_create_requested.connect(self.create_sandbox_cell)
         self.control_page.cell_run_requested.connect(self.run_sandbox_cell)
+        self.control_page.open_container_manager_requested.connect(
+            self.open_container_manager
+        )
         self.control_page.docker_install_requested.connect(self.install_docker_desktop)
         self.control_page.ssh_enable_requested.connect(self.enable_windows_ssh)
         self.control_page.ssh_disable_requested.connect(self.disable_windows_ssh)
@@ -364,6 +379,9 @@ class MainWindow(QMainWindow):
         self.settings_page.integration_test_requested.connect(self.test_integration)
         self.settings_page.open_updates_requested.connect(lambda: self._show_page(self.update_page))
         self.settings_page.system_section_requested.connect(self._open_system_section)
+        self.settings_page.connection_generation_requested.connect(
+            self.generate_connection_code
+        )
 
     def _prepare_server_update(self) -> None:
         if self.core_health is None:
@@ -385,10 +403,44 @@ class MainWindow(QMainWindow):
         self.control_page.open_tab(route)
         self._show_page(self.control_page)
 
+    def open_container_manager(self) -> None:
+        if getattr(sys, "frozen", False):
+            install_root = Path(sys.executable).resolve().parent.parent
+            candidates = [
+                install_root / "ContainerManager" / "CloudStorageContainerManager.exe",
+                install_root
+                / "CloudStorageContainerManager"
+                / "CloudStorageContainerManager.exe",
+            ]
+            executable = next((path for path in candidates if path.exists()), candidates[0])
+            command = [str(executable)]
+            if not executable.exists():
+                QMessageBox.warning(
+                    self,
+                    "Менеджер контейнеров не найден",
+                    f"Переустановите Server Manager: отсутствует {executable}",
+                )
+                return
+        else:
+            command = [sys.executable, "-m", "cloud_storage.container_manager.main"]
+        arguments: dict[str, object] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            arguments["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            subprocess.Popen(command, **arguments)
+        except OSError as exc:
+            QMessageBox.warning(self, "Не удалось открыть контейнеры", str(exc))
+
     def _apply_interface_mode(self, mode: str) -> None:
         simple = mode == "simple"
         visible_in_simple = {
             self.dashboard_page,
+            self.connection_page,
             self.disks_page,
             self.help_page,
             self.control_page,
@@ -400,6 +452,7 @@ class MainWindow(QMainWindow):
     def navigate_to_route(self, route: str) -> None:
         routes = {
             "dashboard": self.dashboard_page,
+            "connection": self.connection_page,
             "disks": self.disks_page,
             "receive": self.receive_page,
             "send": self.send_page,
@@ -452,6 +505,11 @@ class MainWindow(QMainWindow):
         self.disks_page.update_data(
             self.disks, self.settings, reminder_hidden=self._disk_reminder_hidden
         )
+        self.connection_page.panel.set_data(
+            self.core_health,
+            self.core_users,
+            self.core_tunnels,
+        )
         self.settings_page.load_settings(self.settings, str(self.store.path))
         self.settings_page.update_core_data(
             self.core_health,
@@ -483,16 +541,16 @@ class MainWindow(QMainWindow):
             and self.settings.configuration_for(item.id).role == DiskRole.UNCONFIGURED
             for item in self.disks
         )
-        self._nav_buttons[1].setText(
+        self._nav_buttons[2].setText(
             f"▣   Диски   • {unconfigured}" if unconfigured else "▣   Диски"
         )
         counts = self.core_transfers.get("counts", {})
         inbound_active = int(counts.get("inbound_active", 0))
         outbound_active = int(counts.get("outbound_active", 0))
-        self._nav_buttons[2].setText(
+        self._nav_buttons[3].setText(
             f"↓   Приём   • {inbound_active}" if inbound_active else "↓   Приём"
         )
-        self._nav_buttons[3].setText(
+        self._nav_buttons[4].setText(
             f"↑   Отправка   • {outbound_active}" if outbound_active else "↑   Отправка"
         )
 
@@ -666,6 +724,43 @@ class MainWindow(QMainWindow):
             display_name,
             invitation["code"],
             invitation["expires_at"],
+        )
+
+    def generate_connection_code(self, user_id: str, username: str, mode: str) -> None:
+        panel = self.connection_page.panel
+        endpoint, fingerprint = panel.selected_endpoint(mode)
+        if not endpoint:
+            panel.show_error("Подходящий защищённый адрес сейчас недоступен.")
+            if self.settings_page.connection_panel is not None:
+                self.settings_page.connection_panel.show_error(
+                    "Подходящий защищённый адрес сейчас недоступен."
+                )
+            return
+        try:
+            invitation = self.core_client.create_invitation(user_id)
+            connection_code = build_connection_code(
+                invitation["code"],
+                endpoint,
+                fingerprint,
+                username,
+            )
+        except (CoreApiError, CoreUnavailable, ValueError) as exc:
+            message = f"Код не создан: {self._core_error_text(exc)}"
+            panel.show_error(message)
+            if self.settings_page.connection_panel is not None:
+                self.settings_page.connection_panel.show_error(message)
+            return
+        scope = "из любой сети" if mode == "internet" else "в локальной сети"
+        detail = (
+            f"Готово: код работает {scope} до {invitation['expires_at']}. "
+            "После первого входа устройство появится в списке на подтверждение."
+        )
+        panel.show_code(connection_code, detail)
+        if getattr(self.settings_page, "connection_panel", None) is not None:
+            self.settings_page.connection_panel.show_code(connection_code, detail)
+        self.audit.record(
+            "core.connection_code.created",
+            f"Создан код подключения для {username or user_id} ({scope})",
         )
 
     def reset_user_password(self, user_id: str, display_name: str) -> None:

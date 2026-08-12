@@ -2,11 +2,14 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
 
+from cloud_storage.container_manager.window import ContainerManagerWindow
 from cloud_storage.models import DiskSnapshot
 from cloud_storage.services.settings_store import SettingsStore
+from cloud_storage.ui.connection_page import ConnectionCodePanel
 from cloud_storage.ui.main_window import MainWindow
 
 
@@ -26,13 +29,41 @@ class FakeDiskService:
         ]
 
 
+class FakeContainerClient:
+    def control_center(self):
+        return {
+            "sandbox": {
+                "available": True,
+                "runtime": "docker",
+                "automatic_max": {"cpu": 4, "memory_mib": 4096},
+            },
+            "cells": [
+                {
+                    "id": "cell-1",
+                    "name": "Bot box",
+                    "image": "python:3.12-alpine",
+                    "command": ["python", "-c", "print('ok')"],
+                    "cpu_limit": 1.0,
+                    "memory_mib": 256,
+                    "storage_mib": 512,
+                    "timeout_seconds": 300,
+                    "network_enabled": False,
+                    "status": "ready",
+                    "last_result": "",
+                }
+            ],
+        }
+
+
 def test_main_window_smoke(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     window = MainWindow(store=SettingsStore(tmp_path), disk_service=FakeDiskService())
     window.refresh_disks()
     app.processEvents()
 
-    assert window.stack.count() == 8
+    assert window.stack.count() == 9
+    assert window.connection_page.panel is not None
+    assert window.settings_page.connection_panel is not None
     assert window.receive_page.direction == "inbound"
     assert window.send_page.direction == "outbound"
     assert window.help_page.article_list.count() > 0
@@ -63,6 +94,43 @@ def test_main_window_smoke(tmp_path) -> None:
     assert len(window.disks) == 1
     assert window.disks[0].label == "Test disk"
 
+    window.close()
+
+
+def test_connection_panel_generates_without_manual_ip() -> None:
+    app = QApplication.instance() or QApplication([])
+    panel = ConnectionCodePanel()
+    panel.set_data(
+        {
+            "lan": {
+                "enabled": True,
+                "endpoints": ["https://192.168.1.20:8766"],
+                "fingerprint": "ab" * 32,
+            }
+        },
+        [{"id": "user-1", "username": "alex", "display_name": "Alex"}],
+        {},
+    )
+    panel.scope.setCurrentIndex(panel.scope.findData("lan"))
+    app.processEvents()
+    spy = QSignalSpy(panel.generation_requested)
+
+    panel.generate_button.click()
+
+    assert panel.endpoint.text() == "https://192.168.1.20:8766"
+    assert spy.count() == 1
+    assert list(spy.at(0)) == ["user-1", "alex", "lan"]
+
+
+def test_separate_container_manager_renders_resource_boxes() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ContainerManagerWindow(client=FakeContainerClient())
+    QThreadPool.globalInstance().waitForDone(1000)
+    app.processEvents()
+
+    assert window.cell_list.count() == 1
+    assert "Bot box" in window.cell_list.item(0).text()
+    assert "docker" in window.runtime_status.text()
     window.close()
 
 

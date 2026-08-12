@@ -14,7 +14,12 @@ from cloud_storage.core.config import CoreConfig
 from cloud_storage.core.main import CoreServerGroup
 from cloud_storage.core.tls import load_or_create_tls_identity
 from cloud_storage.core.tunnels import ZrokTunnelService
-from cloud_storage.pairing import build_pairing_uri, parse_pairing_uri
+from cloud_storage.pairing import (
+    build_connection_code,
+    build_pairing_uri,
+    parse_connection_code,
+    parse_pairing_uri,
+)
 from cloud_storage.services.core_client import CoreClient
 
 
@@ -42,6 +47,31 @@ def test_pairing_uri_round_trip_contains_tls_identity() -> None:
     assert invitation.certificate_fingerprint == fingerprint
 
 
+def test_connection_code_contains_address_tls_identity_and_username() -> None:
+    fingerprint = "cd" * 32
+    code = build_connection_code(
+        "ABCD-2345",
+        "https://cloud.example:8768",
+        fingerprint,
+        "alex",
+    )
+
+    invitation = parse_connection_code(code)
+
+    assert code.startswith("CS1.")
+    assert invitation is not None
+    assert invitation.code == "ABCD-2345"
+    assert invitation.server_url == "https://cloud.example:8768"
+    assert invitation.certificate_fingerprint == fingerprint
+    assert invitation.username == "alex"
+    assert parse_pairing_uri(code) == invitation
+
+
+def test_connection_code_rejects_corruption() -> None:
+    with pytest.raises(ValueError, match="connection code"):
+        parse_connection_code("CS1.not-valid-compressed-data")
+
+
 def test_tls_identity_is_created_once_and_remains_pinned(tmp_path) -> None:
     config = CoreConfig(data_directory=tmp_path, lan_enabled=True, server_name="Test Cloud")
 
@@ -61,10 +91,13 @@ def test_lan_listener_hides_manager_routes_in_asgi_scope(tmp_path) -> None:
     manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
 
     with TestClient(app, base_url="https://127.0.0.1:18766") as client:
+        root = client.get("/")
         health = client.get("/v1/health")
         manager = client.get("/v1/admin/summary", headers=manager_headers)
         documentation = client.get("/docs")
 
+    assert root.status_code == 200
+    assert root.json()["status"] == "ok"
     assert health.status_code == 200
     assert health.json()["lan"]["enabled"] is True
     assert manager.status_code == 404

@@ -2,8 +2,8 @@
 
 Пользовательская часть мобильного приложения: вход, личные и общие пространства, поиск, загрузка и скачивание, возобновляемая очередь, временные ссылки и автоматическая копия фото/видео.
 
-- [Скачать телефонный клиент для Android](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.10/CloudStorage-Mobile-Client-0.9.10-android.apk)
-- [Скачать iPhone/iPad Simulator](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.10/CloudStorage-Mobile-Client-0.9.10-apple-simulator.zip)
+- [Скачать телефонный клиент для Android](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.11/CloudStorage-Mobile-Client-0.9.11-android.apk)
+- [Скачать iPhone/iPad Simulator](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.11/CloudStorage-Mobile-Client-0.9.11-apple-simulator.zip)
 - [Экран файлов](../../mobile/src/screens/FilesScreen.tsx)
 - [Экран передач](../../mobile/src/screens/TransfersScreen.tsx)
 - [Автокопия фото](../../mobile/src/photoBackup.ts)

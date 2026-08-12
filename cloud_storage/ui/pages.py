@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from cloud_storage.models import AppSettings, DiskRole, DiskSnapshot, DiskStatus
 from cloud_storage.services.audit_log import AuditEvent
 from cloud_storage.services.disk_service import evaluate_status
+from cloud_storage.ui.connection_page import ConnectionCodePanel
 from cloud_storage.ui.theme import COLORS
 from cloud_storage.ui.widgets import DiskCard, StatCard, clear_layout, format_bytes, make_header
 
@@ -458,9 +459,11 @@ class SettingsPage(QWidget):
     restore_cancel_requested = Signal(str)
     open_updates_requested = Signal()
     system_section_requested = Signal(str)
+    connection_generation_requested = Signal(str, str, str)
 
     _SECTIONS = [
         ("Сервер", False),
+        ("Подключение", False),
         ("Система", False),
         ("Docker", False),
         ("SSH", False),
@@ -534,6 +537,7 @@ class SettingsPage(QWidget):
         self.config_path = QLabel("—")
         self.config_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.server_state_label: QLabel | None = None
+        self.connection_panel: ConnectionCodePanel | None = None
         self.core_status_label: QLabel | None = None
         self.core_details_label: QLabel | None = None
         self.core_start_button: QPushButton | None = None
@@ -650,6 +654,8 @@ class SettingsPage(QWidget):
         integrations: dict | None = None,
     ) -> None:
         online = health is not None
+        if self.connection_panel is not None:
+            self.connection_panel.set_data(health, users, tunnels)
         if self.core_status_label is not None:
             self.core_status_label.setText("Работает" if online else "Выключено")
             self.core_status_label.setStyleSheet(
@@ -1809,6 +1815,13 @@ class SettingsPage(QWidget):
             mode_box.addWidget(self.server_mode_detail)
             mode_box.addLayout(mode_controls)
             layout.addWidget(mode_card)
+        elif name == "Подключение":
+            self.connection_panel = ConnectionCodePanel()
+            self.connection_panel.generation_requested.connect(
+                self.connection_generation_requested
+            )
+            self.connection_panel.refresh_button.clicked.connect(self.core_refresh_requested)
+            layout.addWidget(self.connection_panel)
         elif name == "Пользователи":
             top = QHBoxLayout()
             description = QLabel(

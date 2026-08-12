@@ -197,7 +197,7 @@ class ClientWindow(QMainWindow):
         self.help_page = HelpPage(self.knowledge, "client")
         self.nav_buttons: list[QPushButton] = []
         for label, page in (
-            ("⌁   Подключение", self.connection_page),
+            ("⌁   Подключиться", self.connection_page),
             ("▣   Мои файлы", self.files_page),
             ("⇅   Передачи", self.transfers_page),
             ("◫   Офлайн", self.offline_page),
@@ -240,8 +240,8 @@ class ClientWindow(QMainWindow):
         layout.setSpacing(18)
         layout.addWidget(
             make_header(
-                "Подключение",
-                "На новом компьютере войдите по постоянному логину и паролю. Одноразовый код остаётся запасным способом подключения.",
+                "Подключиться",
+                "Вставьте единый код из Server Manager — адрес и защита сервера настроятся автоматически.",
             )
         )
 
@@ -251,9 +251,8 @@ class ClientWindow(QMainWindow):
         self.connection_title = QLabel("Клиент не подключён")
         self.connection_title.setStyleSheet("font-weight: 700; font-size: 18px;")
         self.connection_detail = QLabel(
-            "Найдите сервер в домашней сети, затем войдите по логину и паролю. "
-            "Для первого подключения можно вставить полное приглашение администратора. "
-            "Для сервера на этом же компьютере можно использовать http://127.0.0.1:8765."
+            "Получите код вида CS1.… у администратора, вставьте его ниже, задайте пароль "
+            "и название этого компьютера. Ручной адрес нужен только для старых серверов."
         )
         self.connection_detail.setWordWrap(True)
         self.connection_detail.setProperty("muted", True)
@@ -288,7 +287,7 @@ class ClientWindow(QMainWindow):
         self.fingerprint = QLineEdit()
         self.fingerprint.setPlaceholderText("SHA-256 сертификата — для HTTPS")
         self.pairing_code = QLineEdit()
-        self.pairing_code.setPlaceholderText("ABCD-2345 или cloudstorage://pair?…")
+        self.pairing_code.setPlaceholderText("Вставьте код CS1.… из Server Manager")
         self.pairing_code.setMaxLength(4096)
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
@@ -296,19 +295,19 @@ class ClientWindow(QMainWindow):
         self.device_name = QLineEdit(platform.node() or "Мой компьютер")
         self.username = QLineEdit()
         self.username.setPlaceholderText("Логин, созданный администратором")
-        form.addRow("Сохранённые серверы", profile_row)
-        form.addRow("Адрес сервера", address_row)
-        form.addRow("Отпечаток TLS", self.fingerprint)
-        form.addRow("Код или приглашение", self.pairing_code)
-        form.addRow("Логин", self.username)
+        form.addRow("Код подключения", self.pairing_code)
         form.addRow("Пароль", self.password)
         form.addRow("Название устройства", self.device_name)
+        form.addRow("Логин", self.username)
+        form.addRow("Сохранённые серверы", profile_row)
+        form.addRow("Ручной адрес (для старых версий)", address_row)
+        form.addRow("Ручной отпечаток TLS", self.fingerprint)
         card_layout.addLayout(form)
         enrollment_controls = QHBoxLayout()
         self.account_login_button = QPushButton("Войти по логину")
-        self.account_login_button.setProperty("primary", True)
         self.account_login_button.clicked.connect(self.login_new_device)
         self.connect_button = QPushButton("Подключиться по коду")
+        self.connect_button.setProperty("primary", True)
         self.connect_button.clicked.connect(self.connect_device)
         self.import_access_button = QPushButton("Импортировать файл входа")
         self.import_access_button.clicked.connect(self.import_access_file)
@@ -718,6 +717,8 @@ class ClientWindow(QMainWindow):
                 self.server_url.setText(invitation.server_url)
             if invitation.certificate_fingerprint:
                 self.fingerprint.setText(invitation.certificate_fingerprint)
+            if invitation.username:
+                self.username.setText(invitation.username)
             raw_code = invitation.code
         try:
             server_url = validate_server_url(self.server_url.text())

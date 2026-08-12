@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloud-storage-server"
-version = "0.9.10"
+version = "0.9.11"
 description = "Safe cross-platform home cloud server control application"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,6 +35,7 @@ build = [
 cloud-storage-server = "cloud_storage.main:main"
 cloud-storage-core = "cloud_storage.core.main:main"
 cloud-storage-client = "cloud_storage.client.main:main"
+cloud-storage-containers = "cloud_storage.container_manager.main:main"
 
 [tool.setuptools.packages.find]
 include = ["cloud_storage*"]

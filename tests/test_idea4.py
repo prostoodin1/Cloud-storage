@@ -114,6 +114,25 @@ def test_idea4_control_center_persists_profiles_templates_reports_and_cells(
     assert cell.json()["status"] in {"ready", "unsupported"}
     assert cell.json()["network_enabled"] is False
 
+    updated_payload = {
+        "name": "telegram bot space",
+        "image": "python:3.12-alpine",
+        "command": ["python", "-c", "print('updated')"],
+        "cpu_limit": min(0.25, maximum["cpu"]),
+        "memory_mib": min(128, maximum["memory_mib"]),
+        "storage_mib": 256,
+        "timeout_seconds": 60,
+        "network_enabled": True,
+    }
+    updated = client.put(
+        f"/v1/admin/control-center/cells/{cell.json()['id']}",
+        headers=headers,
+        json=updated_payload,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "telegram bot space"
+    assert updated.json()["network_enabled"] is True
+
     restarted = TestClient(create_app(CoreConfig(data_directory=tmp_path)))
     persisted = restarted.get("/v1/admin/control-center", headers=headers).json()
     assert persisted["settings"]["interface_mode"] == "detailed"
@@ -121,6 +140,12 @@ def test_idea4_control_center_persists_profiles_templates_reports_and_cells(
     assert len(persisted["reports"]["schedules"]) == 1
     assert len(persisted["cells"]) == 1
     assert "test-token-not-public" not in json.dumps(persisted)
+
+    deleted = client.delete(
+        f"/v1/admin/control-center/cells/{cell.json()['id']}", headers=headers
+    )
+    assert deleted.status_code == 204
+    assert client.get("/v1/admin/control-center/cells", headers=headers).json() == []
 
 
 def test_new_user_gets_personal_drive_and_downloadable_one_time_access_file(

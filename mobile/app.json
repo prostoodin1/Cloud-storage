@@ -3,7 +3,7 @@
     "name": "Cloud Storage",
     "slug": "cloud-storage-mobile",
     "scheme": "cloudstorage",
-    "version": "0.9.10",
+    "version": "0.9.11",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",

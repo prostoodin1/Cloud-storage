@@ -14,6 +14,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Icon generation failed.' }
 & $python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageServer.spec')
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
+& $python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageContainerManager.spec')
+if ($LASTEXITCODE -ne 0) { throw 'Container Manager build failed.' }
 & $python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageLegacyCore.spec')
 if ($LASTEXITCODE -ne 0) { throw 'Compatibility Core build failed.' }
 & (Join-Path $PSScriptRoot 'build-core-go.ps1')

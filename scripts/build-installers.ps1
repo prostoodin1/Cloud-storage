@@ -33,6 +33,7 @@ $serverZip = Join-Path $outputs "CloudStorage-Server-Manager-$version-windows-x6
 Compress-Archive -Path (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageClient') -DestinationPath $clientZip -CompressionLevel Optimal -Force
 Compress-Archive -Path @(
     (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageServerManager'),
+    (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageContainerManager'),
     (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageServerCore'),
     (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageLegacyCore'),
     (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageServerService')

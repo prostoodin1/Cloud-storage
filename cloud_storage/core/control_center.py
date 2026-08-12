@@ -819,17 +819,15 @@ class ControlCenterService:
         timeout_seconds: int,
         network_enabled: bool = False,
     ) -> dict[str, Any]:
-        caps = self.sandbox_capabilities()["automatic_max"]
-        if not name.strip() or not re.fullmatch(r"[A-Za-z0-9._/@:-]{1,200}", image):
-            raise ValueError("cell name and a valid container image are required")
-        if not command or len(command) > 64 or any(len(item) > 1024 for item in command):
-            raise ValueError("cell command must contain 1-64 arguments")
-        if not 0 < cpu_limit <= float(caps["cpu"]):
-            raise ValueError("cell CPU limit exceeds the automatic safe maximum")
-        if not 64 <= memory_mib <= int(caps["memory_mib"]):
-            raise ValueError("cell memory limit exceeds the automatic safe maximum")
-        if not 64 <= storage_mib <= 10 * 1024 or not 1 <= timeout_seconds <= 86400:
-            raise ValueError("invalid cell storage or timeout limit")
+        self._validate_cell_values(
+            name=name,
+            image=image,
+            command=command,
+            cpu_limit=cpu_limit,
+            memory_mib=memory_mib,
+            storage_mib=storage_mib,
+            timeout_seconds=timeout_seconds,
+        )
         cell_id, now = str(uuid.uuid4()), utc_text()
         state = "ready" if self.sandbox_capabilities()["available"] else "unsupported"
         with self.database.transaction() as connection:
@@ -854,6 +852,84 @@ class ControlCenterService:
                 ),
             )
         return self.get_cell(cell_id)
+
+    def update_cell(
+        self,
+        cell_id: str,
+        *,
+        name: str,
+        image: str,
+        command: list[str],
+        cpu_limit: float,
+        memory_mib: int,
+        storage_mib: int,
+        timeout_seconds: int,
+        network_enabled: bool = False,
+    ) -> dict[str, Any]:
+        self.get_cell(cell_id)
+        self._validate_cell_values(
+            name=name,
+            image=image,
+            command=command,
+            cpu_limit=cpu_limit,
+            memory_mib=memory_mib,
+            storage_mib=storage_mib,
+            timeout_seconds=timeout_seconds,
+        )
+        with self.database.transaction() as connection:
+            connection.execute(
+                """UPDATE sandbox_cells SET
+                    name=?, image=?, command_json=?, cpu_limit=?, memory_mib=?, storage_mib=?,
+                    timeout_seconds=?, network_enabled=?, status=?, updated_at=?
+                   WHERE id=?""",
+                (
+                    name.strip()[:120],
+                    image,
+                    json.dumps(command),
+                    cpu_limit,
+                    memory_mib,
+                    storage_mib,
+                    timeout_seconds,
+                    int(network_enabled),
+                    "ready" if self.sandbox_capabilities()["available"] else "unsupported",
+                    utc_text(),
+                    cell_id,
+                ),
+            )
+        return self.get_cell(cell_id)
+
+    def delete_cell(self, cell_id: str) -> bool:
+        cell = self.get_cell(cell_id)
+        if cell["status"] == "running":
+            raise RuntimeError("a running container cell cannot be deleted")
+        with self.database.transaction() as connection:
+            deleted = connection.execute(
+                "DELETE FROM sandbox_cells WHERE id=?", (cell_id,)
+            )
+        return deleted.rowcount == 1
+
+    def _validate_cell_values(
+        self,
+        *,
+        name: str,
+        image: str,
+        command: list[str],
+        cpu_limit: float,
+        memory_mib: int,
+        storage_mib: int,
+        timeout_seconds: int,
+    ) -> None:
+        caps = self.sandbox_capabilities()["automatic_max"]
+        if not name.strip() or not re.fullmatch(r"[A-Za-z0-9._/@:-]{1,200}", image):
+            raise ValueError("cell name and a valid container image are required")
+        if not command or len(command) > 64 or any(len(item) > 1024 for item in command):
+            raise ValueError("cell command must contain 1-64 arguments")
+        if not 0 < cpu_limit <= float(caps["cpu"]):
+            raise ValueError("cell CPU limit exceeds the automatic safe maximum")
+        if not 64 <= memory_mib <= int(caps["memory_mib"]):
+            raise ValueError("cell memory limit exceeds the automatic safe maximum")
+        if not 64 <= storage_mib <= 10 * 1024 or not 1 <= timeout_seconds <= 86400:
+            raise ValueError("invalid cell storage or timeout limit")
 
     def list_cells(self) -> list[dict[str, Any]]:
         with self.database.connection() as connection:

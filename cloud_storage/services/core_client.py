@@ -4,6 +4,7 @@ import hashlib
 import json
 import locale
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -97,6 +98,19 @@ class CoreClient:
     def create_sandbox_cell(self, values: dict[str, Any]) -> dict[str, Any]:
         return self._manager_request(
             "/v1/admin/control-center/cells", method="POST", payload=values
+        )
+
+    def list_sandbox_cells(self) -> list[dict[str, Any]]:
+        return self._manager_request("/v1/admin/control-center/cells")
+
+    def update_sandbox_cell(self, cell_id: str, values: dict[str, Any]) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/control-center/cells/{cell_id}", method="PUT", payload=values
+        )
+
+    def delete_sandbox_cell(self, cell_id: str) -> None:
+        self._manager_request(
+            f"/v1/admin/control-center/cells/{cell_id}", method="DELETE"
         )
 
     def run_sandbox_cell(self, cell_id: str) -> dict[str, Any]:
@@ -597,6 +611,33 @@ class CoreSupervisor:
         self.config.ensure_directories()
         self.config.persist()
         if self._windows_service_installed():
+            status = self._windows_service_status_code()
+            if status == 3:  # STOP_PENDING: a previous graceful shutdown is still finishing.
+                if not self._wait_for_windows_service_state(1, min(timeout_seconds, 30.0)):
+                    raise CoreUnavailable(
+                        "Служба Windows не завершила предыдущую остановку за отведённое время. "
+                        f"Состояние службы: {self._windows_service_state()}"
+                    )
+                status = 1
+            elif status == 2:  # START_PENDING: do not send a duplicate start command.
+                deadline = time.monotonic() + min(timeout_seconds, 15.0)
+                while time.monotonic() < deadline:
+                    health = self.client.try_health(timeout=0.4)
+                    if health:
+                        return health
+                    if self._windows_service_status_code() not in {2, 4}:
+                        break
+                    time.sleep(0.15)
+                status = self._windows_service_status_code()
+            if status == 4 and not self.client.try_health(timeout=1.0):
+                # SCM can still report RUNNING after the API has disappeared during a
+                # graceful restart. Stop it fully before attempting a new start.
+                self._run_windows_service_command("stop", accepted_codes={0, 1062})
+                if not self._wait_for_windows_service_state(1, min(timeout_seconds, 30.0)):
+                    raise CoreUnavailable(
+                        "Служба Windows работает без API и не смогла корректно остановиться. "
+                        f"Состояние службы: {self._windows_service_state()}"
+                    )
             try:
                 completed = subprocess.run(
                     ["sc.exe", "start", "CloudStorageServerCore"],
@@ -723,6 +764,74 @@ class CoreSupervisor:
         return text[-500:] or f"код {result.returncode}"
 
     @staticmethod
+    def _windows_service_status_code() -> int | None:
+        """Return the language-independent numeric state reported by SCM."""
+        try:
+            result = subprocess.run(
+                ["sc.exe", "query", "CloudStorageServerCore"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        output = CoreSupervisor._decode_command_output(result.stdout or result.stderr)
+        match = re.search(
+            r"(?im)^\s*(?:STATE|ESTADO|ÉTAT|STATO|STATUS)\s*:\s*([1-7])\b",
+            output,
+        )
+        if match is None:
+            match = re.search(
+                r"(?im)^\s*[^:\r\n]+:\s*([1-7])\s+"
+                r"(?:STOPPED|START_PENDING|STOP_PENDING|RUNNING|CONTINUE_PENDING|"
+                r"PAUSE_PENDING|PAUSED)\b",
+                output,
+            )
+        return int(match.group(1)) if match else None
+
+    @staticmethod
+    def _run_windows_service_command(
+        command: str,
+        *,
+        accepted_codes: set[int],
+    ) -> subprocess.CompletedProcess[bytes]:
+        try:
+            completed = subprocess.run(
+                ["sc.exe", command, "CloudStorageServerCore"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=False,
+                timeout=15,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CoreUnavailable(f"Не удалось выполнить sc.exe {command}: {exc}") from exc
+        if completed.returncode not in accepted_codes:
+            details = CoreSupervisor._decode_command_output(
+                completed.stderr or completed.stdout
+            ).strip()
+            raise CoreUnavailable(
+                f"Windows не выполнила команду службы {command} "
+                f"(код {completed.returncode})." + (f" Ответ: {details}" if details else "")
+            )
+        return completed
+
+    @classmethod
+    def _wait_for_windows_service_state(cls, state: int, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if cls._windows_service_status_code() == state:
+                return True
+            time.sleep(0.15)
+        return cls._windows_service_status_code() == state
+
+    @staticmethod
     def _decode_command_output(payload: bytes | str | None) -> str:
         if payload is None:
             return ""
@@ -744,16 +853,37 @@ class CoreSupervisor:
                 continue
         return payload.decode("utf-8", errors="replace")
 
-    def stop(self, timeout_seconds: float = 8.0) -> bool:
-        if not self.client.try_health():
+    def stop(self, timeout_seconds: float = 30.0) -> bool:
+        service_installed = self._windows_service_installed()
+        health = self.client.try_health()
+        if health:
+            self.client.shutdown()
+        elif not service_installed:
             return True
-        self.client.shutdown()
+
+        if service_installed and not health:
+            state = self._windows_service_status_code()
+            if state == 1:
+                return True
+            if state in {2, 4, 5, 6, 7}:
+                try:
+                    self._run_windows_service_command("stop", accepted_codes={0, 1062})
+                except CoreUnavailable:
+                    return False
+
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            if not self.client.try_health(timeout=0.2):
+            api_stopped = not self.client.try_health(timeout=0.2)
+            service_stopped = (
+                not service_installed or self._windows_service_status_code() == 1
+            )
+            if api_stopped and service_stopped:
                 return True
             time.sleep(0.15)
-        return False
+        return (
+            not self.client.try_health(timeout=0.2)
+            and (not service_installed or self._windows_service_status_code() == 1)
+        )
 
     @staticmethod
     def _core_command() -> list[str]:

@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.9.10"
+#define AppVersion "0.9.11"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
 #define BuildRoot "..\dist"
@@ -25,7 +25,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
-CloseApplicationsFilter=CloudStorageServerManager.exe,CloudStorageServerCore.exe,CloudStorageLegacyCore.exe,CloudStorageServerService.exe
+CloseApplicationsFilter=CloudStorageServerManager.exe,CloudStorageContainerManager.exe,CloudStorageServerCore.exe,CloudStorageLegacyCore.exe,CloudStorageServerService.exe
 RestartApplications=no
 RestartIfNeededByRun=no
 UsePreviousAppDir=yes
@@ -45,6 +45,7 @@ Name: "{commonappdata}\CloudStorage"; Permissions: admins-full system-full
 
 [Files]
 Source: "{#BuildRoot}\CloudStorageServerManager\*"; DestDir: "{app}\Manager"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BuildRoot}\CloudStorageContainerManager\*"; DestDir: "{app}\ContainerManager"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\CloudStorageServerCore\*"; DestDir: "{app}\CloudStorageServerCore"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\CloudStorageLegacyCore\*"; DestDir: "{app}\CloudStorageLegacyCore"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\CloudStorageServerService\*"; DestDir: "{app}\Service"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -52,6 +53,7 @@ Source: "THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Cloud Storage Server Manager"; Filename: "{app}\Manager\CloudStorageServerManager.exe"
+Name: "{group}\Cloud Storage Container Manager"; Filename: "{app}\ContainerManager\CloudStorageContainerManager.exe"
 Name: "{autodesktop}\Cloud Storage Server Manager"; Filename: "{app}\Manager\CloudStorageServerManager.exe"; Tasks: desktopicon
 
 [Run]

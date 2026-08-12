@@ -2,8 +2,8 @@
 
 Административная часть мобильного приложения: пользователи и пароли, подтверждение устройств, диагностика, режим только чтения, накопители, резервные копии, автоматизация, zrok и перезапуск Core.
 
-- [Скачать телефонный менеджер для Android](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.10/CloudStorage-Mobile-Manager-0.9.10-android.apk)
-- [Скачать iPhone/iPad Simulator](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.10/CloudStorage-Mobile-Manager-0.9.10-apple-simulator.zip)
+- [Скачать телефонный менеджер для Android](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.11/CloudStorage-Mobile-Manager-0.9.11-android.apk)
+- [Скачать iPhone/iPad Simulator](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.11/CloudStorage-Mobile-Manager-0.9.11-apple-simulator.zip)
 - [Экран управления сервером](../../mobile/src/screens/ServerControlScreen.tsx)
 - [Клиент защищённого API](../../mobile/src/api.ts)
 - [Серверные подтверждения](../../cloud_storage/core/api.py)

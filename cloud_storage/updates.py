@@ -266,8 +266,26 @@ class UpdateService:
             with urllib.request.urlopen(request, timeout=15) as response:
                 _https_url(response.geturl())
                 raw = _read_limited(response, MAX_MANIFEST_BYTES)
-        except (OSError, urllib.error.URLError) as exc:
-            raise UpdateError("не удалось получить сведения об обновлении") from exc
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise UpdateError(
+                    "каталог обновлений не найден на сервере (HTTP 404); "
+                    "проверьте публикацию выбранного канала"
+                ) from exc
+            raise UpdateError(
+                f"сервер обновлений вернул HTTP {exc.code}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            reason = str(getattr(exc, "reason", exc)).casefold()
+            if "certificate" in reason or "ssl" in reason or "tls" in reason:
+                message = "не удалось проверить TLS-сертификат сервера обновлений"
+            elif "name" in reason or "dns" in reason or "getaddrinfo" in reason:
+                message = "не удалось найти сервер обновлений (ошибка DNS)"
+            else:
+                message = "нет соединения с сервером обновлений; проверьте интернет"
+            raise UpdateError(message) from exc
+        except OSError as exc:
+            raise UpdateError("системная ошибка сети при проверке обновлений") from exc
         versions = parse_signed_catalog(
             raw,
             expected_product=self.product,

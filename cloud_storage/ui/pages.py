@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cloud_storage.models import ROLE_LABELS, AppSettings, DiskRole, DiskSnapshot, DiskStatus
+from cloud_storage.models import AppSettings, DiskRole, DiskSnapshot, DiskStatus
 from cloud_storage.services.audit_log import AuditEvent
 from cloud_storage.services.disk_service import evaluate_status
 from cloud_storage.ui.connection_page import ConnectionCodePanel
@@ -333,6 +333,8 @@ class DisksPage(QWidget):
     configure_first_requested = Signal()
     remind_later_requested = Signal()
     ignore_unconfigured_requested = Signal()
+    create_space_requested = Signal()
+    edit_space_requested = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -352,18 +354,25 @@ class DisksPage(QWidget):
 
         view_controls = QHBoxLayout()
         self.physical_view_button = QPushButton("Физические диски")
-        self.roles_view_button = QPushButton("Назначения и роли")
+        self.roles_view_button = QPushButton("Логические пространства")
         self.physical_view_button.setCheckable(True)
         self.roles_view_button.setCheckable(True)
         self.physical_view_button.clicked.connect(lambda: self._set_view("physical"))
         self.roles_view_button.clicked.connect(lambda: self._set_view("roles"))
         view_controls.addWidget(self.physical_view_button)
         view_controls.addWidget(self.roles_view_button)
+        self.create_space_button = QPushButton("+ Добавить пространство")
+        self.create_space_button.setProperty("primary", True)
+        self.create_space_button.clicked.connect(self.create_space_requested)
+        self.create_space_button.setVisible(False)
+        view_controls.addWidget(self.create_space_button)
         view_controls.addStretch()
         self.layout.addLayout(view_controls)
         self._view = "physical"
         self._disks: list[DiskSnapshot] = []
         self._settings = AppSettings()
+        self._spaces: list[dict] = []
+        self._storage_roots: list[dict] = []
         self._reminder_hidden = False
 
         self.new_disk_banner = QFrame()
@@ -403,11 +412,18 @@ class DisksPage(QWidget):
         outer.addWidget(_scroll_page(content))
 
     def update_data(
-        self, disks: list[DiskSnapshot], settings: AppSettings, reminder_hidden=False
+        self,
+        disks: list[DiskSnapshot],
+        settings: AppSettings,
+        reminder_hidden=False,
+        spaces: list[dict] | None = None,
+        storage_roots: list[dict] | None = None,
     ) -> None:
         self._disks = disks
         self._settings = settings
         self._reminder_hidden = bool(reminder_hidden)
+        self._spaces = list(spaces or [])
+        self._storage_roots = list(storage_roots or [])
         self._render_cards()
 
     def _set_view(self, view: str) -> None:
@@ -436,6 +452,7 @@ class DisksPage(QWidget):
         )
         self.physical_view_button.setChecked(self._view == "physical")
         self.roles_view_button.setChecked(self._view == "roles")
+        self.create_space_button.setVisible(self._view == "roles")
         self.empty.setVisible(not disks)
         if self._view == "physical":
             for index, disk in enumerate(disks):
@@ -443,36 +460,39 @@ class DisksPage(QWidget):
                 card.selected.connect(self.disk_selected)
                 self.cards.addWidget(card, index // 2, index % 2)
             return
-        grouped: list[tuple[DiskRole, list[DiskSnapshot]]] = []
-        for role in DiskRole:
-            assigned = [
-                disk for disk in disks if settings.configuration_for(disk.id).role == role
-            ]
-            if assigned:
-                grouped.append((role, assigned))
-        for index, (role, assigned) in enumerate(grouped):
+        visible_spaces = [item for item in self._spaces if item.get("kind") in {"shared", "personal"}]
+        self.empty.setVisible(not visible_spaces)
+        self.empty.setText(
+            "Логических пространств пока нет. Нажмите «Добавить пространство»."
+        )
+        roots = {str(item.get("id")): item for item in self._storage_roots}
+        for index, space in enumerate(visible_spaces):
             card = QFrame()
             card.setProperty("card", True)
             card_layout = QVBoxLayout(card)
-            heading = QLabel(ROLE_LABELS[role])
+            heading = QLabel(str(space.get("name") or "Пространство"))
             heading.setStyleSheet("font-size: 16px; font-weight: 700;")
-            total = sum(item.total_bytes for item in assigned if item.available)
+            primary = roots.get(str(space.get("primary_storage_root_id") or ""), {})
+            fallback = roots.get(str(space.get("fallback_storage_root_id") or ""), {})
+            members = space.get("members") or []
             detail = QLabel(
-                f"Дисков: {len(assigned)} · Объём: {format_bytes(total)}\n"
-                + "\n".join(
-                    f"• {settings.configuration_for(item.id).display_name or item.label or item.mountpoint} ({item.mountpoint})"
-                    for item in assigned
-                )
+                f"Тип: {'Личное' if space.get('kind') == 'personal' else 'Общее'} · "
+                f"Квота: {format_bytes(int(space.get('quota_bytes', 0)))} · "
+                f"Пользователей: {len(members)}\n"
+                f"Основной диск: {primary.get('disk_id') or primary.get('path') or 'автовыбор'}\n"
+                f"Резервный диск: {fallback.get('disk_id') or fallback.get('path') or 'не назначен'}"
             )
             detail.setWordWrap(True)
             detail.setProperty("muted", True)
             card_layout.addWidget(heading)
             card_layout.addWidget(detail)
-            open_first = QPushButton("Открыть первый диск")
-            open_first.clicked.connect(
-                lambda _checked=False, disk_id=assigned[0].id: self.disk_selected.emit(disk_id)
+            edit = QPushButton("Настроить пространство")
+            edit.setEnabled(space.get("kind") == "shared")
+            space_id = str(space.get("id") or "")
+            edit.clicked.connect(
+                lambda _checked=False, value=space_id: self.edit_space_requested.emit(value)
             )
-            card_layout.addWidget(open_first)
+            card_layout.addWidget(edit)
             self.cards.addWidget(card, index // 2, index % 2)
 
 
@@ -488,7 +508,7 @@ class SettingsPage(QWidget):
     reset_password_requested = Signal(str, str)
     approve_device_requested = Signal(str)
     revoke_device_requested = Signal(str)
-    migration_requested = Signal(str, str)
+    migration_requested = Signal(str, str, str)
     maintenance_refresh_requested = Signal()
     maintenance_resume_requested = Signal(str)
     maintenance_cancel_requested = Signal(str)
@@ -650,6 +670,8 @@ class SettingsPage(QWidget):
         self.pending_device_rows: QVBoxLayout | None = None
         self.migration_source: QComboBox | None = None
         self.migration_target: QComboBox | None = None
+        self.migration_space: QComboBox | None = None
+        self._maintenance_space_roots: dict[str, tuple[str, str]] = {}
         self.migration_start_button: QPushButton | None = None
         self.maintenance_rows: QVBoxLayout | None = None
         self.backup_target: QComboBox | None = None
@@ -724,6 +746,7 @@ class SettingsPage(QWidget):
         automation_rules: dict | None = None,
         notifications: list[dict] | None = None,
         integrations: dict | None = None,
+        spaces: list[dict] | None = None,
     ) -> None:
         online = health is not None
         if self.connection_panel is not None:
@@ -1020,7 +1043,9 @@ class SettingsPage(QWidget):
                 self._add_muted(self.pending_device_rows, "Новых запросов на подключение нет.")
             for device in pending:
                 self._add_device_card(self.pending_device_rows, device, pending=True)
-        self._update_maintenance(storage_roots or [], maintenance_jobs or [], online)
+        self._update_maintenance(
+            storage_roots or [], maintenance_jobs or [], spaces or [], online
+        )
         self._update_backups(
             storage_roots or [],
             backup_jobs or [],
@@ -1743,6 +1768,7 @@ class SettingsPage(QWidget):
         self,
         roots: list[dict],
         jobs: list[dict],
+        spaces: list[dict],
         online: bool,
     ) -> None:
         if self.migration_source is not None and self.migration_target is not None:
@@ -1752,8 +1778,12 @@ class SettingsPage(QWidget):
             self.migration_target.clear()
             for root in roots:
                 label = f"{root.get('disk_id') or root['id']} · {root['path']}"
-                if not root.get("write_enabled", True):
-                    self.migration_source.addItem(label, root["id"])
+                source_label = (
+                    label
+                    if not root.get("write_enabled", True)
+                    else f"{label} · активен (только для одного пространства)"
+                )
+                self.migration_source.addItem(source_label, root["id"])
                 if root.get("write_enabled", True):
                     self.migration_target.addItem(label, root["id"])
             source_index = self.migration_source.findData(previous_source)
@@ -1768,6 +1798,20 @@ class SettingsPage(QWidget):
                     and self.migration_source.count() > 0
                     and self.migration_target.count() > 0
                 )
+        if self.migration_space is not None:
+            previous_space = self.migration_space.currentData()
+            self._maintenance_space_roots = {}
+            self.migration_space.clear()
+            self.migration_space.addItem("Все объекты на диске", "")
+            for space in spaces:
+                primary = str(space.get("primary_storage_root_id") or "")
+                fallback = str(space.get("fallback_storage_root_id") or "")
+                if primary and fallback:
+                    self._maintenance_space_roots[str(space["id"])] = (fallback, primary)
+                    self.migration_space.addItem(str(space.get("name") or space["id"]), space["id"])
+            space_index = self.migration_space.findData(previous_space)
+            if space_index >= 0:
+                self.migration_space.setCurrentIndex(space_index)
         if self.maintenance_rows is None:
             return
         clear_layout(self.maintenance_rows)
@@ -1788,7 +1832,10 @@ class SettingsPage(QWidget):
             card = QFrame()
             card.setProperty("card", True)
             card_layout = QVBoxLayout(card)
-            title = QLabel(f"Перенос {job['source_root_id']} → {job['target_root_id']}")
+            suffix = f" · пространство {job['space_id']}" if job.get("space_id") else ""
+            title = QLabel(
+                f"Перенос {job['source_root_id']} → {job['target_root_id']}{suffix}"
+            )
             title.setStyleSheet("font-weight: 700;")
             total = int(job.get("total_bytes", 0))
             processed = int(job.get("processed_bytes", 0))
@@ -2599,8 +2646,13 @@ class SettingsPage(QWidget):
             form = QFormLayout()
             self.migration_source = QComboBox()
             self.migration_target = QComboBox()
+            self.migration_space = QComboBox()
+            self.migration_space.currentIndexChanged.connect(
+                self._select_space_migration_roots
+            )
             form.addRow("Источник (запись на паузе)", self.migration_source)
             form.addRow("Целевой активный диск", self.migration_target)
+            form.addRow("Что переносить", self.migration_space)
             layout.addLayout(form)
             controls = QHBoxLayout()
             self.migration_start_button = QPushButton("Начать проверяемый перенос")
@@ -2624,7 +2676,25 @@ class SettingsPage(QWidget):
         source = self.migration_source.currentData()
         target = self.migration_target.currentData()
         if source and target:
-            self.migration_requested.emit(str(source), str(target))
+            space_id = self.migration_space.currentData() if self.migration_space else ""
+            self.migration_requested.emit(str(source), str(target), str(space_id or ""))
+
+    def _select_space_migration_roots(self) -> None:
+        if (
+            self.migration_space is None
+            or self.migration_source is None
+            or self.migration_target is None
+        ):
+            return
+        roots = self._maintenance_space_roots.get(str(self.migration_space.currentData() or ""))
+        if roots is None:
+            return
+        source_index = self.migration_source.findData(roots[0])
+        target_index = self.migration_target.findData(roots[1])
+        if source_index >= 0:
+            self.migration_source.setCurrentIndex(source_index)
+        if target_index >= 0:
+            self.migration_target.setCurrentIndex(target_index)
 
     def _emit_backup(self) -> None:
         if self.backup_target is not None and self.backup_target.currentData():

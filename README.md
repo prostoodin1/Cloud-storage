@@ -1,6 +1,6 @@
 # Cloud Storage Server
 
-Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.12** упрощает вход по логину, ссылке или QR, стабилизирует назначения дисков и превращает раздел безопасности в рабочий центр проверки.
+Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.13** завершает пользователей, одноразовые файлы входа, подробные права и логические пространства на физических дисках.
 
 Текущая ветка также содержит полный слой **Idea 4**: системные профили, питание/ИБП,
 Telegram/email/webhook, 20 шаблонов автоматизаций, отчёты, безопасные контейнерные
@@ -11,12 +11,12 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 | № | Приложение | Файл |
 |---:|---|---|
-| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Server-Setup-0.9.12-windows-x64.exe) |
-| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Client-Setup-0.9.12-windows-x64.exe) |
-| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Desktop-Client-0.9.12-windows-x64.zip) |
-| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Server-Manager-0.9.12-windows-x64.zip) |
-| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Mobile-Client-0.9.12-android.apk) |
-| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Mobile-Manager-0.9.12-android.apk) |
+| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Server-Setup-0.9.13-windows-x64.exe) |
+| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Client-Setup-0.9.13-windows-x64.exe) |
+| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Desktop-Client-0.9.13-windows-x64.zip) |
+| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Server-Manager-0.9.13-windows-x64.zip) |
+| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Mobile-Client-0.9.13-android.apk) |
+| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Mobile-Manager-0.9.13-android.apk) |
 
 ## Шесть приложений проекта
 
@@ -24,7 +24,17 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 **[Открыть каталог всех приложений](apps/README.md)**
 
-## Что работает в версии 0.9.12
+## Что работает в версии 0.9.13
+
+- Client принимает непрозрачный код `CS2…`, файл, ссылку или QR и не показывает IP, URL и TLS-отпечаток в обычном интерфейсе;
+- `.cloud-access.json` не содержит постоянного пароля, действует до 7 дней, используется один раз и создаёт ожидающее подтверждения устройство;
+- пользователи имеют email, редактируемую роль, квоту, состояние и подробные права; пароль хранится только как Argon2id-хеш;
+- SMTP отправляет файл входа настоящим вложением;
+- общие логические пространства получают основной и резервный физический диск, отдельные права и отдельные буквы в Проводнике;
+- при недоступности основного диска новые объекты пишутся на резервный, а ручной перенос обратно проверяет размер и SHA-256 и пишется в аудит;
+- обновления различают сетевые ошибки, 404, повреждение и неверную подпись, а установщик проверяется по подписи каталога, размеру и SHA-256.
+
+## Что работало в версии 0.9.12
 
 - Server Manager создаёт пользователя с надёжным паролем и сразу выдаёт три равноправных способа входа: логин/код, рабочую `cloudstorage://`-ссылку и QR;
 - Desktop Client разделяет вход на три понятных режима, а мобильный Client сканирует QR камерой;

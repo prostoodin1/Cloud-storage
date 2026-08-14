@@ -146,6 +146,7 @@ class MigrationJobRecord:
     status: str
     source_root_id: str
     target_root_id: str
+    space_id: str | None
     total_files: int
     total_bytes: int
     processed_files: int
@@ -495,10 +496,12 @@ class StorageService:
         expected_size: int | None,
     ) -> UploadSession:
         self._require_server_writable()
-        space = self.repository.require_space_permission(space_id, user_id, write=True)
+        space = self.repository.require_space_permission(space_id, user_id, capability="upload")
         logical_path = normalize_logical_path(logical_path)
         self._require_file_path_available(space_id, logical_path)
         existing = self.find_file(space_id, logical_path, include_deleted=True)
+        if existing and not existing.deleted_at:
+            self.repository.require_space_permission(space_id, user_id, capability="modify")
         existing_size = existing.size_bytes if existing and not existing.deleted_at else 0
         used = self.space_usage(space_id)
         remaining_quota = max(0, space.quota_bytes - used + existing_size)
@@ -510,7 +513,7 @@ class StorageService:
                 raise ValueError("invalid Content-Length")
             if expected_size > maximum:
                 raise StorageCapacityError("upload exceeds personal storage quota")
-        root = self._select_root(expected_size or min(maximum, 64 * 1024**2))
+        root = self._select_root(expected_size or min(maximum, 64 * 1024**2), space)
         return UploadSession(
             self,
             root=root,
@@ -533,7 +536,7 @@ class StorageService:
         expected_sha256: str | None = None,
     ) -> ResumableUploadRecord:
         self._require_server_writable()
-        space = self.repository.require_space_permission(space_id, user_id, write=True)
+        space = self.repository.require_space_permission(space_id, user_id, capability="upload")
         logical_path = normalize_logical_path(logical_path)
         self._require_file_path_available(space_id, logical_path)
         if expected_size < 0 or expected_size > self.config.max_upload_bytes:
@@ -545,6 +548,8 @@ class StorageService:
         ):
             raise ValueError("expected SHA-256 must contain 64 hexadecimal characters")
         existing = self.find_file(space_id, logical_path, include_deleted=True)
+        if existing and not existing.deleted_at:
+            self.repository.require_space_permission(space_id, user_id, capability="modify")
         existing_size = existing.size_bytes if existing and not existing.deleted_at else 0
         remaining_quota = max(
             0,
@@ -552,7 +557,7 @@ class StorageService:
         )
         if expected_size > remaining_quota:
             raise StorageCapacityError("upload exceeds personal storage quota")
-        root = self._select_root(expected_size)
+        root = self._select_root(expected_size, space)
         upload_id = str(uuid.uuid4())
         object_relative = Path("objects") / space_id / upload_id[:2] / f"{upload_id}.blob"
         staging_root = self._select_staging_path(expected_size, root)
@@ -1360,9 +1365,29 @@ class StorageService:
         if row is not None and row["mode"] != "normal":
             raise ConflictError("server is in emergency read-only mode")
 
-    def _select_root(self, expected_size: int) -> StorageRootRecord:
+    def _select_root(
+        self,
+        expected_size: int,
+        space: Any | None = None,
+    ) -> StorageRootRecord:
         candidates: list[tuple[float, StorageRootRecord]] = []
-        for root in self.list_roots():
+        roots = self.list_roots()
+        preferred_ids = []
+        if space is not None:
+            preferred_ids = [
+                value
+                for value in (
+                    space.primary_storage_root_id,
+                    space.fallback_storage_root_id,
+                )
+                if value
+            ]
+        ordered_roots = (
+            [root for root_id in preferred_ids for root in roots if root.id == root_id]
+            if preferred_ids
+            else roots
+        )
+        for preference, root in enumerate(ordered_roots):
             if not root.write_enabled or root.purpose != "primary":
                 continue
             try:
@@ -1374,7 +1399,11 @@ class StorageService:
             free_after = usage.free - expected_size
             if free_after < root.min_free_bytes or projected_percent > root.max_fill_percent:
                 continue
-            score = root.priority * 10 + (free_after / max(1, usage.total)) * 100
+            score = (
+                (10_000 if preferred_ids and preference == 0 else 5_000 if preferred_ids else 0)
+                + root.priority * 10
+                + (free_after / max(1, usage.total)) * 100
+            )
             candidates.append((score, root))
         if not candidates:
             raise StorageCapacityError("no configured storage root has enough safe free space")
@@ -1434,7 +1463,7 @@ class StorageService:
     def list_entries(
         self, space_id: str, user_id: str, directory: str = ""
     ) -> list[dict[str, Any]]:
-        self.repository.require_space_permission(space_id, user_id, write=False)
+        self.repository.require_space_permission(space_id, user_id, capability="read")
         directory = directory.strip("/")
         if directory:
             directory = normalize_logical_path(directory)
@@ -1496,7 +1525,7 @@ class StorageService:
         directory: str = "",
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        self.repository.require_space_permission(space_id, user_id, write=False)
+        self.repository.require_space_permission(space_id, user_id, capability="read")
         query = query.strip()
         if len(query) < 2 or len(query) > 200:
             raise ValueError("search query must contain 2-200 characters")
@@ -1553,7 +1582,7 @@ class StorageService:
 
     def create_directory(self, space_id: str, user_id: str, logical_path: str) -> dict[str, Any]:
         self._require_server_writable()
-        self.repository.require_space_permission(space_id, user_id, write=True)
+        self.repository.require_space_permission(space_id, user_id, capability="upload")
         logical_path = normalize_logical_path(logical_path)
         parts = PurePosixPath(logical_path).parts
         prefixes = ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
@@ -1590,7 +1619,7 @@ class StorageService:
 
     def delete_directory(self, space_id: str, user_id: str, logical_path: str) -> bool:
         self._require_server_writable()
-        self.repository.require_space_permission(space_id, user_id, write=True)
+        self.repository.require_space_permission(space_id, user_id, capability="delete")
         logical_path = normalize_logical_path(logical_path)
         prefix = logical_path + "/"
         with self.database.transaction() as connection:
@@ -1640,7 +1669,7 @@ class StorageService:
         kind: str,
     ) -> dict[str, Any]:
         self._require_server_writable()
-        self.repository.require_space_permission(space_id, user_id, write=True)
+        self.repository.require_space_permission(space_id, user_id, capability="modify")
         source_path = normalize_logical_path(source_path)
         destination_path = normalize_logical_path(destination_path)
         if source_path == destination_path:
@@ -1730,7 +1759,7 @@ class StorageService:
         *,
         ttl_hours: int = 24,
     ) -> PublicShareRecord:
-        self.repository.require_space_permission(space_id, user_id, write=False)
+        self.repository.require_space_permission(space_id, user_id, capability="share")
         logical_path = normalize_logical_path(logical_path)
         if kind not in {"file", "directory"}:
             raise ValueError("share type must be file or directory")
@@ -1998,7 +2027,7 @@ class StorageService:
     def resolve_download(
         self, space_id: str, user_id: str, logical_path: str
     ) -> tuple[FileRecord, Path]:
-        self.repository.require_space_permission(space_id, user_id, write=False)
+        self.repository.require_space_permission(space_id, user_id, capability="read")
         record = self.find_file(space_id, logical_path)
         if record is None:
             raise NotFoundError("file not found")
@@ -2022,7 +2051,7 @@ class StorageService:
 
     def soft_delete(self, space_id: str, user_id: str, logical_path: str) -> FileRecord:
         self._require_server_writable()
-        self.repository.require_space_permission(space_id, user_id, write=True)
+        self.repository.require_space_permission(space_id, user_id, capability="delete")
         record = self.find_file(space_id, logical_path)
         if record is None:
             raise NotFoundError("file not found")
@@ -2187,6 +2216,7 @@ class StorageService:
         self,
         source_root_id: str,
         target_root_id: str,
+        space_id: str | None = None,
     ) -> MigrationJobRecord:
         if source_root_id == target_root_id:
             raise InvalidStorageRoot("source and target storage roots must be different")
@@ -2194,11 +2224,17 @@ class StorageService:
         target = self._root_by_id(target_root_id)
         if source.purpose != "primary" or target.purpose != "primary":
             raise ConflictError("migration requires primary storage roots")
-        if source.write_enabled:
+        if source.write_enabled and not space_id:
             raise ConflictError("pause writes on the source storage before migration")
         if not target.write_enabled:
             raise ConflictError("target storage does not accept writes")
-        total_files, total_bytes = self._migration_totals(source_root_id)
+        if space_id:
+            space = self.repository.get_space(space_id)
+            if space.primary_storage_root_id != target.id:
+                raise ConflictError("space migration target must be its primary storage root")
+            if space.fallback_storage_root_id != source.id:
+                raise ConflictError("space migration source must be its fallback storage root")
+        total_files, total_bytes = self._migration_totals(source_root_id, space_id)
         try:
             usage = shutil.disk_usage(target.path)
         except OSError as exc:
@@ -2215,12 +2251,21 @@ class StorageService:
             connection.execute(
                 """
                 INSERT INTO maintenance_jobs(
-                    id, kind, status, source_root_id, target_root_id,
+                    id, kind, status, source_root_id, target_root_id, space_id,
                     total_files, total_bytes, processed_files, processed_bytes,
                     retained_sources, error, created_at, started_at, completed_at, updated_at
-                ) VALUES(?, 'migration', 'queued', ?, ?, ?, ?, 0, 0, 0, '', ?, NULL, NULL, ?)
+                ) VALUES(?, 'migration', 'queued', ?, ?, ?, ?, ?, 0, 0, 0, '', ?, NULL, NULL, ?)
                 """,
-                (job_id, source.id, target.id, total_files, total_bytes, now, now),
+                (
+                    job_id,
+                    source.id,
+                    target.id,
+                    space_id,
+                    total_files,
+                    total_bytes,
+                    now,
+                    now,
+                ),
             )
             self.repository._audit_tx(
                 connection,
@@ -2230,7 +2275,9 @@ class StorageService:
                 target_type="maintenance_job",
                 target_id=job_id,
                 detail=(
-                    f"Перенос {source.id} → {target.id}: объектов {total_files}, байт {total_bytes}"
+                    f"Перенос {source.id} → {target.id}"
+                    f"{f' для пространства {space_id}' if space_id else ''}: "
+                    f"объектов {total_files}, байт {total_bytes}"
                 ),
             )
         return self.get_migration_job(job_id)
@@ -3019,7 +3066,7 @@ class StorageService:
                 return
             source = self._root_by_id(job.source_root_id)
             target = self._root_by_id(job.target_root_id)
-            if source.write_enabled or not target.write_enabled:
+            if (source.write_enabled and not job.space_id) or not target.write_enabled:
                 raise ConflictError("storage write modes changed; migration was not started")
             now = utc_text()
             with self.database.transaction() as connection:
@@ -3036,7 +3083,7 @@ class StorageService:
                 current = self.get_migration_job(job_id)
                 if current.status == "cancelled":
                     return
-                item = self._next_migration_object(source.id)
+                item = self._next_migration_object(source.id, current.space_id)
                 if item is None:
                     break
                 moved = self._copy_and_switch_object(source, target, item)
@@ -3125,23 +3172,59 @@ class StorageService:
             )
         return self.get_migration_job(job_id)
 
-    def _migration_totals(self, source_root_id: str) -> tuple[int, int]:
+    def _migration_totals(
+        self, source_root_id: str, space_id: str | None = None
+    ) -> tuple[int, int]:
         with self.database.connection() as connection:
-            row = connection.execute(
-                """
-                SELECT count(*) AS files, COALESCE(sum(size_bytes), 0) AS bytes
-                FROM (
-                    SELECT size_bytes FROM files WHERE storage_root_id = ?
-                    UNION ALL
-                    SELECT size_bytes FROM file_versions WHERE storage_root_id = ?
-                )
-                """,
-                (source_root_id, source_root_id),
-            ).fetchone()
+            if space_id:
+                row = connection.execute(
+                    """
+                    SELECT count(*) AS files, COALESCE(sum(size_bytes), 0) AS bytes
+                    FROM (
+                        SELECT size_bytes FROM files
+                        WHERE storage_root_id = ? AND space_id = ?
+                        UNION ALL
+                        SELECT versions.size_bytes
+                        FROM file_versions AS versions
+                        JOIN files ON files.id = versions.file_id
+                        WHERE versions.storage_root_id = ? AND files.space_id = ?
+                    )
+                    """,
+                    (source_root_id, space_id, source_root_id, space_id),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT count(*) AS files, COALESCE(sum(size_bytes), 0) AS bytes
+                    FROM (
+                        SELECT size_bytes FROM files WHERE storage_root_id = ?
+                        UNION ALL
+                        SELECT size_bytes FROM file_versions WHERE storage_root_id = ?
+                    )
+                    """,
+                    (source_root_id, source_root_id),
+                ).fetchone()
         return int(row["files"]), int(row["bytes"])
 
-    def _next_migration_object(self, source_root_id: str) -> sqlite3.Row | None:
+    def _next_migration_object(
+        self, source_root_id: str, space_id: str | None = None
+    ) -> sqlite3.Row | None:
         with self.database.connection() as connection:
+            if space_id:
+                return connection.execute(
+                    """
+                    SELECT 'files' AS entity, id, object_path, size_bytes, sha256
+                    FROM files WHERE storage_root_id = ? AND space_id = ?
+                    UNION ALL
+                    SELECT 'file_versions' AS entity, versions.id, versions.object_path,
+                           versions.size_bytes, versions.sha256
+                    FROM file_versions AS versions
+                    JOIN files ON files.id = versions.file_id
+                    WHERE versions.storage_root_id = ? AND files.space_id = ?
+                    LIMIT 1
+                    """,
+                    (source_root_id, space_id, source_root_id, space_id),
+                ).fetchone()
             return connection.execute(
                 """
                 SELECT 'files' AS entity, id, object_path, size_bytes, sha256

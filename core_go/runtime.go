@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-const coreVersion = "0.9.12"
+const coreVersion = "0.9.13"
 
 type coreRuntime struct {
 	config coreConfig

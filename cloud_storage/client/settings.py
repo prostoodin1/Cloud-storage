@@ -5,7 +5,7 @@ import os
 import re
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -25,6 +25,7 @@ class ClientProfile:
     close_to_tray: bool = True
     drive_enabled: bool = True
     drive_letter: str = "S"
+    drive_letters: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, value: dict | None) -> ClientProfile:
@@ -37,7 +38,14 @@ class ClientProfile:
                 else str(value.get(key, field.default))
             )
             for key, field in allowed.items()
+            if key != "drive_letters"
         }
+        raw_letters = value.get("drive_letters") or {}
+        fields["drive_letters"] = {
+            str(space_id): str(letter).strip().upper().rstrip(":")
+            for space_id, letter in raw_letters.items()
+            if isinstance(space_id, str) and isinstance(letter, str)
+        } if isinstance(raw_letters, dict) else {}
         return cls(**fields)
 
 
@@ -164,11 +172,45 @@ class ClientSettingsStore:
                 letter = _next_drive_letter(drive_letters)
             profile.drive_letter = letter
             drive_letters.add(letter)
+            normalized_space_letters: dict[str, str] = {}
+            for space_id, raw_letter in profile.drive_letters.items():
+                space_id = re.sub(r"[^a-zA-Z0-9_-]", "", space_id)[:100]
+                candidate_letter = raw_letter.strip().upper().rstrip(":")
+                if not space_id:
+                    continue
+                if not re.fullmatch(r"[D-Z]", candidate_letter) or candidate_letter in drive_letters:
+                    candidate_letter = _next_drive_letter(drive_letters)
+                normalized_space_letters[space_id] = candidate_letter
+                drive_letters.add(candidate_letter)
+            profile.drive_letters = normalized_space_letters
             identifiers.add(candidate)
             result.append(profile)
         if not result:
             result.append(ClientProfile(download_directory=str(default_download_directory())))
         return result
+
+    def ensure_space_drive_letters(
+        self, profile: ClientProfile, space_ids: list[str]
+    ) -> ClientProfile:
+        all_profiles = self.list_profiles()
+        used = {
+            letter
+            for item in all_profiles
+            for letter in item.drive_letters.values()
+            if item.profile_id != profile.profile_id
+        }
+        normalized: dict[str, str] = {}
+        for space_id in space_ids:
+            existing = profile.drive_letters.get(space_id, "")
+            if re.fullmatch(r"[D-Z]", existing) and existing not in used:
+                letter = existing
+            else:
+                letter = _next_drive_letter(used)
+            normalized[space_id] = letter
+            used.add(letter)
+        profile.drive_letters = normalized
+        self.save(profile)
+        return profile
 
     def _write_document(
         self, profiles: list[ClientProfile], active_profile_id: str
@@ -187,7 +229,7 @@ class ClientSettingsStore:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
                 json.dump(
                     {
-                        "schema_version": 3,
+                        "schema_version": 4,
                         "active_profile_id": active_profile_id,
                         "profiles": [asdict(item) for item in profiles],
                     },

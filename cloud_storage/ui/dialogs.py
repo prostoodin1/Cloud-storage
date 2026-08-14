@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import secrets
+import shutil
 import string
 from datetime import UTC, datetime
+from pathlib import Path
 
 import qrcode
 from PySide6.QtCore import Qt, QUrl, Signal
@@ -13,6 +15,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -405,11 +408,100 @@ class SetupDialog(QDialog):
         return selected
 
 
+class SpaceDialog(QDialog):
+    def __init__(
+        self,
+        storage_roots: list[dict],
+        space: dict | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Логическое пространство")
+        self.setMinimumWidth(520)
+        layout = QVBoxLayout(self)
+        title = QLabel("Настроить общее пространство")
+        title.setObjectName("PageTitle")
+        description = QLabel(
+            "Пользователи увидят отдельный логический диск. Физические пути и структура "
+            "серверного диска останутся скрытыми."
+        )
+        description.setWordWrap(True)
+        description.setProperty("muted", True)
+        layout.addWidget(title)
+        layout.addWidget(description)
+        form = QFormLayout()
+        self.name = QLineEdit(str((space or {}).get("name") or ""))
+        self.name.setPlaceholderText("Например: Семья или Фото")
+        self.quota = QSpinBox()
+        self.quota.setRange(1, 1_000_000)
+        self.quota.setSuffix(" ГБ")
+        self.quota.setValue(max(1, int((space or {}).get("quota_bytes", 100 * 1024**3)) // 1024**3))
+        self.primary = QComboBox()
+        self.fallback = QComboBox()
+        self.primary.addItem("Автоматический выбор", None)
+        self.fallback.addItem("Без резервного диска", None)
+        for root in storage_roots:
+            if root.get("purpose") != "primary":
+                continue
+            label = str(root.get("disk_id") or root.get("path") or root.get("id"))
+            self.primary.addItem(label, root.get("id"))
+            self.fallback.addItem(label, root.get("id"))
+        self.primary.setCurrentIndex(
+            max(0, self.primary.findData((space or {}).get("primary_storage_root_id")))
+        )
+        self.fallback.setCurrentIndex(
+            max(0, self.fallback.findData((space or {}).get("fallback_storage_root_id")))
+        )
+        self.enabled = QCheckBox("Пространство включено")
+        self.enabled.setChecked(bool((space or {}).get("enabled", True)))
+        form.addRow("Название", self.name)
+        form.addRow("Квота", self.quota)
+        form.addRow("Основной диск", self.primary)
+        form.addRow("Резервный диск", self.fallback)
+        form.addRow("", self.enabled)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить")
+        buttons.button(QDialogButtonBox.StandardButton.Save).setProperty("primary", True)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        buttons.accepted.connect(self._validate)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _validate(self) -> None:
+        if not self.name.text().strip():
+            QMessageBox.warning(self, "Нет названия", "Введите название пространства.")
+            return
+        if self.primary.currentData() and self.primary.currentData() == self.fallback.currentData():
+            QMessageBox.warning(
+                self,
+                "Выберите другой резервный диск",
+                "Основной и резервный диски не могут совпадать.",
+            )
+            return
+        self.accept()
+
+    def values(self) -> dict[str, object]:
+        return {
+            "name": self.name.text().strip(),
+            "quota_gib": self.quota.value(),
+            "primary_storage_root_id": self.primary.currentData(),
+            "fallback_storage_root_id": self.fallback.currentData(),
+            "enabled": self.enabled.isChecked(),
+        }
+
+
 class CreateUserDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        spaces: list[dict] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Новый пользователь")
-        self.setMinimumWidth(480)
+        self.setMinimumSize(620, 650)
         layout = QVBoxLayout(self)
         title = QLabel("Создать личное пространство")
         title.setObjectName("PageTitle")
@@ -435,6 +527,11 @@ class CreateUserDialog(QDialog):
         generate_password = QPushButton("Создать надёжный")
         generate_password.clicked.connect(self.generate_password)
         password_row.addWidget(generate_password)
+        copy_password = QPushButton("Копировать")
+        copy_password.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.password.text())
+        )
+        password_row.addWidget(copy_password)
         self.password_confirmation = QLineEdit()
         self.password_confirmation.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_confirmation.setPlaceholderText("Повторите пароль")
@@ -442,15 +539,58 @@ class CreateUserDialog(QDialog):
         self.quota.setRange(1, 1_000_000)
         self.quota.setValue(100)
         self.quota.setSuffix(" ГБ")
+        self.personal_space = QCheckBox("Создать личное пространство «Мои файлы»")
+        self.personal_space.setChecked(True)
+        self.personal_space.toggled.connect(self.quota.setEnabled)
         self.admin = QCheckBox("Администратор сервера")
         form.addRow("Логин", self.username)
         form.addRow("Имя", self.display_name)
         form.addRow("Пароль", password_row)
         form.addRow("Повтор пароля", self.password_confirmation)
-        form.addRow("Личное хранилище", self.quota)
+        form.addRow("Личное хранилище", self.personal_space)
+        form.addRow("Квота личного", self.quota)
         form.addRow("Email для файла входа", self.email)
         form.addRow("", self.admin)
         layout.addLayout(form)
+        self.space_permissions: dict[str, dict[str, QCheckBox]] = {}
+        shared_spaces = [item for item in (spaces or []) if item.get("kind") == "shared"]
+        if shared_spaces:
+            spaces_title = QLabel("Доступ к общим пространствам")
+            spaces_title.setStyleSheet("font-weight: 700; font-size: 16px;")
+            layout.addWidget(spaces_title)
+            spaces_scroll = QScrollArea()
+            spaces_scroll.setWidgetResizable(True)
+            spaces_content = QWidget()
+            spaces_layout = QVBoxLayout(spaces_content)
+            for space in shared_spaces:
+                card = QFrame()
+                card.setProperty("card", True)
+                card_layout = QVBoxLayout(card)
+                enabled = QCheckBox(str(space.get("name") or "Общее пространство"))
+                card_layout.addWidget(enabled)
+                rights = QHBoxLayout()
+                checks: dict[str, QCheckBox] = {"enabled": enabled}
+                for key, label, default in (
+                    ("read", "Просмотр", True),
+                    ("upload", "Загрузка", True),
+                    ("modify", "Изменение", False),
+                    ("delete", "Удаление", False),
+                    ("share", "Ссылки", False),
+                ):
+                    check = QCheckBox(label)
+                    check.setChecked(default)
+                    check.setEnabled(False)
+                    enabled.toggled.connect(check.setEnabled)
+                    rights.addWidget(check)
+                    checks[key] = check
+                rights.addStretch()
+                card_layout.addLayout(rights)
+                spaces_layout.addWidget(card)
+                self.space_permissions[str(space["id"])] = checks
+            spaces_layout.addStretch()
+            spaces_scroll.setWidget(spaces_content)
+            spaces_scroll.setMinimumHeight(180)
+            layout.addWidget(spaces_scroll)
         safety = QLabel(
             "Пользователь не увидит физические диски — только логическое пространство «Мои файлы»."
         )
@@ -498,6 +638,15 @@ class CreateUserDialog(QDialog):
                 "Повторно введите одинаковый пароль в оба поля.",
             )
             return
+        if not self.personal_space.isChecked() and not any(
+            checks["enabled"].isChecked() for checks in self.space_permissions.values()
+        ):
+            QMessageBox.warning(
+                self,
+                "Не выбран доступ",
+                "Создайте личное пространство или выберите хотя бы одно общее.",
+            )
+            return
         self.accept()
 
     def values(self) -> dict[str, object]:
@@ -508,8 +657,121 @@ class CreateUserDialog(QDialog):
             "quota_gib": self.quota.value(),
             "role": "admin" if self.admin.isChecked() else "member",
             "email": self.email.text().strip(),
+            "create_personal_space": self.personal_space.isChecked(),
+            "space_grants": [
+                {
+                    "space_id": space_id,
+                    "capabilities": {
+                        key: checks[key].isChecked()
+                        for key in ("read", "upload", "modify", "delete", "share")
+                    },
+                }
+                for space_id, checks in self.space_permissions.items()
+                if checks["enabled"].isChecked()
+            ],
             "prepare_access": True,
         }
+
+
+class UserEditDialog(QDialog):
+    def __init__(
+        self,
+        user: dict,
+        spaces: list[dict],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Пользователь")
+        self.setMinimumSize(620, 580)
+        layout = QVBoxLayout(self)
+        title = QLabel(f"Изменить пользователя · @{user.get('username', '')}")
+        title.setObjectName("PageTitle")
+        layout.addWidget(title)
+        form = QFormLayout()
+        self.display_name = QLineEdit(str(user.get("display_name") or ""))
+        self.email = QLineEdit(str(user.get("email") or ""))
+        self.quota = QSpinBox()
+        self.quota.setRange(1, 1_000_000)
+        self.quota.setSuffix(" ГБ")
+        self.quota.setValue(max(1, int(user.get("quota_bytes", 100 * 1024**3)) // 1024**3))
+        self.admin = QCheckBox("Администратор сервера")
+        self.admin.setChecked(user.get("role") == "admin")
+        self.enabled = QCheckBox("Учётная запись включена")
+        self.enabled.setChecked(bool(user.get("enabled", True)))
+        form.addRow("Имя", self.display_name)
+        form.addRow("Email", self.email)
+        form.addRow("Квота", self.quota)
+        form.addRow("", self.admin)
+        form.addRow("", self.enabled)
+        layout.addLayout(form)
+        grants = {
+            str(item.get("space_id")): item.get("capabilities") or {}
+            for item in user.get("space_grants") or []
+        }
+        self.space_permissions: dict[str, dict[str, QCheckBox]] = {}
+        spaces_scroll = QScrollArea()
+        spaces_scroll.setWidgetResizable(True)
+        spaces_content = QWidget()
+        spaces_layout = QVBoxLayout(spaces_content)
+        for space in spaces:
+            if space.get("kind") != "shared":
+                continue
+            space_id = str(space.get("id"))
+            current = grants.get(space_id, {})
+            card = QFrame()
+            card.setProperty("card", True)
+            card_layout = QVBoxLayout(card)
+            access = QCheckBox(str(space.get("name") or "Общее пространство"))
+            access.setChecked(bool(current.get("read", False)))
+            card_layout.addWidget(access)
+            rights = QHBoxLayout()
+            checks: dict[str, QCheckBox] = {"enabled": access}
+            for key, label, default in (
+                ("read", "Просмотр", True),
+                ("upload", "Загрузка", True),
+                ("modify", "Изменение", False),
+                ("delete", "Удаление", False),
+                ("share", "Ссылки", False),
+            ):
+                check = QCheckBox(label)
+                check.setChecked(bool(current.get(key, default)))
+                check.setEnabled(access.isChecked())
+                access.toggled.connect(check.setEnabled)
+                rights.addWidget(check)
+                checks[key] = check
+            rights.addStretch()
+            card_layout.addLayout(rights)
+            spaces_layout.addWidget(card)
+            self.space_permissions[space_id] = checks
+        spaces_layout.addStretch()
+        spaces_scroll.setWidget(spaces_content)
+        layout.addWidget(spaces_scroll)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить")
+        buttons.button(QDialogButtonBox.StandardButton.Save).setProperty("primary", True)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[dict[str, object], dict[str, dict[str, bool]]]:
+        user_values: dict[str, object] = {
+            "display_name": self.display_name.text().strip(),
+            "email": self.email.text().strip(),
+            "quota_gib": self.quota.value(),
+            "role": "admin" if self.admin.isChecked() else "member",
+            "enabled": self.enabled.isChecked(),
+        }
+        grants = {
+            space_id: {
+                key: checks[key].isChecked() if checks["enabled"].isChecked() else False
+                for key in ("read", "upload", "modify", "delete", "share")
+            }
+            for space_id, checks in self.space_permissions.items()
+        }
+        return user_values, grants
 
 
 class PasswordDialog(QDialog):
@@ -571,6 +833,7 @@ class PasswordDialog(QDialog):
 
 class InvitationDialog(QDialog):
     cancel_requested = Signal(str)
+    email_requested = Signal(str, str)
 
     def __init__(
         self,
@@ -582,6 +845,8 @@ class InvitationDialog(QDialog):
         certificate_fingerprint: str = "",
         username: str = "",
         password: str = "",
+        access_path: str = "",
+        email: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -591,6 +856,8 @@ class InvitationDialog(QDialog):
         self.certificate_fingerprint = certificate_fingerprint
         self.username = username
         self.password = password
+        self.access_path = access_path
+        self.email = email
         self.pairing_uri = build_pairing_uri(
             code, server_url, certificate_fingerprint, username
         )
@@ -668,6 +935,16 @@ class InvitationDialog(QDialog):
         warning.setProperty("muted", True)
         layout.addWidget(warning)
         controls = QHBoxLayout()
+        if self.access_path:
+            save_access = QPushButton("Сохранить файл входа")
+            save_access.clicked.connect(self._save_access_file)
+            controls.addWidget(save_access)
+        if self.email:
+            send_email = QPushButton("Отправить файл на почту")
+            send_email.clicked.connect(
+                lambda: self.email_requested.emit(self.invitation_id, self.email)
+            )
+            controls.addWidget(send_email)
         cancel = QPushButton("Отменить приглашение")
         cancel.clicked.connect(self._cancel_invitation)
         close = QPushButton("Готово")
@@ -689,6 +966,26 @@ class InvitationDialog(QDialog):
         QApplication.clipboard().setText(
             f"Логин: {self.username}\nПароль: {password}"
         )
+
+    def _save_access_file(self) -> None:
+        source = Path(self.access_path)
+        if not source.is_file():
+            QMessageBox.warning(self, "Файл не найден", "Создайте новый файл доступа.")
+            return
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить файл входа",
+            f"cloud-storage-{self.username or 'access'}.cloud-access.json",
+            "Cloud Storage access (*.cloud-access.json)",
+        )
+        if not selected:
+            return
+        try:
+            shutil.copy2(source, selected)
+        except OSError as exc:
+            QMessageBox.warning(self, "Файл не сохранён", str(exc))
+            return
+        QMessageBox.information(self, "Файл сохранён", selected)
 
     def _short_fingerprint(self) -> str:
         normalized = self.certificate_fingerprint.replace(":", "").upper()

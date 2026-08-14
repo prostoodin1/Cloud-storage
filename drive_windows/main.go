@@ -36,7 +36,7 @@ import (
 const (
 	maxResponseBytes = 16 * 1024 * 1024
 	stillActive      = 259
-	driveMutexName   = `Local\CloudStorageDrive-SingleInstance`
+	driveMutexPrefix = `Local\CloudStorageDrive-`
 )
 
 type settingsDocument struct {
@@ -70,6 +70,7 @@ type entry struct {
 type statusDocument struct {
 	SchemaVersion int    `json:"schema_version"`
 	ProfileID     string `json:"profile_id"`
+	SpaceID       string `json:"space_id"`
 	DriveLetter   string `json:"drive_letter"`
 	State         string `json:"state"`
 	Detail        string `json:"detail"`
@@ -747,6 +748,7 @@ func isLoopback(host string) bool {
 
 func run() error {
 	profileID := flag.String("profile-id", "", "client profile identifier")
+	spaceFlag := flag.String("space-id", "", "logical space identifier")
 	mountpoint := flag.String("mount", "S:", "drive letter mount point")
 	dataDir := flag.String("data-dir", "", "Cloud Storage Client data directory")
 	parentPID := flag.Int("parent-pid", 0, "parent client process identifier")
@@ -755,7 +757,13 @@ func run() error {
 	if *smokeTest {
 		return nil
 	}
-	mutexName, err := windows.UTF16PtrFromString(driveMutexName)
+	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`).MatchString(*profileID) {
+		return errors.New("invalid profile identifier")
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`).MatchString(*spaceFlag) {
+		return errors.New("invalid space identifier")
+	}
+	mutexName, err := windows.UTF16PtrFromString(driveMutexPrefix + *profileID + "-" + *spaceFlag)
 	if err != nil {
 		return err
 	}
@@ -770,34 +778,36 @@ func run() error {
 		return mutexErr
 	}
 	defer windows.CloseHandle(mutex)
-	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`).MatchString(*profileID) {
-		return errors.New("invalid profile identifier")
-	}
 	letter := strings.ToUpper(strings.TrimSuffix(*mountpoint, ":"))
 	if !regexp.MustCompile(`^[D-Z]$`).MatchString(letter) || *dataDir == "" {
 		return errors.New("invalid drive mount configuration")
 	}
-	statusPath := filepath.Join(*dataDir, "drives", *profileID+".json")
-	baseStatus := statusDocument{ProfileID: *profileID, DriveLetter: letter}
-	writeStatus(statusPath, statusDocument{ProfileID: *profileID, DriveLetter: letter, State: "starting", Detail: "Подключаемся к серверу"})
+	statusPath := filepath.Join(*dataDir, "drives", *profileID+"-"+*spaceFlag+".json")
+	baseStatus := statusDocument{ProfileID: *profileID, SpaceID: *spaceFlag, DriveLetter: letter}
+	baseStatus.State = "starting"
+	baseStatus.Detail = "Подключаемся к серверу"
+	writeStatus(statusPath, baseStatus)
 	p, token, remoteSession, err := loadProfile(*dataDir, *profileID)
 	if err != nil {
-		writeStatus(statusPath, statusDocument{ProfileID: *profileID, DriveLetter: letter, State: "error", Detail: err.Error()})
+		baseStatus.State, baseStatus.Detail = "error", err.Error()
+		writeStatus(statusPath, baseStatus)
 		return err
 	}
 	api, err := newAPIClient(p, token, remoteSession)
 	if err != nil {
-		writeStatus(statusPath, statusDocument{ProfileID: *profileID, DriveLetter: letter, State: "error", Detail: err.Error()})
+		baseStatus.State, baseStatus.Detail = "error", err.Error()
+		writeStatus(statusPath, baseStatus)
 		return err
 	}
-	spaceID := p.LastSpaceID
+	spaceID := *spaceFlag
 	if spaceID == "" {
 		spaces, err := api.listSpaces()
 		if err != nil || len(spaces) == 0 {
 			if err == nil {
 				err = errors.New("no personal space is available")
 			}
-			writeStatus(statusPath, statusDocument{ProfileID: *profileID, DriveLetter: letter, State: "offline", Detail: err.Error()})
+			baseStatus.State, baseStatus.Detail = "offline", err.Error()
+			writeStatus(statusPath, baseStatus)
 			return err
 		}
 		spaceID = spaces[0].ID
@@ -817,7 +827,8 @@ func run() error {
 	}
 	mounted, err := winfsp.Mount(behaviour, letter+":")
 	if err != nil {
-		writeStatus(statusPath, statusDocument{ProfileID: *profileID, DriveLetter: letter, State: "error", Detail: "WinFsp: " + err.Error()})
+		baseStatus.State, baseStatus.Detail = "error", "WinFsp: "+err.Error()
+		writeStatus(statusPath, baseStatus)
 		return err
 	}
 	defer mounted.Unmount()

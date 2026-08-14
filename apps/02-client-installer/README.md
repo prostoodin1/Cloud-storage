@@ -2,7 +2,7 @@
 
 Windows-установщик ставит Desktop Client, виртуальный диск Cloud Storage для Проводника и необходимые компоненты WinFsp. Он также создаёт ярлыки и записи удаления/обновления.
 
-- [Скачать Client Setup 0.9.12](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.12/CloudStorage-Client-Setup-0.9.12-windows-x64.exe)
+- [Скачать Client Setup 0.9.13](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Client-Setup-0.9.13-windows-x64.exe)
 - [Сценарий Inno Setup](../../packaging/CloudStorageClient.iss)
 - [Сценарий клиентской сборки](../../scripts/build-client-installer.ps1)
 - [PyInstaller Client](../../packaging/CloudStorageClient.spec)

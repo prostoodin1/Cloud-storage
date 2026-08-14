@@ -152,7 +152,7 @@ class EmailProvider:
     provider_id: str = "email"
 
     def manifest(self) -> dict[str, Any]:
-        configured = bool(self.host and self.sender and self.recipient)
+        configured = bool(self.host and self.sender)
         return {
             "id": self.provider_id,
             "name": "Email (SMTP)",
@@ -166,13 +166,26 @@ class EmailProvider:
         }
 
     def deliver(self, notification: dict[str, Any]) -> None:
-        if not self.host or not self.sender or not self.recipient:
+        recipient = str(notification.get("recipient") or self.recipient).strip()
+        if not self.host or not self.sender or not recipient:
             raise RuntimeError("email delivery is not configured")
         message = EmailMessage()
         message["Subject"] = f"[Cloud Storage] {notification.get('title', 'Notification')}"
         message["From"] = self.sender
-        message["To"] = str(notification.get("recipient") or self.recipient)
+        message["To"] = recipient
         message.set_content(str(notification.get("message", "")))
+        for attachment in notification.get("attachments") or []:
+            content = attachment.get("content", b"")
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            content_type = str(attachment.get("content_type") or "application/octet-stream")
+            main_type, _, sub_type = content_type.partition("/")
+            message.add_attachment(
+                bytes(content),
+                maintype=main_type or "application",
+                subtype=sub_type or "octet-stream",
+                filename=str(attachment.get("filename") or "attachment.bin"),
+            )
         with smtplib.SMTP(self.host, self.port, timeout=10) as client:
             if self.starttls:
                 client.starttls()

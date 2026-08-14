@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -35,7 +36,7 @@ from cloud_storage.models import (
     DiskRole,
     DiskSnapshot,
 )
-from cloud_storage.pairing import build_connection_code
+from cloud_storage.pairing import build_pairing_uri, build_server_code
 from cloud_storage.services.audit_log import AuditLog
 from cloud_storage.services.core_client import (
     CoreApiError,
@@ -53,6 +54,8 @@ from cloud_storage.ui.dialogs import (
     InvitationDialog,
     PasswordDialog,
     SetupDialog,
+    SpaceDialog,
+    UserEditDialog,
 )
 from cloud_storage.ui.pages import DashboardPage, DisksPage, SettingsPage
 from cloud_storage.ui.transfer_page import TransfersPage
@@ -122,6 +125,7 @@ class MainWindow(QMainWindow):
         self.core_health: dict | None = None
         self.core_summary: dict | None = None
         self.core_users: list[dict] = []
+        self.core_spaces: list[dict] = []
         self.core_devices: list[dict] = []
         self.core_audit: list[dict] = []
         self.core_storage_roots: list[dict] = []
@@ -294,12 +298,17 @@ class MainWindow(QMainWindow):
             self.generate_connection_code
         )
         self.connection_page.panel.create_user_requested.connect(self.add_user)
+        self.connection_page.panel.edit_user_requested.connect(self.edit_user)
+        self.connection_page.panel.reset_password_requested.connect(self.reset_user_password)
+        self.connection_page.panel.email_access_requested.connect(self.send_user_access_email)
         self.connection_page.panel.refresh_button.clicked.connect(self.refresh_core)
         self.disks_page.disk_selected.connect(self.open_disk)
         self.disks_page.refresh_requested.connect(self.refresh_disks)
         self.disks_page.configure_first_requested.connect(self.configure_first_unconfigured)
         self.disks_page.remind_later_requested.connect(self.hide_disk_reminder)
         self.disks_page.ignore_unconfigured_requested.connect(self.ignore_unconfigured)
+        self.disks_page.create_space_requested.connect(self.create_space)
+        self.disks_page.edit_space_requested.connect(self.edit_space)
         self.receive_page.refresh_requested.connect(self.refresh_core)
         self.receive_page.retry_requested.connect(self.retry_transfer)
         self.receive_page.configure_cache_requested.connect(
@@ -546,7 +555,11 @@ class MainWindow(QMainWindow):
             not self.settings.setup_complete and not self._setup_banner_hidden
         )
         self.disks_page.update_data(
-            self.disks, self.settings, reminder_hidden=self._disk_reminder_hidden
+            self.disks,
+            self.settings,
+            reminder_hidden=self._disk_reminder_hidden,
+            spaces=self.core_spaces,
+            storage_roots=self.core_storage_roots,
         )
         self.connection_page.panel.set_data(
             self.core_health,
@@ -572,6 +585,7 @@ class MainWindow(QMainWindow):
             self.core_automation,
             self.core_notifications,
             self.core_integrations,
+            spaces=self.core_spaces,
         )
         self.receive_page.update_data(self.core_transfers, online=self.core_health is not None)
         self.send_page.update_data(self.core_transfers, online=self.core_health is not None)
@@ -601,6 +615,7 @@ class MainWindow(QMainWindow):
         self.core_health = self.core_client.try_health()
         self.core_summary = None
         self.core_users = []
+        self.core_spaces = []
         self.core_devices = []
         self.core_audit = []
         self.core_storage_roots = []
@@ -627,6 +642,7 @@ class MainWindow(QMainWindow):
         try:
             self.core_summary = self.core_client.summary()
             self.core_users = self.core_client.list_users()
+            self.core_spaces = self.core_client.list_spaces_admin()
             self.core_devices = self.core_client.list_devices()
             self.core_audit = self.core_client.list_audit(100)
             self.core_storage_roots = self.core_client.list_storage_roots()
@@ -725,7 +741,7 @@ class MainWindow(QMainWindow):
         if not self.core_health:
             QMessageBox.information(self, "Ядро выключено", "Сначала запустите серверное ядро.")
             return
-        dialog = CreateUserDialog(self)
+        dialog = CreateUserDialog(self.core_spaces, self)
         if not dialog.exec():
             return
         values = dialog.values()
@@ -755,24 +771,93 @@ class MainWindow(QMainWindow):
             invitation["expires_at"],
             str(created["user"].get("username") or values["username"]),
             str(values["password"]),
+            user_id=str(created["user"]["id"]),
+            access_path=str(access.get("download_path") or ""),
+            email=str(values.get("email") or ""),
+        )
+        self.refresh_core()
+
+    def create_space(self) -> None:
+        if not self.core_health:
+            QMessageBox.information(self, "Ядро выключено", "Сначала запустите серверное ядро.")
+            return
+        dialog = SpaceDialog(self.core_storage_roots, parent=self)
+        if not dialog.exec():
+            return
+        values = dialog.values()
+        values.pop("enabled", None)
+        try:
+            created = self.core_client.create_space(values)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Пространство не создано", self._core_error_text(exc))
+            return
+        self.audit.record(
+            "core.space.created", f"Создано пространство {created.get('name', '')}"
+        )
+        self.refresh_core()
+
+    def edit_user(self, user_id: str) -> None:
+        user = next(
+            (item for item in self.core_users if str(item.get("id")) == user_id),
+            None,
+        )
+        if user is None:
+            return
+        dialog = UserEditDialog(user, self.core_spaces, self)
+        if not dialog.exec():
+            return
+        values, grants = dialog.values()
+        try:
+            self.core_client.update_user(user_id, values)
+            for space_id, capabilities in grants.items():
+                self.core_client.set_space_member(space_id, user_id, capabilities)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Пользователь не сохранён", self._core_error_text(exc))
+            return
+        self.audit.record(
+            "core.user.updated", f"Обновлён пользователь {user.get('display_name', '')}"
+        )
+        self.refresh_core()
+
+    def edit_space(self, space_id: str) -> None:
+        space = next(
+            (item for item in self.core_spaces if str(item.get("id")) == space_id),
+            None,
+        )
+        if space is None:
+            return
+        dialog = SpaceDialog(self.core_storage_roots, space, self)
+        if not dialog.exec():
+            return
+        try:
+            self.core_client.update_space(space_id, dialog.values())
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Пространство не сохранено", self._core_error_text(exc))
+            return
+        self.audit.record(
+            "core.space.updated", f"Обновлено пространство {space.get('name', '')}"
         )
         self.refresh_core()
 
     def create_invitation(self, user_id: str, display_name: str) -> None:
         try:
-            invitation = self.core_client.create_invitation(user_id)
+            access = self.core_client.prepare_user_access(user_id, ttl_seconds=604800)
         except (CoreApiError, CoreUnavailable) as exc:
             QMessageBox.warning(self, "Код не создан", self._core_error_text(exc))
             return
+        invitation = access["package"]
         selected_user = next(
             (item for item in self.core_users if str(item.get("id")) == user_id), {}
         )
         self._show_invitation(
-            invitation["id"],
+            access["invitation_id"],
             display_name,
-            invitation["code"],
-            invitation["expires_at"],
+            invitation["one_time_code"],
+            access["expires_at"],
             str(selected_user.get("username") or ""),
+            user_id=user_id,
+            access_path=str(access.get("download_path") or ""),
+            email=str(selected_user.get("email") or ""),
         )
 
     def generate_connection_code(self, user_id: str, username: str, mode: str) -> None:
@@ -786,12 +871,11 @@ class MainWindow(QMainWindow):
                 )
             return
         try:
-            invitation = self.core_client.create_invitation(user_id)
-            connection_code = build_connection_code(
-                invitation["code"],
-                endpoint,
-                fingerprint,
-                username,
+            access = self.core_client.prepare_user_access(user_id, ttl_seconds=900)
+            package = access["package"]
+            connection_code = build_server_code(endpoint, fingerprint, username)
+            pairing_link = build_pairing_uri(
+                package["one_time_code"], endpoint, fingerprint, username
             )
         except (CoreApiError, CoreUnavailable, ValueError) as exc:
             message = f"Код не создан: {self._core_error_text(exc)}"
@@ -801,12 +885,14 @@ class MainWindow(QMainWindow):
             return
         scope = "из любой сети" if mode == "internet" else "в локальной сети"
         detail = (
-            f"Готово: код работает {scope} до {invitation['expires_at']}. "
+            f"Готово: ссылка и QR работают {scope} до {access['expires_at']}. "
             "После первого входа устройство появится в списке на подтверждение."
         )
-        panel.show_code(connection_code, detail)
+        panel.show_code(connection_code, detail, pairing_link)
         if getattr(self.settings_page, "connection_panel", None) is not None:
-            self.settings_page.connection_panel.show_code(connection_code, detail)
+            self.settings_page.connection_panel.show_code(
+                connection_code, detail, pairing_link
+            )
         self.audit.record(
             "core.connection_code.created",
             f"Создан код подключения для {username or user_id} ({scope})",
@@ -816,8 +902,9 @@ class MainWindow(QMainWindow):
         dialog = PasswordDialog(display_name, self)
         if not dialog.exec():
             return
+        new_password = dialog.value()
         try:
-            self.core_client.set_user_password(user_id, dialog.value())
+            self.core_client.set_user_password(user_id, new_password)
         except (CoreApiError, CoreUnavailable) as exc:
             QMessageBox.warning(self, "Пароль не изменён", self._core_error_text(exc))
             return
@@ -827,8 +914,10 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Пароль изменён",
-            "Новый пароль сохранён. Активные интернет-сессии отозваны.",
+            "Новый пароль сохранён и скопирован в буфер обмена. "
+            "Активные интернет-сессии отозваны.",
         )
+        QApplication.clipboard().setText(new_password)
         self.refresh_core()
 
     def _show_invitation(
@@ -839,6 +928,9 @@ class MainWindow(QMainWindow):
         expires_at: str,
         username: str = "",
         password: str = "",
+        user_id: str = "",
+        access_path: str = "",
+        email: str = "",
     ) -> None:
         lan = self.core_health.get("lan") if self.core_health else None
         remote = self.core_health.get("remote") if self.core_health else None
@@ -865,10 +957,49 @@ class MainWindow(QMainWindow):
             ),
             username=username,
             password=password,
+            access_path=access_path,
+            email=email,
             parent=self,
         )
         dialog.cancel_requested.connect(self.cancel_invitation)
+        if user_id:
+            dialog.email_requested.connect(
+                lambda _invitation_id, recipient: self.send_user_access_email(
+                    user_id, recipient
+                )
+            )
         dialog.exec()
+
+    def send_user_access_email(self, user_id: str, email: str) -> None:
+        try:
+            result = self.core_client.prepare_user_access(
+                user_id,
+                email=email,
+                ttl_seconds=604800,
+                send_email=True,
+            )
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Файл не отправлен", self._core_error_text(exc))
+            return
+        status = str(result.get("email_status") or "")
+        if status == "delivered":
+            QMessageBox.information(
+                self,
+                "Файл отправлен",
+                f"Одноразовый файл входа отправлен на {email}. Предыдущий код отозван.",
+            )
+        elif status == "not-configured":
+            QMessageBox.warning(
+                self,
+                "SMTP не настроен",
+                "Настройте Email (SMTP) в разделе «Настройки → Уведомления».",
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "Файл не отправлен",
+                f"SMTP вернул состояние: {status or 'неизвестная ошибка'}",
+            )
 
     def cancel_invitation(self, invitation_id: str) -> None:
         try:
@@ -904,7 +1035,9 @@ class MainWindow(QMainWindow):
         self.audit.record("core.device.revoked", f"Отключено устройство {device['name']}")
         self.refresh_core()
 
-    def start_migration(self, source_root_id: str, target_root_id: str) -> None:
+    def start_migration(
+        self, source_root_id: str, target_root_id: str, space_id: str = ""
+    ) -> None:
         response = QMessageBox.question(
             self,
             "Начать перенос?",
@@ -915,7 +1048,9 @@ class MainWindow(QMainWindow):
         if response != QMessageBox.StandardButton.Yes:
             return
         try:
-            job = self.core_client.create_migration(source_root_id, target_root_id)
+            job = self.core_client.create_migration(
+                source_root_id, target_root_id, space_id or None
+            )
         except (CoreApiError, CoreUnavailable) as exc:
             QMessageBox.warning(self, "Перенос не запущен", self._core_error_text(exc))
             return

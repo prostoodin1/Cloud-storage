@@ -1,7 +1,7 @@
 {
   "id": "client-installer",
   "name": "Cloud Storage Client Setup",
-  "version": "0.9.12",
+  "version": "0.9.13",
   "platforms": ["windows-x64"],
   "source_paths": [
     "packaging/CloudStorageClient.iss",
@@ -9,5 +9,5 @@
     "scripts/build-client-installer.ps1",
     "drive_windows"
   ],
-  "release_asset": "CloudStorage-Client-Setup-0.9.12-windows-x64.exe"
+  "release_asset": "CloudStorage-Client-Setup-0.9.13-windows-x64.exe"
 }

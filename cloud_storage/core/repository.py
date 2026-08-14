@@ -36,6 +36,7 @@ class UserRecord:
     id: str
     username: str
     display_name: str
+    email: str
     role: str
     quota_bytes: int
     enabled: bool
@@ -51,7 +52,18 @@ class SpaceRecord:
     kind: str
     quota_bytes: int
     permission: str | None = None
+    can_read: bool = False
+    can_upload: bool = False
+    can_modify: bool = False
+    can_delete: bool = False
+    can_share: bool = False
+    primary_storage_root_id: str | None = None
+    fallback_storage_root_id: str | None = None
+    enabled: bool = True
     created_at: str = ""
+
+    def allows(self, capability: str) -> bool:
+        return bool(getattr(self, f"can_{capability}", False))
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +110,11 @@ class CoreRepository:
         quota_bytes: int,
         role: str = "member",
         password: str | None = None,
-    ) -> tuple[UserRecord, SpaceRecord]:
+        email: str = "",
+        create_personal_space: bool = True,
+        primary_storage_root_id: str | None = None,
+        fallback_storage_root_id: str | None = None,
+    ) -> tuple[UserRecord, SpaceRecord | None]:
         username = self.credentials.validate_username(username)
         display_name = display_name.strip()
         if not display_name or len(display_name) > 80:
@@ -107,6 +123,11 @@ class CoreRepository:
             raise InvalidCredential("invalid user role")
         if quota_bytes < 1024**3:
             raise InvalidCredential("quota must be at least 1 GiB")
+        email = email.strip()
+        if len(email) > 254 or (email and "@" not in email):
+            raise InvalidCredential("invalid email address")
+        if primary_storage_root_id and primary_storage_root_id == fallback_storage_root_id:
+            raise InvalidCredential("primary and fallback storage roots must differ")
         password_hash = self.credentials.hash_password(password) if password is not None else None
         password_version = 1 if password_hash else 0
         user_id = str(uuid.uuid4())
@@ -117,14 +138,15 @@ class CoreRepository:
                 connection.execute(
                     """
                     INSERT INTO users(
-                        id, username, display_name, password_hash, password_version, role,
+                        id, username, display_name, email, password_hash, password_version, role,
                         quota_bytes, enabled, created_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                     """,
                     (
                         user_id,
                         username,
                         display_name,
+                        email,
                         password_hash,
                         password_version,
                         role,
@@ -132,20 +154,32 @@ class CoreRepository:
                         created,
                     ),
                 )
-                connection.execute(
-                    """
-                    INSERT INTO spaces(id, owner_user_id, name, kind, quota_bytes, created_at)
-                    VALUES(?, ?, 'Мои файлы', 'personal', ?, ?)
-                    """,
-                    (space_id, user_id, quota_bytes, created),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO space_members(space_id, user_id, permission)
-                    VALUES(?, ?, 'owner')
-                    """,
-                    (space_id, user_id),
-                )
+                if create_personal_space:
+                    connection.execute(
+                        """
+                        INSERT INTO spaces(
+                            id, owner_user_id, name, kind, quota_bytes,
+                            primary_storage_root_id, fallback_storage_root_id, created_at
+                        ) VALUES(?, ?, 'Мои файлы', 'personal', ?, ?, ?, ?)
+                        """,
+                        (
+                            space_id,
+                            user_id,
+                            quota_bytes,
+                            primary_storage_root_id,
+                            fallback_storage_root_id,
+                            created,
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO space_members(
+                            space_id, user_id, permission, can_read, can_upload,
+                            can_modify, can_delete, can_share
+                        ) VALUES(?, ?, 'owner', 1, 1, 1, 1, 1)
+                        """,
+                        (space_id, user_id),
+                    )
                 self._audit_tx(
                     connection,
                     actor_type="manager",
@@ -157,13 +191,16 @@ class CoreRepository:
                 )
         except sqlite3.IntegrityError as exc:
             raise ConflictError("username already exists") from exc
-        return self.get_user(user_id), self.get_space(space_id, user_id)
+        return (
+            self.get_user(user_id),
+            self.get_space(space_id, user_id) if create_personal_space else None,
+        )
 
     def list_users(self) -> list[UserRecord]:
         with self.database.connection() as connection:
             rows = connection.execute(
                 """
-                SELECT id, username, display_name, role, quota_bytes, enabled,
+                SELECT id, username, display_name, email, role, quota_bytes, enabled,
                        password_hash IS NOT NULL AS has_password, created_at
                 FROM users ORDER BY display_name COLLATE NOCASE
                 """
@@ -174,7 +211,7 @@ class CoreRepository:
         with self.database.connection() as connection:
             row = connection.execute(
                 """
-                SELECT id, username, display_name, role, quota_bytes, enabled,
+                SELECT id, username, display_name, email, role, quota_bytes, enabled,
                        password_hash IS NOT NULL AS has_password, created_at
                 FROM users WHERE id = ?
                 """,
@@ -189,7 +226,7 @@ class CoreRepository:
         with self.database.connection() as connection:
             row = connection.execute(
                 """
-                SELECT id, username, display_name, password_hash, role,
+                SELECT id, username, display_name, email, password_hash, role,
                        quota_bytes, enabled, password_hash IS NOT NULL AS has_password, created_at
                 FROM users WHERE username = ? COLLATE NOCASE
                 """,
@@ -261,10 +298,70 @@ class CoreRepository:
             )
         return self.get_user(user_id)
 
-    def create_invitation(self, user_id: str, ttl_seconds: int) -> tuple[str, str, str]:
+    def update_user(
+        self,
+        user_id: str,
+        *,
+        display_name: str,
+        email: str,
+        role: str,
+        quota_bytes: int,
+        enabled: bool,
+    ) -> UserRecord:
+        display_name = display_name.strip()
+        email = email.strip()
+        if not display_name or len(display_name) > 80:
+            raise InvalidCredential("display name must contain 1-80 characters")
+        if len(email) > 254 or (email and "@" not in email):
+            raise InvalidCredential("invalid email address")
+        if role not in {"admin", "member"}:
+            raise InvalidCredential("invalid user role")
+        if quota_bytes < 1024**3:
+            raise InvalidCredential("quota must be at least 1 GiB")
+        with self.database.transaction() as connection:
+            changed = connection.execute(
+                """
+                UPDATE users
+                SET display_name = ?, email = ?, role = ?, quota_bytes = ?, enabled = ?
+                WHERE id = ?
+                """,
+                (display_name, email, role, quota_bytes, int(enabled), user_id),
+            )
+            if changed.rowcount != 1:
+                raise NotFoundError("user not found")
+            connection.execute(
+                "UPDATE spaces SET quota_bytes = ? WHERE owner_user_id = ? AND kind = 'personal'",
+                (quota_bytes, user_id),
+            )
+            if not enabled:
+                connection.execute(
+                    "UPDATE devices SET status = 'revoked' WHERE user_id = ? AND status != 'revoked'",
+                    (user_id,),
+                )
+            self._audit_tx(
+                connection,
+                actor_type="manager",
+                actor_id=None,
+                action="user.updated",
+                target_type="user",
+                target_id=user_id,
+                detail=f"Обновлены параметры пользователя {display_name}",
+            )
+        return self.get_user(user_id)
+
+    def create_invitation(
+        self,
+        user_id: str,
+        ttl_seconds: int,
+        *,
+        purpose: str = "legacy",
+    ) -> tuple[str, str, str]:
         self.get_user(user_id)
+        if purpose not in {"legacy", "access_package"}:
+            raise ValueError("invalid invitation purpose")
         invitation_id = str(uuid.uuid4())
-        expires = utc_now() + timedelta(seconds=max(60, min(ttl_seconds, 3600)))
+        maximum = 604800 if purpose == "access_package" else 3600
+        expires = utc_now() + timedelta(seconds=max(60, min(ttl_seconds, maximum)))
         for _ in range(5):
             code = self.credentials.generate_pairing_code()
             try:
@@ -272,13 +369,14 @@ class CoreRepository:
                     connection.execute(
                         """
                         INSERT INTO invitations(
-                            id, user_id, code_hash, expires_at, created_at
-                        ) VALUES(?, ?, ?, ?, ?)
+                            id, user_id, code_hash, purpose, expires_at, created_at
+                        ) VALUES(?, ?, ?, ?, ?, ?)
                         """,
                         (
                             invitation_id,
                             user_id,
                             self.credentials.pairing_code_hash(code),
+                            purpose,
                             utc_text(expires),
                             utc_text(),
                         ),
@@ -300,7 +398,7 @@ class CoreRepository:
     def redeem_invitation(
         self,
         code: str,
-        password: str,
+        password: str | None,
         device_name: str,
         platform: str,
         remote_address: str | None,
@@ -319,7 +417,7 @@ class CoreRepository:
         with self.database.transaction() as connection:
             invitation = connection.execute(
                 """
-                SELECT i.id, i.user_id, i.expires_at, i.consumed_at, i.cancelled_at,
+                SELECT i.id, i.user_id, i.purpose, i.expires_at, i.consumed_at, i.cancelled_at,
                        u.password_hash, u.enabled
                 FROM invitations i
                 JOIN users u ON u.id = i.user_id
@@ -338,10 +436,13 @@ class CoreRepository:
             ):
                 raise InvalidCredential("invitation is invalid or expired")
             password_hash = invitation["password_hash"]
-            if password_hash:
-                if not self.credentials.verify_password(password_hash, password):
+            password_required = invitation["purpose"] != "access_package"
+            if password_required and password_hash:
+                if not password or not self.credentials.verify_password(password_hash, password):
                     raise InvalidCredential("invalid account password")
-            else:
+            elif password_required and not password_hash:
+                if not password:
+                    raise InvalidCredential("account password is required")
                 password_hash = self.credentials.hash_password(password)
                 connection.execute(
                     """
@@ -386,6 +487,18 @@ class CoreRepository:
                 remote_address=remote_address,
             )
         return PairingResult(device=self.get_device(device_id), device_token=token)
+
+    def revoke_unused_access_invitations(self, user_id: str) -> int:
+        with self.database.transaction() as connection:
+            changed = connection.execute(
+                """
+                UPDATE invitations SET cancelled_at = ?
+                WHERE user_id = ? AND purpose = 'access_package'
+                  AND consumed_at IS NULL AND cancelled_at IS NULL
+                """,
+                (utc_text(), user_id),
+            )
+        return int(changed.rowcount)
 
     def request_device_login(
         self,
@@ -517,15 +630,236 @@ class CoreRepository:
             )
         return self.get_device(device_id)
 
+    @staticmethod
+    def _normalize_capabilities(value: dict[str, bool]) -> dict[str, bool]:
+        capabilities = {
+            name: bool(value.get(name, False))
+            for name in ("read", "upload", "modify", "delete", "share")
+        }
+        if any(capabilities.values()):
+            capabilities["read"] = True
+        return capabilities
+
+    def create_shared_space(
+        self,
+        *,
+        name: str,
+        quota_bytes: int,
+        primary_storage_root_id: str | None,
+        fallback_storage_root_id: str | None,
+    ) -> SpaceRecord:
+        name = name.strip()
+        if not name or len(name) > 80:
+            raise InvalidCredential("space name must contain 1-80 characters")
+        if quota_bytes < 1024**3:
+            raise InvalidCredential("quota must be at least 1 GiB")
+        if primary_storage_root_id and primary_storage_root_id == fallback_storage_root_id:
+            raise InvalidCredential("primary and fallback storage roots must differ")
+        space_id, created = str(uuid.uuid4()), utc_text()
+        with self.database.transaction() as connection:
+            for root_id in (primary_storage_root_id, fallback_storage_root_id):
+                if root_id and connection.execute(
+                    "SELECT 1 FROM storage_roots WHERE id = ?", (root_id,)
+                ).fetchone() is None:
+                    raise NotFoundError("storage root not found")
+            connection.execute(
+                """
+                INSERT INTO spaces(
+                    id, owner_user_id, name, kind, quota_bytes,
+                    primary_storage_root_id, fallback_storage_root_id, enabled, created_at
+                ) VALUES(?, NULL, ?, 'shared', ?, ?, ?, 1, ?)
+                """,
+                (
+                    space_id,
+                    name,
+                    quota_bytes,
+                    primary_storage_root_id,
+                    fallback_storage_root_id,
+                    created,
+                ),
+            )
+            self._audit_tx(
+                connection,
+                actor_type="manager",
+                actor_id=None,
+                action="space.created",
+                target_type="space",
+                target_id=space_id,
+                detail=f"Создано общее пространство {name}",
+            )
+        return self.get_space(space_id)
+
+    def update_space(
+        self,
+        space_id: str,
+        *,
+        name: str,
+        quota_bytes: int,
+        primary_storage_root_id: str | None,
+        fallback_storage_root_id: str | None,
+        enabled: bool,
+    ) -> SpaceRecord:
+        current = self.get_space(space_id)
+        if current.kind != "shared":
+            raise ConflictError("personal spaces are managed through their owner")
+        name = name.strip()
+        if not name or len(name) > 80 or quota_bytes < 1024**3:
+            raise InvalidCredential("invalid space settings")
+        if primary_storage_root_id and primary_storage_root_id == fallback_storage_root_id:
+            raise InvalidCredential("primary and fallback storage roots must differ")
+        with self.database.transaction() as connection:
+            for root_id in (primary_storage_root_id, fallback_storage_root_id):
+                if root_id and connection.execute(
+                    "SELECT 1 FROM storage_roots WHERE id = ?", (root_id,)
+                ).fetchone() is None:
+                    raise NotFoundError("storage root not found")
+            connection.execute(
+                """
+                UPDATE spaces
+                SET name = ?, quota_bytes = ?, primary_storage_root_id = ?,
+                    fallback_storage_root_id = ?, enabled = ?
+                WHERE id = ?
+                """,
+                (
+                    name,
+                    quota_bytes,
+                    primary_storage_root_id,
+                    fallback_storage_root_id,
+                    int(enabled),
+                    space_id,
+                ),
+            )
+            self._audit_tx(
+                connection,
+                actor_type="manager",
+                actor_id=None,
+                action="space.updated",
+                target_type="space",
+                target_id=space_id,
+                detail=f"Обновлено пространство {name}",
+            )
+        return self.get_space(space_id)
+
+    def set_space_member(
+        self,
+        space_id: str,
+        user_id: str,
+        capabilities: dict[str, bool],
+    ) -> None:
+        space = self.get_space(space_id)
+        self.get_user(user_id)
+        if space.owner_user_id == user_id:
+            raise ConflictError("owner permissions cannot be changed")
+        values = self._normalize_capabilities(capabilities)
+        with self.database.transaction() as connection:
+            if not values["read"]:
+                connection.execute(
+                    "DELETE FROM space_members WHERE space_id = ? AND user_id = ?",
+                    (space_id, user_id),
+                )
+                action = "space.member.removed"
+            else:
+                permission = (
+                    "write"
+                    if any(values[name] for name in ("upload", "modify", "delete", "share"))
+                    else "read"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO space_members(
+                        space_id, user_id, permission, can_read, can_upload,
+                        can_modify, can_delete, can_share
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(space_id, user_id) DO UPDATE SET
+                        permission = excluded.permission,
+                        can_read = excluded.can_read,
+                        can_upload = excluded.can_upload,
+                        can_modify = excluded.can_modify,
+                        can_delete = excluded.can_delete,
+                        can_share = excluded.can_share
+                    """,
+                    (
+                        space_id,
+                        user_id,
+                        permission,
+                        int(values["read"]),
+                        int(values["upload"]),
+                        int(values["modify"]),
+                        int(values["delete"]),
+                        int(values["share"]),
+                    ),
+                )
+                action = "space.member.updated"
+            self._audit_tx(
+                connection,
+                actor_type="manager",
+                actor_id=None,
+                action=action,
+                target_type="space",
+                target_id=space_id,
+                detail=f"Обновлены права пользователя {user_id}",
+            )
+
+    def list_spaces_admin(self) -> list[dict[str, Any]]:
+        with self.database.connection() as connection:
+            spaces = connection.execute(
+                """
+                SELECT id, owner_user_id, name, kind, quota_bytes,
+                       primary_storage_root_id, fallback_storage_root_id,
+                       enabled, created_at
+                FROM spaces ORDER BY CASE kind WHEN 'personal' THEN 0 ELSE 1 END, name
+                """
+            ).fetchall()
+            members = connection.execute(
+                """
+                SELECT sm.space_id, sm.user_id, u.username, u.display_name,
+                       sm.permission, sm.can_read, sm.can_upload, sm.can_modify,
+                       sm.can_delete, sm.can_share
+                FROM space_members sm JOIN users u ON u.id = sm.user_id
+                ORDER BY u.display_name COLLATE NOCASE
+                """
+            ).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in members:
+            grouped.setdefault(str(row["space_id"]), []).append(
+                {
+                    "user_id": row["user_id"],
+                    "username": row["username"],
+                    "display_name": row["display_name"],
+                    "permission": row["permission"],
+                    "capabilities": {
+                        name: bool(row[f"can_{name}"])
+                        for name in ("read", "upload", "modify", "delete", "share")
+                    },
+                }
+            )
+        return [
+            {
+                "id": row["id"],
+                "owner_user_id": row["owner_user_id"],
+                "name": row["name"],
+                "kind": row["kind"],
+                "quota_bytes": row["quota_bytes"],
+                "primary_storage_root_id": row["primary_storage_root_id"],
+                "fallback_storage_root_id": row["fallback_storage_root_id"],
+                "enabled": bool(row["enabled"]),
+                "created_at": row["created_at"],
+                "members": grouped.get(str(row["id"]), []),
+            }
+            for row in spaces
+        ]
+
     def list_spaces_for_user(self, user_id: str) -> list[SpaceRecord]:
         with self.database.connection() as connection:
             rows = connection.execute(
                 """
                 SELECT s.id, s.owner_user_id, s.name, s.kind, s.quota_bytes,
-                       sm.permission, s.created_at
+                       sm.permission, sm.can_read, sm.can_upload, sm.can_modify,
+                       sm.can_delete, sm.can_share, s.primary_storage_root_id,
+                       s.fallback_storage_root_id, s.enabled, s.created_at
                 FROM spaces s
                 JOIN space_members sm ON sm.space_id = s.id
-                WHERE sm.user_id = ?
+                WHERE sm.user_id = ? AND s.enabled = 1 AND sm.can_read = 1
                 ORDER BY CASE s.kind WHEN 'personal' THEN 0 ELSE 1 END, s.name
                 """,
                 (user_id,),
@@ -538,7 +872,9 @@ class CoreRepository:
                 row = connection.execute(
                     """
                     SELECT s.id, s.owner_user_id, s.name, s.kind, s.quota_bytes,
-                           sm.permission, s.created_at
+                           sm.permission, sm.can_read, sm.can_upload, sm.can_modify,
+                           sm.can_delete, sm.can_share, s.primary_storage_root_id,
+                           s.fallback_storage_root_id, s.enabled, s.created_at
                     FROM spaces s
                     JOIN space_members sm ON sm.space_id = s.id
                     WHERE s.id = ? AND sm.user_id = ?
@@ -549,7 +885,10 @@ class CoreRepository:
                 row = connection.execute(
                     """
                     SELECT id, owner_user_id, name, kind, quota_bytes,
-                           NULL AS permission, created_at
+                           NULL AS permission, 0 AS can_read, 0 AS can_upload,
+                           0 AS can_modify, 0 AS can_delete, 0 AS can_share,
+                           primary_storage_root_id, fallback_storage_root_id,
+                           enabled, created_at
                     FROM spaces WHERE id = ?
                     """,
                     (space_id,),
@@ -558,10 +897,20 @@ class CoreRepository:
             raise NotFoundError("space not found")
         return self._space(row)
 
-    def require_space_permission(self, space_id: str, user_id: str, write: bool) -> SpaceRecord:
+    def require_space_permission(
+        self,
+        space_id: str,
+        user_id: str,
+        write: bool = False,
+        *,
+        capability: str | None = None,
+    ) -> SpaceRecord:
         space = self.get_space(space_id, user_id)
-        if write and space.permission not in {"write", "owner"}:
-            raise PermissionDeniedError("space is read-only for this user")
+        required = capability or ("upload" if write else "read")
+        if required not in {"read", "upload", "modify", "delete", "share"}:
+            raise ValueError("invalid space capability")
+        if not space.enabled or not space.allows(required):
+            raise PermissionDeniedError(f"space does not allow {required} for this user")
         return space
 
     def summary(self) -> dict[str, Any]:
@@ -639,6 +988,7 @@ class CoreRepository:
             id=row["id"],
             username=row["username"],
             display_name=row["display_name"],
+            email=row["email"],
             role=row["role"],
             quota_bytes=row["quota_bytes"],
             enabled=bool(row["enabled"]),
@@ -655,6 +1005,14 @@ class CoreRepository:
             kind=row["kind"],
             quota_bytes=row["quota_bytes"],
             permission=row["permission"],
+            can_read=bool(row["can_read"]),
+            can_upload=bool(row["can_upload"]),
+            can_modify=bool(row["can_modify"]),
+            can_delete=bool(row["can_delete"]),
+            can_share=bool(row["can_share"]),
+            primary_storage_root_id=row["primary_storage_root_id"],
+            fallback_storage_root_id=row["fallback_storage_root_id"],
+            enabled=bool(row["enabled"]),
             created_at=row["created_at"],
         )
 

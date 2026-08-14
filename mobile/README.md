@@ -1,4 +1,4 @@
-# Cloud Storage Mobile 0.9.12 · Connection, disks and security
+# Cloud Storage Mobile 0.9.13 · Users, connections and logical spaces
 
 Один React Native/Expo-клиент для Android и iPhone. Обычный пользователь видит файлы, передачи и настройки. У подтверждённого пользователя с ролью `admin` дополнительно появляется вкладка «Сервер» с безопасным мониторингом, подтверждением/отзывом устройств и включением режима только чтения.
 

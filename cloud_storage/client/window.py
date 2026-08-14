@@ -62,7 +62,7 @@ from cloud_storage.client.settings import (
 from cloud_storage.client.transfers import TransferRecord, TransferStore
 from cloud_storage.help.knowledge import KnowledgeBase
 from cloud_storage.help.page import HelpPage
-from cloud_storage.pairing import parse_pairing_uri
+from cloud_storage.pairing import parse_pairing_uri, parse_server_code
 from cloud_storage.ui.theme import create_app_icon
 from cloud_storage.ui.update_page import UpdatePage
 from cloud_storage.ui.widgets import clear_layout, format_bytes, make_header
@@ -294,6 +294,7 @@ class ClientWindow(QMainWindow):
         profile_row.addWidget(self.remove_server_button)
         self.server_url = QLineEdit()
         self.server_url.setPlaceholderText("http://127.0.0.1:8765")
+        self.server_url.setVisible(False)
         address_row = QHBoxLayout()
         address_row.addWidget(self.server_url, 1)
         self.discover_button = QPushButton("Найти в сети")
@@ -301,12 +302,15 @@ class ClientWindow(QMainWindow):
         address_row.addWidget(self.discover_button)
         self.fingerprint = QLineEdit()
         self.fingerprint.setPlaceholderText("SHA-256 сертификата — для HTTPS")
+        self.fingerprint.setVisible(False)
+        self.server_code = QLineEdit()
+        self.server_code.setPlaceholderText("Код CS2… из Server Manager")
+        self.server_code.setMaxLength(4096)
         self.username = QLineEdit()
         self.username.setPlaceholderText("Логин, созданный администратором")
         login_form.addRow("Логин", self.username)
         login_form.addRow("Сохранённый сервер", profile_row)
-        login_form.addRow("Адрес сервера", address_row)
-        login_form.addRow("Отпечаток TLS", self.fingerprint)
+        login_form.addRow("Код сервера", self.server_code)
         self.connection_modes.addWidget(login_page)
 
         link_page = QWidget()
@@ -419,14 +423,14 @@ class ClientWindow(QMainWindow):
         self.path_label.setProperty("muted", True)
         refresh = QPushButton("Обновить")
         refresh.clicked.connect(self.refresh_entries)
-        upload = QPushButton("Загрузить файл")
-        upload.setProperty("primary", True)
-        upload.clicked.connect(self.choose_upload)
+        self.upload_button = QPushButton("Загрузить файл")
+        self.upload_button.setProperty("primary", True)
+        self.upload_button.clicked.connect(self.choose_upload)
         toolbar.addWidget(self.space_selector)
         toolbar.addWidget(self.up_button)
         toolbar.addWidget(self.path_label, 1)
         toolbar.addWidget(refresh)
-        toolbar.addWidget(upload)
+        toolbar.addWidget(self.upload_button)
         layout.addLayout(toolbar)
 
         self.files_table = QTableWidget(0, 4)
@@ -459,11 +463,11 @@ class ClientWindow(QMainWindow):
         open_button.clicked.connect(self.open_selected)
         cache_button = QPushButton("Скачать для офлайн-доступа")
         cache_button.clicked.connect(self.download_selected)
-        delete_button = QPushButton("Удалить")
-        delete_button.clicked.connect(self.delete_selected)
+        self.delete_file_button = QPushButton("Удалить")
+        self.delete_file_button.clicked.connect(self.delete_selected)
         actions.addWidget(open_button)
         actions.addWidget(cache_button)
-        actions.addWidget(delete_button)
+        actions.addWidget(self.delete_file_button)
         actions.addStretch()
         layout.addLayout(actions)
         return page
@@ -639,7 +643,8 @@ class ClientWindow(QMainWindow):
             if path.stat().st_size > 64 * 1024:
                 raise ValueError("файл доступа слишком большой")
             value = json.loads(path.read_text(encoding="utf-8"))
-            if value.get("format") != "cloud-storage-access-v1":
+            access_format = str(value.get("format", ""))
+            if access_format not in {"cloud-storage-access-v1", "cloud-storage-access-v2"}:
                 raise ValueError("неподдерживаемый формат файла доступа")
             addresses = value.get("addresses")
             if not isinstance(addresses, list) or not addresses:
@@ -647,7 +652,10 @@ class ClientWindow(QMainWindow):
             address = str(addresses[0]).strip()
             code = str(value.get("one_time_code", "")).strip()
             username = str(value.get("username", "")).strip()
-            fingerprint = str(value.get("certificate_fingerprint", "")).strip()
+            fingerprints = value.get("certificate_fingerprints") or {}
+            fingerprint = str(
+                fingerprints.get(address) if isinstance(fingerprints, dict) else ""
+            ).strip() or str(value.get("certificate_fingerprint", "")).strip()
             if not address or not code or not username:
                 raise ValueError("в файле не хватает данных входа")
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -657,12 +665,18 @@ class ClientWindow(QMainWindow):
         self.pairing_code.setText(code)
         self.username.setText(username)
         self.fingerprint.setText(fingerprint)
-        QMessageBox.information(
-            self,
-            "Данные входа загружены",
-            "Адрес, логин и одноразовый код заполнены. Введите новый пароль для "
-            "этого устройства и нажмите «Подключиться по коду».",
-        )
+        self._set_connection_mode(1)
+        if access_format == "cloud-storage-access-v2":
+            self.connection_detail.setText(
+                "Файл проверен. Отправляем устройство администратору на подтверждение…"
+            )
+            QTimer.singleShot(0, self.connect_device)
+        else:
+            QMessageBox.information(
+                self,
+                "Данные входа загружены",
+                "Это старый файл доступа. Введите пароль и нажмите «Подключиться по ссылке».",
+            )
 
     def _load_profile(self) -> None:
         self._refresh_server_selector()
@@ -675,7 +689,10 @@ class ClientWindow(QMainWindow):
         self.drive_enabled_checkbox.setChecked(self.profile.drive_enabled)
         self.drive_enabled_checkbox.blockSignals(False)
         self.drive_letter_selector.blockSignals(True)
-        index = self.drive_letter_selector.findData(self.profile.drive_letter)
+        active_letter = self.profile.drive_letters.get(
+            self.profile.last_space_id, self.profile.drive_letter
+        )
+        index = self.drive_letter_selector.findData(active_letter)
         self.drive_letter_selector.setCurrentIndex(max(0, index))
         self.drive_letter_selector.blockSignals(False)
         supported = platform.system() == "Windows"
@@ -703,11 +720,18 @@ class ClientWindow(QMainWindow):
         selected = 0
         for index, profile in enumerate(profiles):
             name = profile.server_name.strip() or "Сервер"
-            self.server_selector.addItem(f"{name} — {profile.server_url}", profile.profile_id)
+            self.server_selector.addItem(name, profile.profile_id)
             if profile.profile_id == self.profile.profile_id:
                 selected = index
         self.server_selector.setCurrentIndex(selected)
         self.server_selector.blockSignals(False)
+
+    def _server_name(self, server_url: str) -> str:
+        normalized = server_url.rstrip("/")
+        for profile in self.store.list_profiles():
+            if profile.server_url.rstrip("/") == normalized:
+                return profile.server_name.strip() or "Сохранённый сервер"
+        return "Сохранённый сервер"
 
     def _activate_profile(self, profile: ClientProfile) -> None:
         self._profile_generation += 1
@@ -721,6 +745,7 @@ class ClientWindow(QMainWindow):
         self.current_directory = ""
         self.password.clear()
         self.pairing_code.clear()
+        self.server_code.clear()
         self.connect_button.setEnabled(True)
         self.account_login_button.setEnabled(True)
         self._set_spaces([])
@@ -744,7 +769,7 @@ class ClientWindow(QMainWindow):
     def add_server(self) -> None:
         profile = self.store.add_profile()
         self._activate_profile(profile)
-        self.server_url.setFocus()
+        self.server_code.setFocus()
 
     def remove_server(self) -> None:
         response = QMessageBox.question(
@@ -798,11 +823,16 @@ class ClientWindow(QMainWindow):
         code = raw_code
         password = self.password.text()
         device_name = self.device_name.text().strip()
-        if len(code.replace("-", "")) != 8 or len(password) < 10 or not device_name:
+        if (
+            len(code.replace("-", "")) != 8
+            or (password and len(password) < 10)
+            or not device_name
+        ):
             QMessageBox.warning(
                 self,
                 "Проверьте данные",
-                "Нужны восьмизначный код, пароль минимум из 10 символов и название устройства.",
+                "Нужны восьмизначный код и название устройства. Для старого приглашения "
+                "также нужен пароль минимум из 10 символов.",
             )
             return
         self.connect_button.setEnabled(False)
@@ -821,6 +851,31 @@ class ClientWindow(QMainWindow):
         )
 
     def login_new_device(self) -> None:
+        raw_server_code = self.server_code.text().strip()
+        if raw_server_code:
+            try:
+                locator = parse_server_code(raw_server_code)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Неверный код сервера", str(exc))
+                return
+            if locator is None:
+                QMessageBox.warning(
+                    self,
+                    "Неверный код сервера",
+                    "Вставьте код вида CS2… из Server Manager.",
+                )
+                return
+            self.server_url.setText(locator.server_url)
+            self.fingerprint.setText(locator.certificate_fingerprint)
+            if locator.username and not self.username.text().strip():
+                self.username.setText(locator.username)
+        elif not self.profile.server_url:
+            QMessageBox.warning(
+                self,
+                "Нужен код сервера",
+                "Для первого входа вставьте код CS2… из Server Manager.",
+            )
+            return
         username = self.username.text().strip().casefold()
         password = self.password.text()
         device_name = self.device_name.text().strip()
@@ -1083,14 +1138,14 @@ class ClientWindow(QMainWindow):
             )
             self.sidebar_state.setText("ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ")
             self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #f5bd4f;")
-            self.sidebar_server.setText(self.profile.server_url)
+            self.sidebar_server.setText(self.profile.server_name or "Сохранённый сервер")
             self.nav_buttons[1].setEnabled(False)
         elif state == "offline":
             self.connection_title.setText("Сервер временно недоступен")
             self.connection_detail.setText(detail or "Клиент повторит подключение автоматически.")
             self.sidebar_state.setText("ОФЛАЙН")
             self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #f5bd4f;")
-            self.sidebar_server.setText(self.profile.server_url)
+            self.sidebar_server.setText(self.profile.server_name or "Сохранённый сервер")
             self.nav_buttons[1].setEnabled(False)
         else:
             self.connection_title.setText("Клиент не подключён")
@@ -1137,6 +1192,11 @@ class ClientWindow(QMainWindow):
 
     def _set_spaces(self, spaces: list[dict[str, Any]]) -> None:
         self.spaces = spaces
+        if spaces:
+            self.profile = self.store.ensure_space_drive_letters(
+                self.profile,
+                [str(item.get("id")) for item in spaces if item.get("id")],
+            )
         previous = self.profile.last_space_id
         self.space_selector.blockSignals(True)
         self.space_selector.clear()
@@ -1153,8 +1213,10 @@ class ClientWindow(QMainWindow):
                 self.profile.last_space_id = selected_space
                 self.store.save(self.profile)
             self.current_directory = ""
+            self._update_space_actions()
             self.refresh_entries()
         else:
+            self._update_space_actions()
             self._render_entries([])
 
     def _space_changed(self) -> None:
@@ -1163,9 +1225,22 @@ class ClientWindow(QMainWindow):
             return
         self.profile.last_space_id = str(space_id)
         self.store.save(self.profile)
+        self.drive_letter_selector.blockSignals(True)
+        letter = self.profile.drive_letters.get(str(space_id), self.profile.drive_letter)
+        self.drive_letter_selector.setCurrentIndex(
+            max(0, self.drive_letter_selector.findData(letter))
+        )
+        self.drive_letter_selector.blockSignals(False)
         self.current_directory = ""
+        self._update_space_actions()
         self.refresh_entries()
         self._reconcile_drives()
+
+    def _update_space_actions(self) -> None:
+        space_id = str(self.space_selector.currentData() or "")
+        space = next((item for item in self.spaces if str(item.get("id")) == space_id), {})
+        self.upload_button.setEnabled(bool(space.get("can_upload", False)))
+        self.delete_file_button.setEnabled(bool(space.get("can_delete", False)))
 
     def refresh_entries(self) -> None:
         if not self.api or not self.space_selector.currentData():
@@ -1729,6 +1804,29 @@ class ClientWindow(QMainWindow):
     def _drive_settings_changed(self) -> None:
         self.profile.drive_enabled = self.drive_enabled_checkbox.isChecked()
         selected = str(self.drive_letter_selector.currentData() or "S")
+        space_id = str(self.space_selector.currentData() or self.profile.last_space_id)
+        if space_id:
+            for profile in self.store.list_profiles():
+                if profile.profile_id == self.profile.profile_id:
+                    continue
+                if selected in profile.drive_letters.values():
+                    QMessageBox.warning(
+                        self,
+                        "Буква уже занята",
+                        "Эта буква назначена другому пространству Cloud Storage.",
+                    )
+                    return
+            if any(
+                letter == selected and existing_space != space_id
+                for existing_space, letter in self.profile.drive_letters.items()
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Буква уже занята",
+                    "Эта буква назначена другому пространству этого сервера.",
+                )
+                return
+            self.profile.drive_letters[space_id] = selected
         self.profile.drive_letter = selected
         self.drive_letter_selector.setEnabled(
             platform.system() == "Windows" and self.profile.drive_enabled
@@ -1745,8 +1843,7 @@ class ClientWindow(QMainWindow):
             self.drive_status.setText("Диски с буквами поддерживаются только в Windows.")
             self.drive_open_button.setEnabled(False)
             return
-        # One active Client and one active virtual-drive helper are enough. Other
-        # profiles stay configured and are mounted when the user switches to them.
+        # Each allowed logical space receives its own helper and drive letter.
         statuses = self.drive_manager.reconcile([self.profile])
         status = statuses.get(self.profile.profile_id)
         if status is None:
@@ -1766,7 +1863,8 @@ class ClientWindow(QMainWindow):
         self.drive_open_button.setEnabled(status.state == "ready")
 
     def open_windows_drive(self) -> None:
-        letter = self.profile.drive_letter.upper().rstrip(":")
+        space_id = str(self.space_selector.currentData() or self.profile.last_space_id)
+        letter = self.profile.drive_letters.get(space_id, self.profile.drive_letter).upper().rstrip(":")
         if not wait_for_drive(letter, timeout_seconds=1):
             QMessageBox.information(
                 self,
@@ -1929,7 +2027,7 @@ class ClientWindow(QMainWindow):
                 row, 1, QTableWidgetItem(labels.get(record.status, record.status))
             )
             self.offline_table.setItem(row, 2, QTableWidgetItem(format_bytes(record.size_bytes)))
-            self.offline_table.setItem(row, 3, QTableWidgetItem(record.server_url))
+            self.offline_table.setItem(row, 3, QTableWidgetItem(self._server_name(record.server_url)))
             if record.id == selected_id:
                 selected_row = row
         if selected_row >= 0:

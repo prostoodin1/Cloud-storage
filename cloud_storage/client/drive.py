@@ -14,6 +14,7 @@ from cloud_storage.client.settings import ClientProfile, DeviceTokenVault
 @dataclass(frozen=True, slots=True)
 class DriveStatus:
     profile_id: str
+    space_id: str
     drive_letter: str
     state: str
     detail: str
@@ -24,53 +25,59 @@ class DriveManager:
     def __init__(self, data_directory: Path) -> None:
         self.data_directory = data_directory
         self._processes: dict[
-            str, tuple[tuple[str, str, str, str], subprocess.Popen[bytes]]
+            tuple[str, str], tuple[tuple[str, str, str, str], subprocess.Popen[bytes]]
         ] = {}
 
     def reconcile(self, profiles: list[ClientProfile]) -> dict[str, DriveStatus]:
-        wanted: dict[str, ClientProfile] = {}
+        wanted: dict[tuple[str, str], tuple[ClientProfile, str]] = {}
         for profile in profiles:
             token = DeviceTokenVault(self.data_directory, profile.profile_id).load()
             if profile.drive_enabled and token and profile.device_status in {"trusted", "offline"}:
-                wanted[profile.profile_id] = profile
+                for space_id, letter in profile.drive_letters.items():
+                    wanted[(profile.profile_id, space_id)] = (profile, letter)
 
-        for profile_id in set(self._processes) - set(wanted):
-            self.stop(profile_id)
-        for profile_id, profile in wanted.items():
-            running = self._processes.get(profile_id)
-            desired_letter = profile.drive_letter.upper().rstrip(":")
+        for key in set(self._processes) - set(wanted):
+            self._stop_key(key)
+        for key, (profile, configured_letter) in wanted.items():
+            profile_id, space_id = key
+            running = self._processes.get(key)
+            desired_letter = configured_letter.upper().rstrip(":")
             signature = (
                 desired_letter,
                 profile.server_url.rstrip("/"),
                 profile.certificate_fingerprint.casefold(),
-                profile.last_space_id,
+                space_id,
             )
             if running and running[0] == signature and running[1].poll() is None:
                 continue
             if running:
-                self.stop(profile_id)
-            self._start(profile, desired_letter, signature)
+                self._stop_key(key)
+            self._start(profile, space_id, desired_letter, signature)
         return {profile.profile_id: self.status(profile) for profile in profiles}
 
     def status(self, profile: ClientProfile) -> DriveStatus:
-        path = self._status_path(profile.profile_id)
+        space_id = profile.last_space_id or next(iter(profile.drive_letters), "")
+        letter = profile.drive_letters.get(space_id, profile.drive_letter)
+        path = self._status_path(profile.profile_id, space_id)
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(value, dict):
                 raise ValueError
             return DriveStatus(
                 profile_id=profile.profile_id,
-                drive_letter=str(value.get("drive_letter", profile.drive_letter)),
+                space_id=space_id,
+                drive_letter=str(value.get("drive_letter", letter)),
                 state=str(value.get("state", "unknown")),
                 detail=str(value.get("detail", ""))[:500],
                 pid=int(value.get("pid", 0)),
             )
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            process = self._processes.get(profile.profile_id)
+            process = self._processes.get((profile.profile_id, space_id))
             if process and process[1].poll() is None:
                 return DriveStatus(
                     profile.profile_id,
-                    profile.drive_letter,
+                    space_id,
+                    letter,
                     "starting",
                     "Диск запускается…",
                     process[1].pid,
@@ -80,10 +87,14 @@ class DriveManager:
                 if self._helper_path() is None
                 else "Диск отключён"
             )
-            return DriveStatus(profile.profile_id, profile.drive_letter, "stopped", detail)
+            return DriveStatus(profile.profile_id, space_id, letter, "stopped", detail)
 
     def stop(self, profile_id: str) -> None:
-        running = self._processes.pop(profile_id, None)
+        for key in [item for item in self._processes if item[0] == profile_id]:
+            self._stop_key(key)
+
+    def _stop_key(self, key: tuple[str, str]) -> None:
+        running = self._processes.pop(key, None)
         if running is not None:
             process = running[1]
             if process.poll() is None:
@@ -92,15 +103,16 @@ class DriveManager:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
-        self._status_path(profile_id).unlink(missing_ok=True)
+        self._status_path(*key).unlink(missing_ok=True)
 
     def stop_all(self) -> None:
-        for profile_id in list(self._processes):
-            self.stop(profile_id)
+        for key in list(self._processes):
+            self._stop_key(key)
 
     def _start(
         self,
         profile: ClientProfile,
+        space_id: str,
         letter: str,
         signature: tuple[str, str, str, str],
     ) -> None:
@@ -114,6 +126,8 @@ class DriveManager:
             profile.profile_id,
             "--mount",
             f"{letter}:",
+            "--space-id",
+            space_id,
             "--data-dir",
             str(self.data_directory),
             "--parent-pid",
@@ -128,10 +142,11 @@ class DriveManager:
         if os.name == "nt":
             arguments["creationflags"] = subprocess.CREATE_NO_WINDOW
         process = subprocess.Popen(command, **arguments)  # type: ignore[arg-type]
-        self._processes[profile.profile_id] = (signature, process)
+        self._processes[(profile.profile_id, space_id)] = (signature, process)
 
-    def _status_path(self, profile_id: str) -> Path:
-        return self.data_directory / "drives" / f"{profile_id}.json"
+    def _status_path(self, profile_id: str, space_id: str = "") -> Path:
+        suffix = f"-{space_id}" if space_id else ""
+        return self.data_directory / "drives" / f"{profile_id}{suffix}.json"
 
     @staticmethod
     def _helper_path() -> Path | None:

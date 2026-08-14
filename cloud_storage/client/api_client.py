@@ -75,7 +75,7 @@ class ClientApi:
     def redeem_invitation(
         self,
         code: str,
-        password: str,
+        password: str | None,
         device_name: str,
         platform: str,
     ) -> dict[str, Any]:
@@ -84,7 +84,7 @@ class ClientApi:
             method="POST",
             payload={
                 "code": code,
-                "password": password,
+                "password": password or None,
                 "device_name": device_name,
                 "platform": platform,
             },

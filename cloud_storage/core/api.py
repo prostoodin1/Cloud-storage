@@ -60,6 +60,19 @@ from cloud_storage.core.tls import TlsIdentity, lan_endpoints, load_or_create_tl
 from cloud_storage.core.tunnels import TunnelProviderRegistry
 
 
+class SpaceCapabilitiesRequest(BaseModel):
+    read: bool = True
+    upload: bool = True
+    modify: bool = False
+    delete: bool = False
+    share: bool = False
+
+
+class SpaceGrantRequest(BaseModel):
+    space_id: str = Field(min_length=1, max_length=100)
+    capabilities: SpaceCapabilitiesRequest = Field(default_factory=SpaceCapabilitiesRequest)
+
+
 class CreateUserRequest(BaseModel):
     username: str = Field(min_length=3, max_length=32)
     display_name: str = Field(min_length=1, max_length=80)
@@ -67,7 +80,30 @@ class CreateUserRequest(BaseModel):
     role: str = Field(default="member", pattern="^(admin|member)$")
     password: SecretStr | None = None
     email: str = Field(default="", max_length=254)
+    create_personal_space: bool = True
+    primary_storage_root_id: str | None = Field(default=None, max_length=100)
+    fallback_storage_root_id: str | None = Field(default=None, max_length=100)
+    space_grants: list[SpaceGrantRequest] = Field(default_factory=list, max_length=128)
     prepare_access: bool = True
+
+
+class UpdateUserRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+    email: str = Field(default="", max_length=254)
+    quota_gib: int = Field(default=100, ge=1, le=1_000_000)
+    role: str = Field(default="member", pattern="^(admin|member)$")
+    enabled: bool = True
+
+
+class CreateSpaceRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    quota_gib: int = Field(default=100, ge=1, le=1_000_000)
+    primary_storage_root_id: str | None = Field(default=None, max_length=100)
+    fallback_storage_root_id: str | None = Field(default=None, max_length=100)
+
+
+class UpdateSpaceRequest(CreateSpaceRequest):
+    enabled: bool = True
 
 
 class SetUserPasswordRequest(BaseModel):
@@ -81,7 +117,7 @@ class CreateInvitationRequest(BaseModel):
 
 class RedeemInvitationRequest(BaseModel):
     code: str = Field(min_length=8, max_length=16)
-    password: SecretStr
+    password: SecretStr | None = None
     device_name: str = Field(min_length=1, max_length=100)
     platform: str = Field(min_length=1, max_length=50)
 
@@ -111,6 +147,7 @@ class StorageRootRequest(BaseModel):
 class CreateMigrationRequest(BaseModel):
     source_root_id: str = Field(min_length=1, max_length=100)
     target_root_id: str = Field(min_length=1, max_length=100)
+    space_id: str | None = Field(default=None, max_length=100)
 
 
 class CreateBackupRequest(BaseModel):
@@ -273,7 +310,8 @@ class StorageCleanupRequest(BaseModel):
 
 class PrepareAccessRequest(BaseModel):
     email: str = Field(default="", max_length=254)
-    ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+    ttl_seconds: int = Field(default=604800, ge=60, le=604800)
+    send_email: bool = False
 
 
 @dataclass(slots=True)
@@ -718,7 +756,12 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
 
     @app.exception_handler(ConflictError)
     async def conflict_handler(request: Request, exc: ConflictError) -> JSONResponse:
-        return JSONResponse(status_code=409, content={"detail": str(exc)})
+        if str(exc) == "username already exists":
+            return JSONResponse(
+                status_code=409,
+                content={"code": "username_exists", "detail": "Этот логин уже используется"},
+            )
+        return JSONResponse(status_code=409, content={"code": "conflict", "detail": str(exc)})
 
     @app.get("/", tags=["system"])
     def root_status() -> dict[str, str]:
@@ -1419,6 +1462,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         job = runtime.storage.create_migration_job(
             body.source_root_id,
             body.target_root_id,
+            body.space_id,
         )
         background_tasks.add_task(runtime.storage.run_migration_job, job.id)
         return runtime.storage.migration_to_dict(job)
@@ -1703,7 +1747,22 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
 
     @app.get("/v1/admin/users", tags=["manager"], dependencies=[Depends(require_manager)])
     def list_users() -> list[dict[str, Any]]:
-        return [asdict(item) for item in runtime.repository.list_users()]
+        spaces = runtime.repository.list_spaces_admin()
+        grants: dict[str, list[dict[str, Any]]] = {}
+        for space in spaces:
+            for member in space["members"]:
+                grants.setdefault(str(member["user_id"]), []).append(
+                    {
+                        "space_id": space["id"],
+                        "space_name": space["name"],
+                        "kind": space["kind"],
+                        "capabilities": member["capabilities"],
+                    }
+                )
+        return [
+            {**asdict(item), "space_grants": grants.get(item.id, [])}
+            for item in runtime.repository.list_users()
+        ]
 
     @app.post(
         "/v1/admin/users",
@@ -1718,16 +1777,97 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             quota_bytes=body.quota_gib * 1024**3,
             role=body.role,
             password=(body.password.get_secret_value() if body.password is not None else None),
+            email=body.email,
+            create_personal_space=body.create_personal_space,
+            primary_storage_root_id=body.primary_storage_root_id,
+            fallback_storage_root_id=body.fallback_storage_root_id,
         )
+        for grant in body.space_grants:
+            runtime.repository.set_space_member(
+                grant.space_id,
+                user.id,
+                grant.capabilities.model_dump(),
+            )
         result: dict[str, Any] = {
             "user": asdict(user),
-            "personal_space": asdict(space),
+            "personal_space": asdict(space) if space is not None else None,
         }
         if body.prepare_access:
             access = runtime.control.prepare_user_access(user.id, email=body.email)
             access["download_url"] = f"/v1/admin/access-packages/{access['invitation_id']}"
             result["access_package"] = access
         return result
+
+    @app.patch(
+        "/v1/admin/users/{user_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def update_user(user_id: str, body: UpdateUserRequest) -> dict[str, Any]:
+        return asdict(
+            runtime.repository.update_user(
+                user_id,
+                display_name=body.display_name,
+                email=body.email,
+                role=body.role,
+                quota_bytes=body.quota_gib * 1024**3,
+                enabled=body.enabled,
+            )
+        )
+
+    @app.get(
+        "/v1/admin/spaces",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def list_admin_spaces() -> list[dict[str, Any]]:
+        return runtime.repository.list_spaces_admin()
+
+    @app.post(
+        "/v1/admin/spaces",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_admin_space(body: CreateSpaceRequest) -> dict[str, Any]:
+        return asdict(
+            runtime.repository.create_shared_space(
+                name=body.name,
+                quota_bytes=body.quota_gib * 1024**3,
+                primary_storage_root_id=body.primary_storage_root_id,
+                fallback_storage_root_id=body.fallback_storage_root_id,
+            )
+        )
+
+    @app.patch(
+        "/v1/admin/spaces/{space_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def update_admin_space(space_id: str, body: UpdateSpaceRequest) -> dict[str, Any]:
+        return asdict(
+            runtime.repository.update_space(
+                space_id,
+                name=body.name,
+                quota_bytes=body.quota_gib * 1024**3,
+                primary_storage_root_id=body.primary_storage_root_id,
+                fallback_storage_root_id=body.fallback_storage_root_id,
+                enabled=body.enabled,
+            )
+        )
+
+    @app.put(
+        "/v1/admin/spaces/{space_id}/members/{user_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def set_admin_space_member(
+        space_id: str,
+        user_id: str,
+        body: SpaceCapabilitiesRequest,
+    ) -> dict[str, bool]:
+        runtime.repository.set_space_member(space_id, user_id, body.model_dump())
+        return body.model_dump()
 
     @app.post(
         "/v1/admin/users/{user_id}/access-package",
@@ -1737,7 +1877,10 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     )
     def prepare_user_access(user_id: str, body: PrepareAccessRequest) -> dict[str, Any]:
         result = runtime.control.prepare_user_access(
-            user_id, email=body.email, ttl_seconds=body.ttl_seconds
+            user_id,
+            email=body.email,
+            ttl_seconds=body.ttl_seconds,
+            send_email=body.send_email,
         )
         result["download_url"] = f"/v1/admin/access-packages/{result['invitation_id']}"
         return result
@@ -1920,13 +2063,24 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         consume_mobile_confirmation(confirmation, device=device, action="user.create")
         user, space = runtime.repository.create_user(
-            body.username,
-            body.display_name,
-            body.quota_gib * 1024**3,
-            body.role,
-            body.password.get_secret_value() if body.password else None,
+            username=body.username,
+            display_name=body.display_name,
+            quota_bytes=body.quota_gib * 1024**3,
+            role=body.role,
+            password=body.password.get_secret_value() if body.password else None,
+            email=body.email,
+            create_personal_space=body.create_personal_space,
+            primary_storage_root_id=body.primary_storage_root_id,
+            fallback_storage_root_id=body.fallback_storage_root_id,
         )
-        result: dict[str, Any] = {"user": asdict(user), "space": asdict(space)}
+        for grant in body.space_grants:
+            runtime.repository.set_space_member(
+                grant.space_id, user.id, grant.capabilities.model_dump()
+            )
+        result: dict[str, Any] = {
+            "user": asdict(user),
+            "space": asdict(space) if space is not None else None,
+        }
         if body.prepare_access:
             result["access_package"] = runtime.control.prepare_user_access(
                 user.id, email=body.email
@@ -2134,7 +2288,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=429, detail="too many pairing attempts")
         result = runtime.repository.redeem_invitation(
             code=body.code,
-            password=body.password.get_secret_value(),
+            password=body.password.get_secret_value() if body.password is not None else None,
             device_name=body.device_name,
             platform=body.platform,
             remote_address=remote,

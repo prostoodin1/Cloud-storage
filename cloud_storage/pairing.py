@@ -10,6 +10,7 @@ from dataclasses import dataclass
 _FINGERPRINT = re.compile(r"^[0-9a-fA-F]{64}$")
 DISCOVERY_PREFIX = "CLOUD_STORAGE_DISCOVER_V1:"
 CONNECTION_CODE_PREFIX = "CS1."
+SERVER_CODE_PREFIX = "CS2."
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +19,93 @@ class PairingInvitation:
     server_url: str = ""
     certificate_fingerprint: str = ""
     username: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ServerLocator:
+    server_url: str
+    certificate_fingerprint: str = ""
+    username: str = ""
+    alternate_addresses: tuple[str, ...] = ()
+
+    @property
+    def primary_address(self) -> str:
+        return self.server_url
+
+    @property
+    def addresses(self) -> tuple[str, ...]:
+        return (self.server_url, *self.alternate_addresses)
+
+
+def build_server_code(
+    server_url: str,
+    certificate_fingerprint: str = "",
+    username: str = "",
+    *,
+    alternate_addresses: list[str] | tuple[str, ...] = (),
+) -> str:
+    invitation = _validated_invitation(
+        "SERVER00", server_url, certificate_fingerprint, username
+    )
+    alternatives: list[str] = []
+    for address in alternate_addresses:
+        validated = _validated_invitation("SERVER00", str(address), "", "")
+        if validated.server_url != invitation.server_url:
+            alternatives.append(validated.server_url)
+    alternatives = list(dict.fromkeys(alternatives))[:8]
+    payload = json.dumps(
+        {
+            "s": invitation.server_url,
+            "f": invitation.certificate_fingerprint,
+            "u": invitation.username,
+            "a": alternatives,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(zlib.compress(payload, level=9)).decode("ascii")
+    return SERVER_CODE_PREFIX + encoded.rstrip("=")
+
+
+def parse_server_code(value: str) -> ServerLocator | None:
+    candidate = value.strip()
+    if not candidate.upper().startswith(SERVER_CODE_PREFIX):
+        return None
+    encoded = candidate[len(SERVER_CODE_PREFIX) :]
+    if not encoded or len(encoded) > 4096 or not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
+        raise ValueError("invalid Cloud Storage server code")
+    try:
+        compressed = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        decompressor = zlib.decompressobj()
+        raw = decompressor.decompress(compressed, 8193)
+        if len(raw) > 8192 or decompressor.unconsumed_tail or not decompressor.eof:
+            raise ValueError
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError, json.JSONDecodeError, zlib.error) as exc:
+        raise ValueError("invalid Cloud Storage server code") from exc
+    if not isinstance(payload, dict) or set(payload) - {"s", "f", "u", "a"}:
+        raise ValueError("invalid Cloud Storage server code")
+    invitation = _validated_invitation(
+        "SERVER00",
+        str(payload.get("s", "")),
+        str(payload.get("f", "")),
+        str(payload.get("u", "")),
+    )
+    raw_alternatives = payload.get("a", [])
+    if not isinstance(raw_alternatives, list) or len(raw_alternatives) > 8:
+        raise ValueError("invalid Cloud Storage server code")
+    alternatives: list[str] = []
+    for address in raw_alternatives:
+        validated = _validated_invitation("SERVER00", str(address), "", "")
+        if validated.server_url != invitation.server_url:
+            alternatives.append(validated.server_url)
+    return ServerLocator(
+        invitation.server_url,
+        invitation.certificate_fingerprint,
+        invitation.username,
+        tuple(dict.fromkeys(alternatives)),
+    )
 
 
 def build_connection_code(

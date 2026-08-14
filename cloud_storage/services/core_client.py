@@ -353,13 +353,19 @@ class CoreClient:
     def list_maintenance_jobs(self) -> list[dict[str, Any]]:
         return self._manager_request("/v1/admin/maintenance/jobs")
 
-    def create_migration(self, source_root_id: str, target_root_id: str) -> dict[str, Any]:
+    def create_migration(
+        self,
+        source_root_id: str,
+        target_root_id: str,
+        space_id: str | None = None,
+    ) -> dict[str, Any]:
         return self._manager_request(
             "/v1/admin/maintenance/migrations",
             method="POST",
             payload={
                 "source_root_id": source_root_id,
                 "target_root_id": target_root_id,
+                "space_id": space_id,
             },
             timeout=10.0,
         )
@@ -487,6 +493,10 @@ class CoreClient:
         role: str = "member",
         password: str | None = None,
         email: str = "",
+        create_personal_space: bool = True,
+        primary_storage_root_id: str | None = None,
+        fallback_storage_root_id: str | None = None,
+        space_grants: list[dict[str, Any]] | None = None,
         prepare_access: bool = True,
     ) -> dict[str, Any]:
         return self._manager_request(
@@ -499,17 +509,57 @@ class CoreClient:
                 "role": role,
                 "password": password,
                 "email": email,
+                "create_personal_space": create_personal_space,
+                "primary_storage_root_id": primary_storage_root_id,
+                "fallback_storage_root_id": fallback_storage_root_id,
+                "space_grants": space_grants or [],
                 "prepare_access": prepare_access,
             },
         )
 
     def prepare_user_access(
-        self, user_id: str, *, email: str = "", ttl_seconds: int = 3600
+        self,
+        user_id: str,
+        *,
+        email: str = "",
+        ttl_seconds: int = 604800,
+        send_email: bool = False,
     ) -> dict[str, Any]:
         return self._manager_request(
             f"/v1/admin/users/{user_id}/access-package",
             method="POST",
-            payload={"email": email, "ttl_seconds": ttl_seconds},
+            payload={
+                "email": email,
+                "ttl_seconds": ttl_seconds,
+                "send_email": send_email,
+            },
+        )
+
+    def update_user(self, user_id: str, values: dict[str, Any]) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/users/{user_id}",
+            method="PATCH",
+            payload=values,
+        )
+
+    def list_spaces_admin(self) -> list[dict[str, Any]]:
+        return self._manager_request("/v1/admin/spaces")
+
+    def create_space(self, values: dict[str, Any]) -> dict[str, Any]:
+        return self._manager_request("/v1/admin/spaces", method="POST", payload=values)
+
+    def update_space(self, space_id: str, values: dict[str, Any]) -> dict[str, Any]:
+        return self._manager_request(
+            f"/v1/admin/spaces/{space_id}", method="PATCH", payload=values
+        )
+
+    def set_space_member(
+        self, space_id: str, user_id: str, capabilities: dict[str, bool]
+    ) -> dict[str, bool]:
+        return self._manager_request(
+            f"/v1/admin/spaces/{space_id}/members/{user_id}",
+            method="PUT",
+            payload=capabilities,
         )
 
     def set_user_password(self, user_id: str, password: str) -> dict[str, Any]:

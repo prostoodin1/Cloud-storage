@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 
 from cloud_storage.core.api import create_app
 from cloud_storage.core.config import CoreConfig, CoreSecrets
+from cloud_storage.core.integrations import EmailProvider
+from cloud_storage.pairing import build_server_code, parse_server_code
 
 
 def manager_client(tmp_path: Path, **config_values):
@@ -174,12 +176,331 @@ def test_new_user_gets_personal_drive_and_downloadable_one_time_access_file(
     package_path = Path(access["download_path"])
     assert package_path.is_file()
     assert json.loads(package_path.read_text(encoding="utf-8"))["format"] == (
-        "cloud-storage-access-v1"
+        "cloud-storage-access-v2"
     )
     downloaded = client.get(access["download_url"], headers=headers)
     assert downloaded.status_code == 200
     assert "attachment" in downloaded.headers["content-disposition"]
     assert downloaded.json()["one_time_code"] == access["package"]["one_time_code"]
+
+
+def test_access_package_has_no_password_is_single_use_and_revokes_older_file(
+    tmp_path: Path,
+) -> None:
+    app, client, headers = manager_client(tmp_path)
+    created = client.post(
+        "/v1/admin/users",
+        headers=headers,
+        json={
+            "username": "one-time-user",
+            "display_name": "One Time",
+            "quota_gib": 10,
+            "password": "permanent password remains server side",
+            "prepare_access": True,
+        },
+    ).json()
+    first = created["access_package"]["package"]
+    assert "password" not in first
+
+    second_response = client.post(
+        f"/v1/admin/users/{created['user']['id']}/access-package",
+        headers=headers,
+        json={"ttl_seconds": 604800},
+    )
+    assert second_response.status_code == 201
+    second = second_response.json()["package"]
+
+    request_body = {
+        "device_name": "Fresh laptop",
+        "platform": "Windows",
+    }
+    revoked = client.post(
+        "/v1/pairing/redeem", json={**request_body, "code": first["one_time_code"]}
+    )
+    paired = client.post(
+        "/v1/pairing/redeem", json={**request_body, "code": second["one_time_code"]}
+    )
+    replay = client.post(
+        "/v1/pairing/redeem", json={**request_body, "code": second["one_time_code"]}
+    )
+
+    assert revoked.status_code == 422
+    assert paired.status_code == 201
+    assert paired.json()["device"]["status"] == "pending"
+    assert replay.status_code == 422
+    assert app.state.runtime.repository.summary()["pending_devices"] == 1
+
+
+def test_duplicate_login_is_localized_and_space_rights_are_enforced_by_core(
+    tmp_path: Path,
+) -> None:
+    _app, client, headers = manager_client(tmp_path)
+    user_body = {
+        "username": "rights-user",
+        "display_name": "Rights User",
+        "quota_gib": 10,
+        "prepare_access": False,
+    }
+    created = client.post("/v1/admin/users", headers=headers, json=user_body)
+    duplicate = client.post("/v1/admin/users", headers=headers, json=user_body)
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {
+        "code": "username_exists",
+        "detail": "Этот логин уже используется",
+    }
+
+    user_id = created.json()["user"]["id"]
+    space = client.post(
+        "/v1/admin/spaces",
+        headers=headers,
+        json={"name": "Команда", "quota_gib": 50},
+    ).json()
+    grant = client.put(
+        f"/v1/admin/spaces/{space['id']}/members/{user_id}",
+        headers=headers,
+        json={
+            "read": True,
+            "upload": False,
+            "modify": False,
+            "delete": False,
+            "share": False,
+        },
+    )
+    assert grant.status_code == 200
+
+    access = client.post(
+        f"/v1/admin/users/{user_id}/access-package",
+        headers=headers,
+        json={"ttl_seconds": 604800},
+    ).json()["package"]
+    paired = client.post(
+        "/v1/pairing/redeem",
+        json={
+            "code": access["one_time_code"],
+            "device_name": "Rights laptop",
+            "platform": "Windows",
+        },
+    ).json()
+    client.post(
+        f"/v1/admin/devices/{paired['device']['id']}/approve", headers=headers
+    )
+    device_headers = {"Authorization": f"Bearer {paired['device_token']}"}
+
+    visible = client.get("/v1/spaces", headers=device_headers).json()
+    shared = next(item for item in visible if item["id"] == space["id"])
+    assert shared["can_read"] is True
+    assert shared["can_upload"] is False
+    assert client.get(
+        f"/v1/spaces/{space['id']}/entries", headers=device_headers
+    ).status_code == 200
+    assert client.put(
+        f"/v1/spaces/{space['id']}/files/forbidden.txt",
+        headers=device_headers,
+        content=b"blocked",
+    ).status_code == 403
+    assert client.post(
+        "/v1/shares",
+        headers=device_headers,
+        json={"space_id": space["id"], "logical_path": "forbidden.txt", "kind": "file"},
+    ).status_code == 403
+
+
+def test_cs2_server_code_hides_transport_details_but_round_trips() -> None:
+    code = build_server_code(
+        "https://cloud.example:8766",
+        "AA:" * 31 + "AA",
+        "anna",
+        alternate_addresses=["https://192.0.2.10:8766"],
+    )
+    assert code.startswith("CS2.")
+    assert "cloud.example" not in code
+    locator = parse_server_code(code)
+    assert locator.primary_address == "https://cloud.example:8766"
+    assert locator.username == "anna"
+    assert locator.certificate_fingerprint == "aa" * 32
+    assert locator.addresses[1] == "https://192.0.2.10:8766"
+
+
+def test_smtp_access_file_is_sent_as_real_attachment(monkeypatch) -> None:
+    delivered = []
+
+    class FakeSmtp:
+        def __init__(self, host, port, timeout):
+            assert (host, port, timeout) == ("smtp.example", 587, 10)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def starttls(self):
+            return None
+
+        def login(self, username, password):
+            assert (username, password) == ("mailer", "secret")
+
+        def send_message(self, message):
+            delivered.append(message)
+
+    monkeypatch.setattr("cloud_storage.core.integrations.smtplib.SMTP", FakeSmtp)
+    provider = EmailProvider(
+        host="smtp.example",
+        port=587,
+        username="mailer",
+        password="secret",
+        sender="cloud@example.com",
+        recipient="",
+    )
+    provider.deliver(
+        {
+            "recipient": "user@example.com",
+            "title": "Доступ",
+            "message": "Импортируйте вложенный файл.",
+            "attachments": [
+                {
+                    "filename": "login.cloud-access.json",
+                    "content": b'{"format":"cloud-storage-access-v2"}',
+                    "content_type": "application/json",
+                }
+            ],
+        }
+    )
+
+    assert len(delivered) == 1
+    message = delivered[0]
+    attachment = next(message.iter_attachments())
+    assert attachment.get_filename() == "login.cloud-access.json"
+    assert attachment.get_content_type() == "application/json"
+    assert attachment.get_payload(decode=True) == b'{"format":"cloud-storage-access-v2"}'
+
+
+def test_space_falls_back_and_manual_migration_returns_verified_file_to_primary(
+    tmp_path: Path,
+) -> None:
+    app, client, headers = manager_client(tmp_path)
+    primary_parent = tmp_path / "primary-disk"
+    fallback_parent = tmp_path / "fallback-disk"
+    primary_parent.mkdir()
+    fallback_parent.mkdir()
+    primary_path = primary_parent / "CloudStorageData"
+    fallback_path = fallback_parent / "CloudStorageData"
+
+    def configure(primary_enabled: bool) -> list[dict]:
+        response = client.put(
+            "/v1/admin/storage-roots",
+            headers=headers,
+            json={
+                "roots": [
+                    {
+                        "disk_id": "disk-primary-test",
+                        "path": str(primary_path),
+                        "priority": 90,
+                        "max_fill_percent": 99,
+                        "min_free_gib": 0,
+                        "write_enabled": primary_enabled,
+                        "purpose": "primary",
+                    },
+                    {
+                        "disk_id": "disk-fallback-test",
+                        "path": str(fallback_path),
+                        "priority": 50,
+                        "max_fill_percent": 99,
+                        "min_free_gib": 0,
+                        "write_enabled": True,
+                        "purpose": "primary",
+                    },
+                ]
+            },
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    roots = configure(False)
+    primary_id = next(item["id"] for item in roots if item["disk_id"] == "disk-primary-test")
+    fallback_id = next(
+        item["id"] for item in roots if item["disk_id"] == "disk-fallback-test"
+    )
+    space = client.post(
+        "/v1/admin/spaces",
+        headers=headers,
+        json={
+            "name": "Фото",
+            "quota_gib": 10,
+            "primary_storage_root_id": primary_id,
+            "fallback_storage_root_id": fallback_id,
+        },
+    ).json()
+    created = client.post(
+        "/v1/admin/users",
+        headers=headers,
+        json={
+            "username": "fallback-user",
+            "display_name": "Fallback User",
+            "quota_gib": 10,
+            "create_personal_space": False,
+            "space_grants": [
+                {
+                    "space_id": space["id"],
+                    "capabilities": {
+                        "read": True,
+                        "upload": True,
+                        "modify": True,
+                        "delete": True,
+                        "share": True,
+                    },
+                }
+            ],
+        },
+    ).json()
+    package = created["access_package"]["package"]
+    paired = client.post(
+        "/v1/pairing/redeem",
+        json={
+            "code": package["one_time_code"],
+            "device_name": "Fallback laptop",
+            "platform": "Windows",
+        },
+    ).json()
+    client.post(
+        f"/v1/admin/devices/{paired['device']['id']}/approve", headers=headers
+    )
+    device_headers = {"Authorization": f"Bearer {paired['device_token']}"}
+    payload = b"verified fallback payload"
+    uploaded = client.put(
+        f"/v1/spaces/{space['id']}/files/photo.bin",
+        headers=device_headers,
+        content=payload,
+    )
+    assert uploaded.status_code == 201
+    assert uploaded.json()["storage_root_id"] == fallback_id
+
+    configure(True)
+    migration = client.post(
+        "/v1/admin/maintenance/migrations",
+        headers=headers,
+        json={
+            "source_root_id": fallback_id,
+            "target_root_id": primary_id,
+            "space_id": space["id"],
+        },
+    )
+    assert migration.status_code == 202
+    job = client.get(
+        f"/v1/admin/maintenance/jobs/{migration.json()['id']}", headers=headers
+    ).json()
+    assert job["status"] == "completed"
+    record = app.state.runtime.storage.find_file(space["id"], "photo.bin")
+    assert record is not None
+    assert record.storage_root_id == primary_id
+    physical = app.state.runtime.storage.resolve_download(
+        space["id"], created["user"]["id"], "photo.bin"
+    )[1]
+    assert physical.read_bytes() == payload
+    assert any(
+        event["action"] == "storage.migration.completed"
+        for event in app.state.runtime.repository.recent_audit(50)
+    )
 
 
 def test_zrok_browser_policy_can_block_all_browser_access(tmp_path: Path) -> None:

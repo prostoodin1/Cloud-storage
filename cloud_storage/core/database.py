@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL UNIQUE COLLATE NOCASE,
     display_name TEXT NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
     password_hash TEXT,
     password_version INTEGER NOT NULL DEFAULT 0 CHECK(password_version >= 0),
     role TEXT NOT NULL CHECK(role IN ('admin', 'member')),
@@ -29,6 +30,9 @@ CREATE TABLE IF NOT EXISTS spaces (
     name TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('personal', 'shared', 'backup')),
     quota_bytes INTEGER NOT NULL CHECK(quota_bytes > 0),
+    primary_storage_root_id TEXT REFERENCES storage_roots(id) ON DELETE SET NULL,
+    fallback_storage_root_id TEXT REFERENCES storage_roots(id) ON DELETE SET NULL,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     created_at TEXT NOT NULL
 );
 
@@ -36,6 +40,11 @@ CREATE TABLE IF NOT EXISTS space_members (
     space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     permission TEXT NOT NULL CHECK(permission IN ('read', 'write', 'owner')),
+    can_read INTEGER NOT NULL DEFAULT 1 CHECK(can_read IN (0, 1)),
+    can_upload INTEGER NOT NULL DEFAULT 0 CHECK(can_upload IN (0, 1)),
+    can_modify INTEGER NOT NULL DEFAULT 0 CHECK(can_modify IN (0, 1)),
+    can_delete INTEGER NOT NULL DEFAULT 0 CHECK(can_delete IN (0, 1)),
+    can_share INTEGER NOT NULL DEFAULT 0 CHECK(can_share IN (0, 1)),
     PRIMARY KEY(space_id, user_id)
 );
 
@@ -55,6 +64,7 @@ CREATE TABLE IF NOT EXISTS invitations (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     code_hash TEXT NOT NULL UNIQUE,
+    purpose TEXT NOT NULL DEFAULT 'legacy' CHECK(purpose IN ('legacy', 'access_package')),
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     consumed_at TEXT,
@@ -180,6 +190,7 @@ CREATE TABLE IF NOT EXISTS maintenance_jobs (
     status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
     source_root_id TEXT NOT NULL REFERENCES storage_roots(id) ON DELETE RESTRICT,
     target_root_id TEXT NOT NULL REFERENCES storage_roots(id) ON DELETE RESTRICT,
+    space_id TEXT REFERENCES spaces(id) ON DELETE SET NULL,
     total_files INTEGER NOT NULL CHECK(total_files >= 0),
     total_bytes INTEGER NOT NULL CHECK(total_bytes >= 0),
     processed_files INTEGER NOT NULL DEFAULT 0 CHECK(processed_files >= 0),
@@ -530,6 +541,58 @@ class Database:
                     "ALTER TABLE users ADD COLUMN password_version INTEGER NOT NULL DEFAULT 0 "
                     "CHECK(password_version >= 0)"
                 )
+            if "email" not in user_columns:
+                connection.execute("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+            space_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(spaces)").fetchall()
+            }
+            for column, definition in (
+                ("primary_storage_root_id", "TEXT REFERENCES storage_roots(id) ON DELETE SET NULL"),
+                ("fallback_storage_root_id", "TEXT REFERENCES storage_roots(id) ON DELETE SET NULL"),
+                ("enabled", "INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1))"),
+            ):
+                if column not in space_columns:
+                    connection.execute(f"ALTER TABLE spaces ADD COLUMN {column} {definition}")
+            member_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(space_members)").fetchall()
+            }
+            member_permissions_added = False
+            for column in ("can_read", "can_upload", "can_modify", "can_delete", "can_share"):
+                if column not in member_columns:
+                    member_permissions_added = True
+                    default = 1 if column == "can_read" else 0
+                    connection.execute(
+                        f"ALTER TABLE space_members ADD COLUMN {column} INTEGER NOT NULL "
+                        f"DEFAULT {default} CHECK({column} IN (0, 1))"
+                    )
+            if member_permissions_added:
+                connection.execute(
+                    """
+                    UPDATE space_members
+                    SET can_read = 1,
+                        can_upload = CASE WHEN permission IN ('write', 'owner') THEN 1 ELSE 0 END,
+                        can_modify = CASE WHEN permission IN ('write', 'owner') THEN 1 ELSE 0 END,
+                        can_delete = CASE WHEN permission IN ('write', 'owner') THEN 1 ELSE 0 END,
+                        can_share = CASE WHEN permission IN ('write', 'owner') THEN 1 ELSE 0 END
+                    """
+                )
+            invitation_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(invitations)").fetchall()
+            }
+            if "purpose" not in invitation_columns:
+                connection.execute(
+                    "ALTER TABLE invitations ADD COLUMN purpose TEXT NOT NULL DEFAULT 'legacy' "
+                    "CHECK(purpose IN ('legacy', 'access_package'))"
+                )
+            maintenance_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(maintenance_jobs)").fetchall()
+            }
+            if "space_id" not in maintenance_columns:
+                connection.execute(
+                    "ALTER TABLE maintenance_jobs ADD COLUMN space_id TEXT "
+                    "REFERENCES spaces(id) ON DELETE SET NULL"
+                )
             self._upgrade_automation_schema(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO automation_settings(id, enabled, interval_seconds, updated_at) "
@@ -607,6 +670,14 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(16, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(17, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(18, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
             connection.commit()
 

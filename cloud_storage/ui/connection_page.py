@@ -16,13 +16,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cloud_storage.pairing import build_pairing_uri, parse_connection_code
-from cloud_storage.ui.widgets import make_header
+from cloud_storage.pairing import build_pairing_uri, parse_connection_code, parse_server_code
+from cloud_storage.ui.widgets import clear_layout, make_header
 
 
 class ConnectionCodePanel(QFrame):
     generation_requested = Signal(str, str, str)
     create_user_requested = Signal()
+    edit_user_requested = Signal(str)
+    reset_password_requested = Signal(str, str)
+    email_access_requested = Signal(str, str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -73,6 +76,12 @@ class ConnectionCodePanel(QFrame):
         controls.addStretch()
         layout.addLayout(controls)
 
+        users_title = QLabel("Пользователи")
+        users_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        layout.addWidget(users_title)
+        self.users_rows = QVBoxLayout()
+        layout.addLayout(self.users_rows)
+
         self.access_tabs = QTabWidget()
         credentials_tab = QWidget()
         credentials_layout = QFormLayout(credentials_tab)
@@ -81,7 +90,7 @@ class ConnectionCodePanel(QFrame):
         self.generated_username.setPlaceholderText("Логин пользователя")
         self.code = QLineEdit()
         self.code.setReadOnly(True)
-        self.code.setPlaceholderText("Здесь появится код вида CS1.…")
+        self.code.setPlaceholderText("Здесь появится код сервера вида CS2.…")
         self.code.setMinimumHeight(42)
         self.copy_button = QPushButton("Скопировать логин и код")
         self.copy_button.setEnabled(False)
@@ -160,6 +169,60 @@ class ConnectionCodePanel(QFrame):
                     self.user.setCurrentIndex(index)
                     break
         self.user.blockSignals(False)
+        clear_layout(self.users_rows)
+        if not users:
+            empty = QLabel("Пользователей пока нет.")
+            empty.setProperty("muted", True)
+            self.users_rows.addWidget(empty)
+        for item in users:
+            card = QFrame()
+            card.setProperty("card", True)
+            row = QHBoxLayout(card)
+            text = QVBoxLayout()
+            name = str(item.get("display_name") or item.get("username") or "Пользователь")
+            title = QLabel(name)
+            title.setStyleSheet("font-weight: 700;")
+            grants = item.get("space_grants") or []
+            detail = QLabel(
+                f"@{item.get('username', '')} · {item.get('email') or 'email не задан'} · "
+                f"пространств: {len(grants)} · "
+                f"{'включён' if item.get('enabled', True) else 'отключён'}"
+            )
+            detail.setProperty("muted", True)
+            text.addWidget(title)
+            text.addWidget(detail)
+            row.addLayout(text, 1)
+            user_id = str(item.get("id") or "")
+            username = str(item.get("username") or "")
+            email = str(item.get("email") or "")
+            copy_login = QPushButton("Копировать логин")
+            copy_login.clicked.connect(
+                lambda _checked=False, value=username: (
+                    QGuiApplication.clipboard().setText(value)
+                )
+            )
+            edit = QPushButton("Изменить")
+            edit.clicked.connect(
+                lambda _checked=False, value=user_id: self.edit_user_requested.emit(value)
+            )
+            password = QPushButton("Новый пароль")
+            password.clicked.connect(
+                lambda _checked=False, value=user_id, label=name: (
+                    self.reset_password_requested.emit(value, label)
+                )
+            )
+            email_access = QPushButton("Файл на email")
+            email_access.setEnabled(bool(email))
+            email_access.clicked.connect(
+                lambda _checked=False, value=user_id, recipient=email: (
+                    self.email_access_requested.emit(value, recipient)
+                )
+            )
+            row.addWidget(copy_login)
+            row.addWidget(edit)
+            row.addWidget(password)
+            row.addWidget(email_access)
+            self.users_rows.addWidget(card)
         self._render_endpoint()
 
     def selected_endpoint(self, mode: str | None = None) -> tuple[str, str]:
@@ -189,24 +252,33 @@ class ConnectionCodePanel(QFrame):
             return str(endpoints[0]).rstrip("/"), str(lan.get("fingerprint") or "")
         return "", ""
 
-    def show_code(self, code: str, detail: str) -> None:
+    def show_code(self, code: str, detail: str, pairing_link: str = "") -> None:
         self.code.setText(code)
         self.copy_button.setEnabled(bool(code))
         try:
-            invitation = parse_connection_code(code)
-            if invitation is None:
-                raise ValueError("invalid connection code")
-            link = build_pairing_uri(
-                invitation.code,
-                invitation.server_url,
-                invitation.certificate_fingerprint,
-                invitation.username,
-            )
-            self.generated_username.setText(invitation.username)
+            locator = parse_server_code(code)
+            if locator is None:
+                legacy = parse_connection_code(code)
+                if legacy is None:
+                    raise ValueError("invalid server code")
+                username = legacy.username
+                link = pairing_link or build_pairing_uri(
+                    legacy.code,
+                    legacy.server_url,
+                    legacy.certificate_fingerprint,
+                    legacy.username,
+                )
+            else:
+                username = locator.username
+                link = pairing_link
+            self.generated_username.setText(username)
             self.invitation_link.setText(link)
-            self.copy_link_button.setEnabled(True)
+            self.copy_link_button.setEnabled(bool(link))
             self.qr_label.setText("")
-            self.qr_label.setPixmap(self._qr_pixmap(link))
+            if link:
+                self.qr_label.setPixmap(self._qr_pixmap(link))
+            else:
+                self.qr_label.setText("Одноразовая ссылка не создана")
         except ValueError as exc:
             self.invitation_link.clear()
             self.copy_link_button.setEnabled(False)

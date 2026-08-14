@@ -998,10 +998,20 @@ class ControlCenterService:
         return self.get_cell(cell_id)
 
     def prepare_user_access(
-        self, user_id: str, *, email: str = "", ttl_seconds: int = 3600
+        self,
+        user_id: str,
+        *,
+        email: str = "",
+        ttl_seconds: int = 604800,
+        send_email: bool = False,
     ) -> dict[str, Any]:
         user = self.repository.get_user(user_id)
-        invitation_id, code, expires_at = self.repository.create_invitation(user_id, ttl_seconds)
+        self.repository.revoke_unused_access_invitations(user_id)
+        invitation_id, code, expires_at = self.repository.create_invitation(
+            user_id,
+            ttl_seconds,
+            purpose="access_package",
+        )
         health_addresses: list[str] = []
         tunnel = self.tunnels.status("zrok")
         if self.config.remote_pairing_enabled and tunnel.get("public_url"):
@@ -1028,7 +1038,7 @@ class ControlCenterService:
             else ""
         )
         package = {
-            "format": "cloud-storage-access-v1",
+            "format": "cloud-storage-access-v2",
             "server_name": self.config.server_name,
             "username": user.username,
             "display_name": user.display_name,
@@ -1050,7 +1060,10 @@ class ControlCenterService:
                 user.username,
             ),
             "personal_drive_name": f"Личный диск — {user.display_name}",
-            "instructions": "Откройте Client, выберите 'Подключиться по коду' и импортируйте этот файл.",
+            "instructions": (
+                "Откройте Client и импортируйте этот файл. Постоянный пароль вводить не нужно; "
+                "устройство появится у администратора на подтверждение."
+            ),
         }
         directory = self.config.data_directory / "access-packages"
         directory.mkdir(parents=True, exist_ok=True)
@@ -1058,16 +1071,29 @@ class ControlCenterService:
         self._write_private_json(path, package)
         email_status = "not-requested"
         provider = self.integrations.notification_providers.get("email")
-        if email:
+        if send_email and email:
             if provider is None:
                 email_status = "not-configured"
             else:
                 try:
+                    attachment = json.dumps(package, ensure_ascii=False, indent=2).encode("utf-8")
                     provider.deliver(
                         {
                             "recipient": email,
                             "title": "Доступ к личному облаку",
-                            "message": json.dumps(package, ensure_ascii=False, indent=2),
+                            "message": (
+                                f"Здравствуйте, {user.display_name}.\n\n"
+                                "Во вложении находится одноразовый файл входа Cloud Storage. "
+                                "Он действует 7 дней. Импортируйте его в Client и дождитесь "
+                                "подтверждения устройства администратором."
+                            ),
+                            "attachments": [
+                                {
+                                    "filename": f"cloud-storage-{user.username}.cloud-access.json",
+                                    "content": attachment,
+                                    "content_type": "application/json",
+                                }
+                            ],
                             "severity": "info",
                             "created_at": utc_text(),
                             "source": "provisioning",
@@ -1076,6 +1102,8 @@ class ControlCenterService:
                     email_status = "delivered"
                 except Exception as exc:
                     email_status = f"failed: {str(exc)[:200]}"
+        elif send_email:
+            email_status = "recipient-missing"
         return {
             "invitation_id": invitation_id,
             "expires_at": expires_at,

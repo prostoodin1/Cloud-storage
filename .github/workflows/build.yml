@@ -57,6 +57,13 @@ jobs:
         run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageCore.spec
       - name: Build standalone desktop client
         run: python -m PyInstaller --noconfirm --clean packaging/CloudStorageClient.spec
+      - name: Install Inno Setup for release packaging
+        if: runner.os == 'Windows'
+        run: choco install innosetup -y --no-progress
+      - name: Build Windows update and installer packages
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/build-installers.ps1
       - name: Package MacBook applications
         if: runner.os == 'macOS'
         run: bash scripts/package-macos.sh
@@ -74,4 +81,5 @@ jobs:
             dist/Cloud Storage Client.app/
             dist/macos-release/*.dmg
             dist/macos-release/SHA256SUMS.txt
+            outputs/*
           if-no-files-found: warn

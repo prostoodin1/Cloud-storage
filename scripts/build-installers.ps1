@@ -1,6 +1,11 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$python = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$python = if (Test-Path -LiteralPath $venvPython) {
+    $venvPython
+} else {
+    (Get-Command python -ErrorAction Stop).Source
+}
 $version = (& $python -c "from cloud_storage import __version__; print(__version__)").Trim()
 $releaseRoot = Join-Path $projectRoot "work\release-$version"
 $env:CLOUD_STORAGE_BUILD_DIST = Join-Path $releaseRoot 'dist'

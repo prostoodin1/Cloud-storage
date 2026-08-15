@@ -1,12 +1,13 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$python = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$python = if (Test-Path -LiteralPath $venvPython) {
+    $venvPython
+} else {
+    (Get-Command python -ErrorAction Stop).Source
+}
 $distRoot = if ($env:CLOUD_STORAGE_BUILD_DIST) { $env:CLOUD_STORAGE_BUILD_DIST } else { Join-Path $projectRoot 'dist' }
 $workRoot = if ($env:CLOUD_STORAGE_BUILD_WORK) { $env:CLOUD_STORAGE_BUILD_WORK } else { Join-Path $projectRoot 'build' }
-
-if (-not (Test-Path -LiteralPath $python)) {
-    throw 'Virtual environment not found. Create .venv and install .[build] first.'
-}
 
 & $python -m pytest
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }

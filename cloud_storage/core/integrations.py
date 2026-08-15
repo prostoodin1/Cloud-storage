@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
 import smtplib
 import threading
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from email.message import EmailMessage
@@ -149,10 +151,17 @@ class EmailProvider:
     sender: str
     recipient: str
     starttls: bool = True
+    auth_mode: str = "password"
+    gmail_client_id: str = ""
+    gmail_refresh_token: str = ""
     provider_id: str = "email"
 
     def manifest(self) -> dict[str, Any]:
-        configured = bool(self.host and self.sender)
+        configured = bool(self.host and self.sender) and (
+            bool(self.gmail_client_id and self.gmail_refresh_token)
+            if self.auth_mode == "gmail_oauth"
+            else True
+        )
         return {
             "id": self.provider_id,
             "name": "Email (SMTP)",
@@ -189,9 +198,35 @@ class EmailProvider:
         with smtplib.SMTP(self.host, self.port, timeout=10) as client:
             if self.starttls:
                 client.starttls()
-            if self.username:
+            if self.auth_mode == "gmail_oauth":
+                access_token = self._gmail_access_token()
+                oauth = base64.b64encode(
+                    f"user={self.username}\x01auth=Bearer {access_token}\x01\x01".encode()
+                ).decode("ascii")
+                code, response = client.docmd("AUTH", "XOAUTH2 " + oauth)
+                if code != 235:
+                    raise RuntimeError(f"Gmail OAuth не принял вход: {response.decode(errors='replace')}")
+            elif self.username:
                 client.login(self.username, self.password)
             client.send_message(message)
+
+    def _gmail_access_token(self) -> str:
+        if not self.gmail_client_id or not self.gmail_refresh_token:
+            raise RuntimeError("Войдите в Google в настройках Email")
+        payload = urllib.parse.urlencode(
+            {"client_id": self.gmail_client_id, "refresh_token": self.gmail_refresh_token,
+             "grant_type": "refresh_token"}
+        ).encode("ascii")
+        request = urllib.request.Request(
+            "https://oauth2.googleapis.com/token", data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            value = json.loads(response.read().decode("utf-8"))
+        token = str(value.get("access_token") or "")
+        if not token:
+            raise RuntimeError("Google не выдал токен для отправки почты")
+        return token
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +324,9 @@ class IntegrationRegistry:
                     sender=str(email.get("sender", "")),
                     recipient=str(email.get("recipient", "")),
                     starttls=bool(email.get("starttls", True)),
+                    auth_mode=str(email.get("auth_mode", "password")),
+                    gmail_client_id=str(email.get("gmail_client_id", "")),
+                    gmail_refresh_token=secrets.get("gmail_refresh_token", ""),
                 )
             )
         webhook = settings.get("webhook", {})

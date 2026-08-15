@@ -79,15 +79,20 @@ class ClientApi:
         device_name: str,
         platform: str,
     ) -> dict[str, Any]:
+        # Links and QR codes carry a one-time secret, not the user's password.
+        # Do not serialize an absent password as JSON null: older Core releases
+        # validate this field as a string and reject null before pairing starts.
+        payload: dict[str, Any] = {
+            "code": code,
+            "device_name": device_name,
+            "platform": platform,
+        }
+        if password:
+            payload["password"] = password
         return self._json_request(
             "/v1/pairing/redeem",
             method="POST",
-            payload={
-                "code": code,
-                "password": password or None,
-                "device_name": device_name,
-                "platform": platform,
-            },
+            payload=payload,
             timeout=10.0,
         )
 

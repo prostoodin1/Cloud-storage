@@ -346,6 +346,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "sender": "",
             "recipient": "",
             "starttls": True,
+            "auth_mode": "password",
+            "gmail_client_id": "",
         },
         "webhook": {"enabled": False, "url": ""},
     },
@@ -439,6 +441,9 @@ class ControlCenterService:
         result["integrations"]["email"]["password_configured"] = bool(
             self._load_secrets().get("smtp_password")
         )
+        result["integrations"]["email"]["gmail_configured"] = bool(
+            self._load_secrets().get("gmail_refresh_token")
+        )
         result["integrations"]["webhook"]["token_configured"] = bool(
             self._load_secrets().get("webhook_token")
         )
@@ -447,7 +452,7 @@ class ControlCenterService:
     def update_settings(self, update: dict[str, Any]) -> dict[str, Any]:
         current = self.settings()
         for integration in current["integrations"].values():
-            for marker in ("token_configured", "password_configured"):
+            for marker in ("token_configured", "password_configured", "gmail_configured"):
                 integration.pop(marker, None)
         secrets_update = dict(update.pop("secrets", {})) if "secrets" in update else {}
         allowed = {
@@ -472,7 +477,7 @@ class ControlCenterService:
             )
         if secrets_update:
             secrets = self._load_secrets()
-            for key in ("telegram_bot_token", "smtp_password", "webhook_token"):
+            for key in ("telegram_bot_token", "smtp_password", "gmail_refresh_token", "webhook_token"):
                 if key in secrets_update:
                     value = str(secrets_update[key])
                     if value:

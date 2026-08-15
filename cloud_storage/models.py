@@ -86,12 +86,14 @@ class DiskConfiguration:
     identity_mountpoint: str = ""
     identity_device: str = ""
     identity_serial: str = ""
+    extra_fields: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> DiskConfiguration:
         value = value or {}
-        allowed = {item.name for item in cls.__dataclass_fields__.values()}
+        allowed = {item.name for item in cls.__dataclass_fields__.values()} - {"extra_fields"}
         safe = {key: val for key, val in value.items() if key in allowed}
+        safe["extra_fields"] = {key: val for key, val in value.items() if key not in allowed}
         try:
             safe["role"] = DiskRole(safe.get("role", DiskRole.UNCONFIGURED))
         except ValueError:
@@ -103,7 +105,9 @@ class DiskConfiguration:
         return cls(**safe)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        extras = value.pop("extra_fields", {})
+        return {**extras, **value}
 
 
 @dataclass(slots=True)
@@ -128,11 +132,14 @@ class AppSettings:
     known_disk_ids: list[str] = field(default_factory=list)
     ignored_disk_ids: list[str] = field(default_factory=list)
     disk_configurations: dict[str, DiskConfiguration] = field(default_factory=dict)
+    extra_fields: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> AppSettings:
         value = value or {}
         result = cls()
+        known = {item.name for item in cls.__dataclass_fields__.values()} - {"extra_fields"}
+        result.extra_fields = {key: val for key, val in value.items() if key not in known}
         result.schema_version = 5
         result.server_name = str(value.get("server_name", result.server_name))[:80]
         result.setup_complete = bool(value.get("setup_complete", False))
@@ -185,7 +192,7 @@ class AppSettings:
         return self.disk_configurations[disk_id]
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "schema_version": self.schema_version,
             "server_name": self.server_name,
             "setup_complete": self.setup_complete,
@@ -209,6 +216,7 @@ class AppSettings:
                 key: config.to_dict() for key, config in self.disk_configurations.items()
             },
         }
+        return {**self.extra_fields, **value}
 
 
 ROLE_LABELS: dict[DiskRole, str] = {

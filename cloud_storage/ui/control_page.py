@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -22,7 +22,23 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cloud_storage.google_oauth import authorize_gmail
 from cloud_storage.ui.widgets import make_header
+
+
+class GmailOAuthWorker(QThread):
+    completed = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, client_id: str) -> None:
+        super().__init__()
+        self.client_id = client_id
+
+    def run(self) -> None:
+        try:
+            self.completed.emit(authorize_gmail(self.client_id))
+        except Exception as exc:  # shown to the operator, never sent to Core
+            self.failed.emit(str(exc))
 
 
 class ControlCenterPage(QWidget):
@@ -259,6 +275,15 @@ class ControlCenterPage(QWidget):
         self.email_password.setPlaceholderText("оставьте пустым, чтобы не менять пароль")
         self.email_sender = QLineEdit()
         self.email_recipient = QLineEdit()
+        self.gmail_mode = QCheckBox("Gmail: вход через Google (рекомендуется)")
+        self.gmail_client_id = QLineEdit()
+        self.gmail_client_id.setPlaceholderText("…apps.googleusercontent.com")
+        self.gmail_sign_in = QPushButton("Войти в Google")
+        self.gmail_status = QLabel("Google ещё не подключён")
+        self.gmail_status.setProperty("muted", True)
+        self._gmail_refresh_token = ""
+        self._gmail_worker: GmailOAuthWorker | None = None
+        self.gmail_sign_in.clicked.connect(self._start_gmail_sign_in)
         self.webhook_enabled = QCheckBox("HTTPS webhook включён")
         self.webhook_url = QLineEdit()
         bot_form.addRow(self.telegram_enabled)
@@ -269,6 +294,9 @@ class ControlCenterPage(QWidget):
         bot_form.addRow("SMTP port", self.email_port)
         bot_form.addRow("SMTP user", self.email_user)
         bot_form.addRow("SMTP password", self.email_password)
+        bot_form.addRow(self.gmail_mode)
+        bot_form.addRow("Google OAuth Client ID", self.gmail_client_id)
+        bot_form.addRow(self.gmail_sign_in, self.gmail_status)
         bot_form.addRow("From", self.email_sender)
         bot_form.addRow("Кому по умолчанию", self.email_recipient)
         bot_form.addRow(self.webhook_enabled)
@@ -538,6 +566,12 @@ class ControlCenterPage(QWidget):
         self.email_user.setText(str(email.get("username", "")))
         self.email_sender.setText(str(email.get("sender", "")))
         self.email_recipient.setText(str(email.get("recipient", "")))
+        self.gmail_mode.setChecked(str(email.get("auth_mode", "password")) == "gmail_oauth")
+        self.gmail_client_id.setText(str(email.get("gmail_client_id", "")))
+        self.gmail_status.setText(
+            "Google подключён" if email.get("gmail_configured") else "Google ещё не подключён"
+        )
+        self._gmail_refresh_token = ""
         webhook = integrations.get("webhook", {})
         self.webhook_enabled.setChecked(bool(webhook.get("enabled")))
         self.webhook_url.setText(str(webhook.get("url", "")))
@@ -648,6 +682,8 @@ class ControlCenterPage(QWidget):
             secrets["telegram_bot_token"] = self.telegram_token.text()
         if self.email_password.text():
             secrets["smtp_password"] = self.email_password.text()
+        if self._gmail_refresh_token:
+            secrets["gmail_refresh_token"] = self._gmail_refresh_token
         return {
             "profile": self.profile.currentData(),
             "interface_mode": self.interface_mode.currentData(),
@@ -675,6 +711,8 @@ class ControlCenterPage(QWidget):
                     "sender": self.email_sender.text().strip(),
                     "recipient": self.email_recipient.text().strip(),
                     "starttls": True,
+                    "auth_mode": "gmail_oauth" if self.gmail_mode.isChecked() else "password",
+                    "gmail_client_id": self.gmail_client_id.text().strip(),
                 },
                 "webhook": {
                     "enabled": self.webhook_enabled.isChecked(),
@@ -707,6 +745,7 @@ class ControlCenterPage(QWidget):
             self.power_notify,
             self.telegram_enabled,
             self.email_enabled,
+            self.gmail_mode,
             self.webhook_enabled,
         ):
             checkbox.toggled.connect(self._settings_changed)
@@ -720,6 +759,7 @@ class ControlCenterPage(QWidget):
             self.email_password,
             self.email_sender,
             self.email_recipient,
+            self.gmail_client_id,
             self.webhook_url,
         ):
             line_edit.textChanged.connect(self._settings_changed)
@@ -737,6 +777,32 @@ class ControlCenterPage(QWidget):
         self.local_address.selectAll()
         self.local_address.copy()
         self.local_address.deselect()
+
+    def _start_gmail_sign_in(self) -> None:
+        if self._gmail_worker and self._gmail_worker.isRunning():
+            return
+        client_id = self.gmail_client_id.text().strip()
+        self.gmail_status.setText("Открываю Google в браузере…")
+        self.gmail_sign_in.setEnabled(False)
+        self._gmail_worker = GmailOAuthWorker(client_id)
+        self._gmail_worker.completed.connect(self._gmail_signed_in)
+        self._gmail_worker.failed.connect(self._gmail_sign_in_failed)
+        self._gmail_worker.finished.connect(lambda: self.gmail_sign_in.setEnabled(True))
+        self._gmail_worker.start()
+
+    def _gmail_signed_in(self, refresh_token: str) -> None:
+        self._gmail_refresh_token = refresh_token
+        self.gmail_mode.setChecked(True)
+        self.email_enabled.setChecked(True)
+        self.email_host.setText("smtp.gmail.com")
+        self.email_port.setValue(587)
+        if not self.email_sender.text().strip():
+            self.email_sender.setText(self.email_user.text().strip())
+        self.gmail_status.setText("Google подключён — сохраните настройки")
+        self._settings_changed()
+
+    def _gmail_sign_in_failed(self, message: str) -> None:
+        self.gmail_status.setText("Не удалось войти: " + message[:180])
 
     def _emit_preset(self) -> None:
         if self.profile.currentData():

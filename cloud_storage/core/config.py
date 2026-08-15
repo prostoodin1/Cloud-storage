@@ -5,7 +5,7 @@ import os
 import re
 import secrets
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -32,6 +32,7 @@ class CoreConfig:
     server_name: str = "Домашнее облако"
     max_upload_bytes: int = 20 * 1024**3
     pairing_ttl_seconds: int = 15 * 60
+    persisted_extra: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.host not in {"127.0.0.1", "::1", "localhost"}:
@@ -145,6 +146,15 @@ class CoreConfig:
         max_upload_gib = int(os.environ.get("CLOUD_STORAGE_MAX_UPLOAD_GIB", "20"))
         if not server_name:
             server_name = "Домашнее облако"
+        known = {item.name for item in cls.__dataclass_fields__.values()} - {
+            "data_directory",
+            "persisted_extra",
+        }
+        persisted_extra = {
+            key: value
+            for key, value in persisted.items()
+            if key not in known | {"schema_version"}
+        }
         return cls(
             data_directory=data_directory,
             host=host,
@@ -165,6 +175,7 @@ class CoreConfig:
             zrok_share_name=zrok_share_name,
             server_name=server_name[:80],
             max_upload_bytes=max(1, max_upload_gib) * 1024**3,
+            persisted_extra=persisted_extra,
         )
 
     @property
@@ -233,6 +244,7 @@ class CoreConfig:
             "zrok_share_name": self.zrok_share_name,
             "server_name": self.server_name,
         }
+        payload = {**self.persisted_extra, **payload}
         descriptor, name = tempfile.mkstemp(
             prefix="core-config-", suffix=".tmp", dir=self.data_directory
         )

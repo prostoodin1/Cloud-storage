@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -200,6 +201,27 @@ def _parse_update_info(
 
 
 class UpdateService:
+    @staticmethod
+    def _open_verified(request: urllib.request.Request, *, timeout: float):
+        """Open HTTPS using Windows trust first, then certifi if it is stale.
+
+        Packaged Python can occasionally miss the current Windows CA bundle.
+        The fallback still performs full certificate validation; it never accepts
+        a self-signed or otherwise invalid certificate.
+        """
+        try:
+            return urllib.request.urlopen(request, timeout=timeout)
+        except urllib.error.URLError as exc:
+            reason = str(getattr(exc, "reason", exc)).casefold()
+            if not any(marker in reason for marker in ("certificate", "ssl", "tls")):
+                raise
+            try:
+                import certifi
+            except ImportError:
+                raise
+            context = ssl.create_default_context(cafile=certifi.where())
+            return urllib.request.urlopen(request, timeout=timeout, context=context)
+
     def __init__(
         self,
         product: str,
@@ -263,7 +285,7 @@ class UpdateService:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:
+            with self._open_verified(request, timeout=15) as response:
                 _https_url(response.geturl())
                 raw = _read_limited(response, MAX_MANIFEST_BYTES)
         except urllib.error.HTTPError as exc:
@@ -319,7 +341,7 @@ class UpdateService:
             headers={"User-Agent": f"CloudStorage/{__version__} ({self.product}; Windows)"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as out:
+            with self._open_verified(request, timeout=60) as response, temporary.open("wb") as out:
                 _https_url(response.geturl())
                 while chunk := response.read(1024 * 1024):
                     received += len(chunk)

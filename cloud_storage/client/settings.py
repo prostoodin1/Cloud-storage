@@ -26,11 +26,12 @@ class ClientProfile:
     drive_enabled: bool = True
     drive_letter: str = "S"
     drive_letters: dict[str, str] = field(default_factory=dict)
+    extra_fields: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, value: dict | None) -> ClientProfile:
         value = value or {}
-        allowed = cls.__dataclass_fields__
+        allowed = {key: field for key, field in cls.__dataclass_fields__.items() if key != "extra_fields"}
         fields = {
             key: (
                 bool(value.get(key, field.default))
@@ -46,6 +47,7 @@ class ClientProfile:
             for space_id, letter in raw_letters.items()
             if isinstance(space_id, str) and isinstance(letter, str)
         } if isinstance(raw_letters, dict) else {}
+        fields["extra_fields"] = {key: item for key, item in value.items() if key not in allowed}
         return cls(**fields)
 
 
@@ -64,6 +66,7 @@ class ClientSettingsStore:
     def __init__(self, data_directory: Path | None = None) -> None:
         self.data_directory = data_directory or default_client_data_directory()
         self.path = self.data_directory / "client-settings.json"
+        self._document_extras: dict = {}
 
     def load(self) -> ClientProfile:
         profiles, active_profile_id = self._load_document()
@@ -124,6 +127,11 @@ class ClientSettingsStore:
                 raise ValueError("client settings root must be an object")
             raw_profiles = value.get("profiles")
             if isinstance(raw_profiles, list):
+                self._document_extras = {
+                    key: item
+                    for key, item in value.items()
+                    if key not in {"schema_version", "active_profile_id", "profiles"}
+                }
                 profiles = [
                     ClientProfile.from_dict(item)
                     for item in raw_profiles
@@ -135,11 +143,13 @@ class ClientSettingsStore:
                     active = profiles[0].profile_id
                 return profiles, active
             migrated = ClientProfile.from_dict(value)
+            self._document_extras = {}
             migrated.profile_id = "default"
             if not migrated.download_directory:
                 migrated.download_directory = str(default_download_directory())
             return [migrated], migrated.profile_id
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            self._document_extras = {}
             return [default], default.profile_id
 
     def save(self, profile: ClientProfile, *, make_active: bool = True) -> None:
@@ -229,9 +239,13 @@ class ClientSettingsStore:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
                 json.dump(
                     {
+                        **self._document_extras,
                         "schema_version": 4,
                         "active_profile_id": active_profile_id,
-                        "profiles": [asdict(item) for item in profiles],
+                        "profiles": [
+                            {**item.extra_fields, **{key: value for key, value in asdict(item).items() if key != "extra_fields"}}
+                            for item in profiles
+                        ],
                     },
                     handle,
                     ensure_ascii=False,

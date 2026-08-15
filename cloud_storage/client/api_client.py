@@ -80,15 +80,15 @@ class ClientApi:
         platform: str,
     ) -> dict[str, Any]:
         # Links and QR codes carry a one-time secret, not the user's password.
-        # Do not serialize an absent password as JSON null: older Core releases
-        # validate this field as a string and reject null before pairing starts.
+        # Legacy Core requires this field to exist and validates it as a string;
+        # an empty string is therefore the compatible representation of "no
+        # password". JSON null is rejected and omitting it is rejected too.
         payload: dict[str, Any] = {
             "code": code,
+            "password": password or "",
             "device_name": device_name,
             "platform": platform,
         }
-        if password:
-            payload["password"] = password
         return self._json_request(
             "/v1/pairing/redeem",
             method="POST",

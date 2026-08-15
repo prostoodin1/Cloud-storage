@@ -28,10 +28,10 @@ ln -s /Applications "$client_root/Applications"
 
 hdiutil create -quiet -volname "Cloud Storage Server" \
   -srcfolder "$server_root" -ov -format UDZO \
-  "$release_root/CloudStorage-Server-0.9.13-macOS.dmg"
+  "$release_root/CloudStorage-Server-0.9.14-macOS.dmg"
 hdiutil create -quiet -volname "Cloud Storage Client" \
   -srcfolder "$client_root" -ov -format UDZO \
-  "$release_root/CloudStorage-Client-0.9.13-macOS.dmg"
+  "$release_root/CloudStorage-Client-0.9.14-macOS.dmg"
 
 shasum -a 256 "$release_root"/*.dmg > "$release_root/SHA256SUMS.txt"
 echo "macOS packages ready: $release_root"

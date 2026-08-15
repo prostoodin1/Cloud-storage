@@ -1,6 +1,6 @@
 # Cloud Storage Server
 
-Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.13** завершает пользователей, одноразовые файлы входа, подробные права и логические пространства на физических дисках.
+Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.14** завершает пользователей, одноразовые файлы входа, подробные права и логические пространства на физических дисках.
 
 Текущая ветка также содержит полный слой **Idea 4**: системные профили, питание/ИБП,
 Telegram/email/webhook, 20 шаблонов автоматизаций, отчёты, безопасные контейнерные
@@ -11,12 +11,12 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 | № | Приложение | Файл |
 |---:|---|---|
-| 1 | Установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Server-Setup-0.9.13-windows-x64.exe) |
-| 2 | Установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Client-Setup-0.9.13-windows-x64.exe) |
-| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Desktop-Client-0.9.13-windows-x64.zip) |
-| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Server-Manager-0.9.13-windows-x64.zip) |
-| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Mobile-Client-0.9.13-android.apk) |
-| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.13/CloudStorage-Mobile-Manager-0.9.13-android.apk) |
+| 1 | Постоянный установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Server-Installer-windows-x64.exe) |
+| 2 | Постоянный установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Client-Installer-windows-x64.exe) |
+| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Desktop-Client-0.9.14-windows-x64.zip) |
+| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Server-Manager-0.9.14-windows-x64.zip) |
+| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Mobile-Client-0.9.14-android.apk) |
+| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Mobile-Manager-0.9.14-android.apk) |
 
 ## Шесть приложений проекта
 
@@ -24,9 +24,12 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 **[Открыть каталог всех приложений](apps/README.md)**
 
-## Что работает в версии 0.9.13
+## Что работает в версии 0.9.14
 
-- Client принимает непрозрачный код `CS2…`, файл, ссылку или QR и не показывает IP, URL и TLS-отпечаток в обычном интерфейсе;
+- обычный вход Client использует только логин и пароль, а первый вход через интернет — одноразовую ссылку, файл или QR без пароля;
+- ссылка и QR содержат основной и резервные адреса сервера и не показывают пользователю IP, URL или TLS-отпечаток;
+- Server Manager защищённо сохраняет созданные и сброшенные пароли средствами учётной записи Windows, чтобы администратор мог показать и скопировать пароль;
+- постоянные Server/Client Installer сами получают подписанный каталог и позволяют установить последнюю либо выбранную старую версию;
 - `.cloud-access.json` не содержит постоянного пароля, действует до 7 дней, используется один раз и создаёт ожидающее подтверждения устройство;
 - пользователи имеют email, редактируемую роль, квоту, состояние и подробные права; пароль хранится только как Argon2id-хеш;
 - SMTP отправляет файл входа настоящим вложением;

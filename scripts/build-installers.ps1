@@ -28,6 +28,26 @@ if ($LASTEXITCODE -ne 0) { throw 'Client installer build failed.' }
 & $compiler "/DBuildRoot=$env:CLOUD_STORAGE_BUILD_DIST" (Join-Path $projectRoot 'packaging\CloudStorageServer.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Server installer build failed.' }
 $outputs = Join-Path $projectRoot 'outputs'
+$bootstrapDist = Join-Path $releaseRoot 'installer-dist'
+$bootstrapWork = Join-Path $releaseRoot 'installer-build'
+$bootstrapSpec = Join-Path $releaseRoot 'installer-spec'
+New-Item -ItemType Directory -Path $bootstrapDist, $bootstrapWork, $bootstrapSpec -Force | Out-Null
+& $python -m PyInstaller --noconfirm --clean --onefile --windowed `
+    --name 'CloudStorage-Client-Installer-windows-x64' `
+    --icon (Join-Path $projectRoot 'assets\cloud-storage.ico') `
+    --distpath $bootstrapDist --workpath (Join-Path $bootstrapWork 'client') `
+    --specpath $bootstrapSpec `
+    (Join-Path $projectRoot 'cloud_storage\installer\client_main.py')
+if ($LASTEXITCODE -ne 0) { throw 'Stable client installer build failed.' }
+& $python -m PyInstaller --noconfirm --clean --onefile --windowed `
+    --name 'CloudStorage-Server-Installer-windows-x64' `
+    --icon (Join-Path $projectRoot 'assets\cloud-storage.ico') `
+    --distpath $bootstrapDist --workpath (Join-Path $bootstrapWork 'server') `
+    --specpath $bootstrapSpec `
+    (Join-Path $projectRoot 'cloud_storage\installer\server_main.py')
+if ($LASTEXITCODE -ne 0) { throw 'Stable server installer build failed.' }
+Copy-Item -LiteralPath (Join-Path $bootstrapDist 'CloudStorage-Client-Installer-windows-x64.exe') -Destination $outputs -Force
+Copy-Item -LiteralPath (Join-Path $bootstrapDist 'CloudStorage-Server-Installer-windows-x64.exe') -Destination $outputs -Force
 $clientZip = Join-Path $outputs "CloudStorage-Desktop-Client-$version-windows-x64.zip"
 $serverZip = Join-Path $outputs "CloudStorage-Server-Manager-$version-windows-x64.zip"
 Compress-Archive -Path (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageClient') -DestinationPath $clientZip -CompressionLevel Optimal -Force
@@ -38,4 +58,4 @@ Compress-Archive -Path @(
     (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageLegacyCore'),
     (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageServerService')
 ) -DestinationPath $serverZip -CompressionLevel Optimal -Force
-Write-Host "Installers ready in $projectRoot\outputs"
+Write-Host "Stable online installers and versioned setup payloads ready in $projectRoot\outputs"

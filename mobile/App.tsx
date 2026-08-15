@@ -681,7 +681,7 @@ function MainApp() {
   }
 
   if (stage === 'login') {
-    return <><StatusBar style="light" /><LoginScreen onConnected={connected} /></>;
+    return <><StatusBar style="light" /><LoginScreen onConnected={connected} initialServerUrl={connection?.serverUrl ?? ''} /></>;
   }
 
   if (!connection) return null;

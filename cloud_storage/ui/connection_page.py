@@ -40,8 +40,8 @@ class ConnectionCodePanel(QFrame):
         title = QLabel("Код подключения клиента")
         title.setStyleSheet("font-size: 18px; font-weight: 700;")
         description = QLabel(
-            "Выберите пользователя и создайте один код. Человек вставит его во вкладке "
-            "«Подключиться» — адрес сервера и защита TLS подставятся автоматически."
+            "Обычный вход использует только логин и пароль. Для первого подключения "
+            "из другой сети создайте одноразовую ссылку или QR без пароля."
         )
         description.setWordWrap(True)
         description.setProperty("muted", True)
@@ -88,17 +88,21 @@ class ConnectionCodePanel(QFrame):
         self.generated_username = QLineEdit()
         self.generated_username.setReadOnly(True)
         self.generated_username.setPlaceholderText("Логин пользователя")
+        self.generated_password = QLineEdit()
+        self.generated_password.setReadOnly(True)
+        self.generated_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.generated_password.setPlaceholderText("Создайте или сбросьте пароль")
         self.code = QLineEdit()
         self.code.setReadOnly(True)
         self.code.setPlaceholderText("Здесь появится код сервера вида CS2.…")
         self.code.setMinimumHeight(42)
-        self.copy_button = QPushButton("Скопировать логин и код")
+        self.copy_button = QPushButton("Скопировать логин и пароль")
         self.copy_button.setEnabled(False)
         self.copy_button.clicked.connect(self.copy_code)
         credentials_layout.addRow("Логин", self.generated_username)
-        credentials_layout.addRow("Код", self.code)
+        credentials_layout.addRow("Пароль", self.generated_password)
         credentials_layout.addRow("", self.copy_button)
-        self.access_tabs.addTab(credentials_tab, "1. Логин и код")
+        self.access_tabs.addTab(credentials_tab, "1. Логин и пароль")
 
         link_tab = QWidget()
         link_layout = QVBoxLayout(link_tab)
@@ -219,6 +223,35 @@ class ConnectionCodePanel(QFrame):
                 )
             )
             row.addWidget(copy_login)
+            managed_password = str(item.get("managed_password") or "")
+            password_value = QLineEdit(managed_password or "Пароль не сохранён в Manager")
+            password_value.setReadOnly(True)
+            password_value.setEchoMode(QLineEdit.EchoMode.Password)
+            password_value.setMinimumWidth(190)
+            show_password = QPushButton("Показать")
+            show_password.setEnabled(bool(managed_password))
+            show_password.clicked.connect(
+                lambda _checked=False, field=password_value, button=show_password: (
+                    field.setEchoMode(
+                        QLineEdit.EchoMode.Normal
+                        if field.echoMode() == QLineEdit.EchoMode.Password
+                        else QLineEdit.EchoMode.Password
+                    ),
+                    button.setText(
+                        "Скрыть" if field.echoMode() == QLineEdit.EchoMode.Normal else "Показать"
+                    ),
+                )
+            )
+            copy_password = QPushButton("Копировать пароль")
+            copy_password.setEnabled(bool(managed_password))
+            copy_password.clicked.connect(
+                lambda _checked=False, value=managed_password: (
+                    QGuiApplication.clipboard().setText(value)
+                )
+            )
+            row.addWidget(password_value)
+            row.addWidget(show_password)
+            row.addWidget(copy_password)
             row.addWidget(edit)
             row.addWidget(password)
             row.addWidget(email_access)
@@ -254,7 +287,6 @@ class ConnectionCodePanel(QFrame):
 
     def show_code(self, code: str, detail: str, pairing_link: str = "") -> None:
         self.code.setText(code)
-        self.copy_button.setEnabled(bool(code))
         try:
             locator = parse_server_code(code)
             if locator is None:
@@ -272,6 +304,9 @@ class ConnectionCodePanel(QFrame):
                 username = locator.username
                 link = pairing_link
             self.generated_username.setText(username)
+            self.copy_button.setEnabled(
+                bool(username and self.generated_password.text())
+            )
             self.invitation_link.setText(link)
             self.copy_link_button.setEnabled(bool(link))
             self.qr_label.setText("")
@@ -290,9 +325,12 @@ class ConnectionCodePanel(QFrame):
         self.result_detail.setText(message)
 
     def copy_code(self) -> None:
-        if not self.code.text():
+        if not self.generated_username.text() or not self.generated_password.text():
             return
-        payload = f"Логин: {self.generated_username.text()}\nКод: {self.code.text()}"
+        payload = (
+            f"Логин: {self.generated_username.text()}\n"
+            f"Пароль: {self.generated_password.text()}"
+        )
         QGuiApplication.clipboard().setText(payload)
         self.copy_button.setText("Скопировано")
 
@@ -327,6 +365,7 @@ class ConnectionCodePanel(QFrame):
             self.show_error("Сначала создайте пользователя в настройках сервера.")
             return
         mode = str(self.scope.currentData())
+        self.generated_password.setText(str(user.get("managed_password") or ""))
         endpoint, _fingerprint = self.selected_endpoint(mode)
         if not endpoint:
             if mode == "internet":

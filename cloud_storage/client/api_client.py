@@ -40,12 +40,12 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
     def connect(self) -> None:
         super().connect()
         if self.sock is None:
-            raise ClientConnectionError("TLS connection has no socket")
+            raise ClientConnectionError("Защищённое соединение с сервером не установлено")
         certificate = self.sock.getpeercert(binary_form=True)
         actual = hashlib.sha256(certificate).hexdigest().casefold()
         if actual != self.certificate_fingerprint:
             self.close()
-            raise CertificateMismatch("server certificate fingerprint does not match")
+            raise CertificateMismatch("Сертификат сервера не совпадает с приглашением")
 
 
 class ClientApi:
@@ -66,7 +66,7 @@ class ClientApi:
                 character not in "0123456789abcdef" for character in self.certificate_fingerprint
             )
         ):
-            raise ValueError("certificate fingerprint must be 64 hexadecimal characters")
+            raise ValueError("Повреждены данные защиты сервера в приглашении")
         self._parsed = urllib.parse.urlsplit(self.server_url)
 
     def health(self) -> dict[str, Any]:
@@ -358,7 +358,10 @@ class ClientApi:
         except (ClientApiError, CertificateMismatch):
             raise
         except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
-            raise ClientConnectionError("server is not reachable") from exc
+            raise ClientConnectionError(
+                "Сервер недоступен. Проверьте, что серверное ядро запущено и выбранный "
+                "способ доступа — локальная сеть или интернет — сейчас включён."
+            ) from exc
         finally:
             connection.close()
 

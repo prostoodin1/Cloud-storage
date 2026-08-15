@@ -19,6 +19,7 @@ class PairingInvitation:
     server_url: str = ""
     certificate_fingerprint: str = ""
     username: str = ""
+    alternate_addresses: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +163,8 @@ def build_pairing_uri(
     server_url: str = "",
     certificate_fingerprint: str = "",
     username: str = "",
+    *,
+    alternate_addresses: list[str] | tuple[str, ...] = (),
 ) -> str:
     parameters = {"code": code.strip().upper()}
     if server_url:
@@ -176,7 +179,14 @@ def build_pairing_uri(
         if len(clean_username) > 128:
             raise ValueError("invalid username")
         parameters["username"] = clean_username
-    return "cloudstorage://pair?" + urllib.parse.urlencode(parameters)
+    alternatives: list[str] = []
+    for address in alternate_addresses:
+        validated = _validated_invitation("SERVER00", str(address), "", "")
+        if validated.server_url != server_url.strip().rstrip("/"):
+            alternatives.append(validated.server_url)
+    if alternatives:
+        parameters["alt"] = list(dict.fromkeys(alternatives))[:8]
+    return "cloudstorage://pair?" + urllib.parse.urlencode(parameters, doseq=True)
 
 
 def parse_pairing_uri(value: str) -> PairingInvitation | None:
@@ -200,7 +210,21 @@ def parse_pairing_uri(value: str) -> PairingInvitation | None:
     username = _single(parameters, "username", required=False).strip()
     if len(username) > 128:
         raise ValueError("invalid username in invitation")
-    return PairingInvitation(code, server_url, fingerprint, username)
+    raw_alternatives = parameters.get("alt", [])
+    if len(raw_alternatives) > 8:
+        raise ValueError("too many alternate addresses in invitation")
+    alternatives: list[str] = []
+    for address in raw_alternatives:
+        validated = _validated_invitation("SERVER00", address, "", "")
+        if validated.server_url != server_url:
+            alternatives.append(validated.server_url)
+    return PairingInvitation(
+        code,
+        server_url,
+        fingerprint,
+        username,
+        tuple(dict.fromkeys(alternatives)),
+    )
 
 
 def _validated_invitation(

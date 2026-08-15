@@ -38,7 +38,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Создать ярлык Server Manager на рабочем столе"; GroupDescription: "Дополнительные ярлыки:"; Flags: checkedonce
-Name: "privatefirewall"; Description: "Разрешить клиентский HTTPS и обнаружение сервера в частной сети"; GroupDescription: "Сеть Windows:"; Flags: checkedonce
+Name: "privatefirewall"; Description: "Разрешить клиентский HTTPS и обнаружение только из локальной подсети"; GroupDescription: "Сеть Windows:"; Flags: checkedonce
 
 [Dirs]
 Name: "{commonappdata}\CloudStorage"; Permissions: admins-full system-full
@@ -61,8 +61,12 @@ Filename: "{app}\CloudStorageServerCore\CloudStorageServerCore.exe"; Parameters:
 Filename: "{app}\Service\CloudStorageServerService.exe"; Parameters: "--startup auto install"; StatusMsg: "Устанавливаем службу Cloud Storage…"; Flags: runhidden waituntilterminated
 Filename: "{sys}\sc.exe"; Parameters: "config CloudStorageServerCore start= auto"; Flags: runhidden waituntilterminated
 Filename: "{sys}\sc.exe"; Parameters: "failure CloudStorageServerCore reset= 86400 actions= restart/5000/restart/15000/restart/60000"; Flags: runhidden waituntilterminated
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Cloud Storage HTTPS (Private)"" dir=in action=allow protocol=TCP localport=8766 profile=private"; Flags: runhidden waituntilterminated; Tasks: privatefirewall
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Cloud Storage Discovery (Private)"" dir=in action=allow protocol=UDP localport=47777 profile=private"; Flags: runhidden waituntilterminated; Tasks: privatefirewall
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Cloud Storage HTTPS (Private)"""; Flags: runhidden waituntilterminated; Tasks: privatefirewall
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Cloud Storage Discovery (Private)"""; Flags: runhidden waituntilterminated; Tasks: privatefirewall
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Cloud Storage HTTPS (Local subnet)"""; Flags: runhidden waituntilterminated; Tasks: privatefirewall
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Cloud Storage Discovery (Local subnet)"""; Flags: runhidden waituntilterminated; Tasks: privatefirewall
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Cloud Storage HTTPS (Local subnet)"" dir=in action=allow protocol=TCP localport=8766 profile=any remoteip=localsubnet"; Flags: runhidden waituntilterminated; Tasks: privatefirewall
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Cloud Storage Discovery (Local subnet)"" dir=in action=allow protocol=UDP localport=47777 profile=any remoteip=localsubnet"; Flags: runhidden waituntilterminated; Tasks: privatefirewall
 Filename: "{sys}\sc.exe"; Parameters: "start CloudStorageServerCore"; StatusMsg: "Запускаем серверную службу…"; Flags: runhidden waituntilterminated
 Filename: "{app}\Manager\CloudStorageServerManager.exe"; Description: "Открыть Cloud Storage Server Manager"; Flags: nowait postinstall skipifsilent runascurrentuser shellexec
 
@@ -71,6 +75,8 @@ Filename: "{sys}\net.exe"; Parameters: "stop CloudStorageServerCore /y"; Flags: 
 Filename: "{app}\Service\CloudStorageServerService.exe"; Parameters: "remove"; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "RemoveCloudStorageServerCore"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Cloud Storage HTTPS (Private)"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveCloudStorageHttpsFirewall"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Cloud Storage Discovery (Private)"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveCloudStorageDiscoveryFirewall"
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Cloud Storage HTTPS (Local subnet)"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveCloudStorageHttpsLocalSubnetFirewall"
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Cloud Storage Discovery (Local subnet)"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveCloudStorageDiscoveryLocalSubnetFirewall"
 
 [Code]
 function IsServerServiceInstalled: Boolean;

@@ -2,6 +2,7 @@ param(
     [string]$Version = "0.9.13",
     [string]$Repository = "prostoodin1/Cloud-storage",
     [string]$OutputDirectory = "",
+    [string]$PayloadDirectory = "",
     [string]$PrivateKey = "",
     [string]$NotesFile = ""
 )
@@ -10,16 +11,21 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $output = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $projectRoot "output" }
+$payloads = if ($PayloadDirectory) { $PayloadDirectory } else { Join-Path $projectRoot "outputs" }
 $key = if ($PrivateKey) { $PrivateKey } else { Join-Path (Split-Path $projectRoot -Parent) "private\cloud-storage-update-ed25519.pem" }
 $notes = if ($NotesFile) { $NotesFile } else { Join-Path $projectRoot "RELEASE_NOTES_$Version.md" }
 $tag = "v$Version"
 $expectedUserFiles = @(
-    "CloudStorage-Server-Setup-$Version-windows-x64.exe",
-    "CloudStorage-Client-Setup-$Version-windows-x64.exe",
+    "CloudStorage-Server-Installer-windows-x64.exe",
+    "CloudStorage-Client-Installer-windows-x64.exe",
     "CloudStorage-Desktop-Client-$Version-windows-x64.zip",
     "CloudStorage-Server-Manager-$Version-windows-x64.zip",
     "CloudStorage-Mobile-Client-$Version-android.apk",
     "CloudStorage-Mobile-Manager-$Version-android.apk"
+)
+$payloadNames = @(
+    "CloudStorage-Server-Setup-$Version-windows-x64.exe",
+    "CloudStorage-Client-Setup-$Version-windows-x64.exe"
 )
 $catalogNames = @(
     "cloud-storage-client-catalog.json",
@@ -33,6 +39,12 @@ foreach ($required in @($python, $key, $notes)) {
 }
 if (-not (Test-Path -LiteralPath $output -PathType Container)) {
     throw "Output directory is missing: $output"
+}
+foreach ($payload in $payloadNames) {
+    $path = Join-Path $payloads $payload
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Versioned setup payload is missing: $path"
+    }
 }
 $actualUserFiles = @(Get-ChildItem -LiteralPath $output -File | Select-Object -ExpandProperty Name)
 $unexpected = @($actualUserFiles | Where-Object { $_ -notin $expectedUserFiles })
@@ -52,8 +64,8 @@ try {
     & gh release download --repo $Repository --pattern "cloud-storage-*-catalog.json" --dir $temporary
     if ($LASTEXITCODE -ne 0) { throw "Existing signed catalogs could not be downloaded" }
 
-    $clientInstaller = Join-Path $output "CloudStorage-Client-Setup-$Version-windows-x64.exe"
-    $serverInstaller = Join-Path $output "CloudStorage-Server-Setup-$Version-windows-x64.exe"
+    $clientInstaller = Join-Path $payloads "CloudStorage-Client-Setup-$Version-windows-x64.exe"
+    $serverInstaller = Join-Path $payloads "CloudStorage-Server-Setup-$Version-windows-x64.exe"
     $baseUrl = "https://github.com/$Repository/releases/download/$tag"
     $clientManifest = Join-Path $temporary "client-$Version.json"
     $serverManifest = Join-Path $temporary "server-$Version.json"
@@ -78,16 +90,18 @@ try {
 
     & gh release create $tag --repo $Repository --title "Cloud Storage $Version" --notes-file $notes --draft
     if ($LASTEXITCODE -ne 0) { throw "Draft release could not be created" }
-    $assets = @($expectedUserFiles | ForEach-Object { Join-Path $output $_ }) + @($clientCatalog, $serverCatalog)
+    $assets = @($expectedUserFiles | ForEach-Object { Join-Path $output $_ }) + `
+        @($payloadNames | ForEach-Object { Join-Path $payloads $_ }) + `
+        @($clientCatalog, $serverCatalog)
     & gh release upload $tag --repo $Repository @assets
     if ($LASTEXITCODE -ne 0) { throw "Release asset upload failed; the release remains a draft" }
 
     $publishedAssets = & gh release view $tag --repo $Repository --json assets | ConvertFrom-Json
     $assetNames = @($publishedAssets.assets | Select-Object -ExpandProperty name)
-    $expectedAssets = @($expectedUserFiles + $catalogNames)
+    $expectedAssets = @($expectedUserFiles + $payloadNames + $catalogNames)
     $missingAssets = @($expectedAssets | Where-Object { $_ -notin $assetNames })
     $extraAssets = @($assetNames | Where-Object { $_ -notin $expectedAssets })
-    if ($missingAssets.Count -or $extraAssets.Count -or $assetNames.Count -ne 8) {
+    if ($missingAssets.Count -or $extraAssets.Count -or $assetNames.Count -ne 10) {
         throw "Draft verification failed; release remains private. Missing: $($missingAssets -join ', '); extra: $($extraAssets -join ', ')"
     }
     foreach ($file in $expectedUserFiles) {
@@ -95,10 +109,15 @@ try {
         $remoteSize = [int64](($publishedAssets.assets | Where-Object name -eq $file).size)
         if ($localSize -ne $remoteSize) { throw "Uploaded size mismatch for $file" }
     }
+    foreach ($file in $payloadNames) {
+        $localSize = (Get-Item -LiteralPath (Join-Path $payloads $file)).Length
+        $remoteSize = [int64](($publishedAssets.assets | Where-Object name -eq $file).size)
+        if ($localSize -ne $remoteSize) { throw "Uploaded payload size mismatch for $file" }
+    }
 
     & gh release edit $tag --repo $Repository --draft=false --latest
     if ($LASTEXITCODE -ne 0) { throw "Draft is complete but could not be published" }
-    Write-Host "Published $tag atomically with six user files and two signed catalogs."
+    Write-Host "Published $tag atomically with six user files, two setup payloads and two signed catalogs."
 }
 finally {
     if (Test-Path -LiteralPath $temporary) {

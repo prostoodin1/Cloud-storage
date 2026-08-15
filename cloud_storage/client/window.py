@@ -62,7 +62,7 @@ from cloud_storage.client.settings import (
 from cloud_storage.client.transfers import TransferRecord, TransferStore
 from cloud_storage.help.knowledge import KnowledgeBase
 from cloud_storage.help.page import HelpPage
-from cloud_storage.pairing import parse_pairing_uri, parse_server_code
+from cloud_storage.pairing import build_pairing_uri, parse_pairing_uri
 from cloud_storage.ui.theme import create_app_icon
 from cloud_storage.ui.update_page import UpdatePage
 from cloud_storage.ui.widgets import clear_layout, format_bytes, make_header
@@ -304,13 +304,11 @@ class ClientWindow(QMainWindow):
         self.fingerprint.setPlaceholderText("SHA-256 сертификата — для HTTPS")
         self.fingerprint.setVisible(False)
         self.server_code = QLineEdit()
-        self.server_code.setPlaceholderText("Код CS2… из Server Manager")
-        self.server_code.setMaxLength(4096)
+        self.server_code.setVisible(False)
         self.username = QLineEdit()
         self.username.setPlaceholderText("Логин, созданный администратором")
         login_form.addRow("Логин", self.username)
         login_form.addRow("Сохранённый сервер", profile_row)
-        login_form.addRow("Код сервера", self.server_code)
         self.connection_modes.addWidget(login_page)
 
         link_page = QWidget()
@@ -348,7 +346,8 @@ class ClientWindow(QMainWindow):
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         self.password.setPlaceholderText("Минимум 10 символов")
         self.device_name = QLineEdit(platform.node() or "Мой компьютер")
-        common_form.addRow("Пароль", self.password)
+        self.password_label = QLabel("Пароль")
+        common_form.addRow(self.password_label, self.password)
         common_form.addRow("Название устройства", self.device_name)
         card_layout.addLayout(common_form)
         enrollment_controls = QHBoxLayout()
@@ -399,6 +398,8 @@ class ClientWindow(QMainWindow):
                 if safe_index == 1
                 else "Подключиться по QR"
             )
+            self.password_label.setVisible(safe_index == 0)
+            self.password.setVisible(safe_index == 0)
 
     def connect_selected_invitation(self) -> None:
         if self.connection_modes.currentIndex() == 2:
@@ -662,7 +663,16 @@ class ClientWindow(QMainWindow):
             QMessageBox.warning(self, "Файл не импортирован", str(exc))
             return
         self.server_url.setText(address)
-        self.pairing_code.setText(code)
+        login_link = str(value.get("login_link") or "").strip()
+        if not login_link:
+            login_link = build_pairing_uri(
+                code,
+                address,
+                fingerprint,
+                username,
+                alternate_addresses=[str(item) for item in addresses[1:]],
+            )
+        self.pairing_code.setText(login_link)
         self.username.setText(username)
         self.fingerprint.setText(fingerprint)
         self._set_connection_mode(1)
@@ -814,25 +824,24 @@ class ClientWindow(QMainWindow):
             if invitation.username:
                 self.username.setText(invitation.username)
             raw_code = invitation.code
+            alternate_addresses = invitation.alternate_addresses
+        else:
+            alternate_addresses = ()
         try:
             server_url = validate_server_url(self.server_url.text())
-            api = ClientApi(server_url, certificate_fingerprint=self.fingerprint.text())
         except ValueError as exc:
             QMessageBox.warning(self, "Неверные параметры подключения", str(exc))
             return
         code = raw_code
-        password = self.password.text()
         device_name = self.device_name.text().strip()
         if (
             len(code.replace("-", "")) != 8
-            or (password and len(password) < 10)
             or not device_name
         ):
             QMessageBox.warning(
                 self,
                 "Проверьте данные",
-                "Нужны восьмизначный код и название устройства. Для старого приглашения "
-                "также нужен пароль минимум из 10 символов.",
+                "Нужны рабочая одноразовая ссылка или QR и название устройства.",
             )
             return
         self.connect_button.setEnabled(False)
@@ -840,9 +849,38 @@ class ClientWindow(QMainWindow):
         profile_id = self.profile.profile_id
 
         def pair() -> dict[str, Any]:
-            health = api.health()
-            result = api.redeem_invitation(code, password, device_name, platform.system())
-            return {"health": health, "pairing": result, "profile_id": profile_id}
+            candidates = [server_url, *alternate_addresses]
+            errors: list[str] = []
+            for candidate in dict.fromkeys(candidates):
+                candidate_fingerprint = (
+                    self.fingerprint.text()
+                    if candidate.startswith("https://")
+                    and candidate.rsplit(":", 1)[-1] == server_url.rsplit(":", 1)[-1]
+                    else ""
+                )
+                candidate_api = ClientApi(
+                    candidate,
+                    certificate_fingerprint=candidate_fingerprint,
+                )
+                try:
+                    health = candidate_api.health()
+                except (ClientApiError, ClientConnectionError, ValueError) as exc:
+                    errors.append(str(exc))
+                    continue
+                result = candidate_api.redeem_invitation(
+                    code, None, device_name, platform.system()
+                )
+                return {
+                    "health": health,
+                    "pairing": result,
+                    "profile_id": profile_id,
+                    "server_url": candidate,
+                    "fingerprint": candidate_fingerprint,
+                }
+            raise ClientConnectionError(
+                "Сервер недоступен ни по одному адресу из ссылки. "
+                "Для интернета включите zrok, для локальной сети проверьте, что телефон и сервер в одной Wi-Fi сети."
+            )
 
         self._start_task(
             pair,
@@ -851,31 +889,6 @@ class ClientWindow(QMainWindow):
         )
 
     def login_new_device(self) -> None:
-        raw_server_code = self.server_code.text().strip()
-        if raw_server_code:
-            try:
-                locator = parse_server_code(raw_server_code)
-            except ValueError as exc:
-                QMessageBox.warning(self, "Неверный код сервера", str(exc))
-                return
-            if locator is None:
-                QMessageBox.warning(
-                    self,
-                    "Неверный код сервера",
-                    "Вставьте код вида CS2… из Server Manager.",
-                )
-                return
-            self.server_url.setText(locator.server_url)
-            self.fingerprint.setText(locator.certificate_fingerprint)
-            if locator.username and not self.username.text().strip():
-                self.username.setText(locator.username)
-        elif not self.profile.server_url:
-            QMessageBox.warning(
-                self,
-                "Нужен код сервера",
-                "Для первого входа вставьте код CS2… из Server Manager.",
-            )
-            return
         username = self.username.text().strip().casefold()
         password = self.password.text()
         device_name = self.device_name.text().strip()
@@ -886,12 +899,7 @@ class ClientWindow(QMainWindow):
                 "Нужны логин, пароль минимум из 10 символов и название устройства.",
             )
             return
-        try:
-            server_url = validate_server_url(self.server_url.text())
-            api = ClientApi(server_url, certificate_fingerprint=self.fingerprint.text())
-        except ValueError as exc:
-            QMessageBox.warning(self, "Неверные параметры подключения", str(exc))
-            return
+        server_url = validate_server_url(self.server_url.text())
         self.account_login_button.setEnabled(False)
         self.connection_detail.setText(
             "Проверяем логин и отправляем запрос на подтверждение устройства…"
@@ -899,9 +907,38 @@ class ClientWindow(QMainWindow):
         profile_id = self.profile.profile_id
 
         def login() -> dict[str, Any]:
-            health = api.health()
-            result = api.login_new_device(username, password, device_name, platform.system())
-            return {"health": health, "pairing": result, "profile_id": profile_id}
+            candidates: list[tuple[str, str]] = [
+                (server_url, self.fingerprint.text().strip())
+            ]
+            try:
+                candidates.extend(
+                    (item.url, item.fingerprint) for item in discover_servers()
+                )
+            except OSError:
+                pass
+            for candidate, candidate_fingerprint in dict.fromkeys(candidates):
+                candidate_api = ClientApi(
+                    candidate,
+                    certificate_fingerprint=candidate_fingerprint,
+                )
+                try:
+                    health = candidate_api.health()
+                except (ClientApiError, ClientConnectionError, ValueError):
+                    continue
+                result = candidate_api.login_new_device(
+                    username, password, device_name, platform.system()
+                )
+                return {
+                    "health": health,
+                    "pairing": result,
+                    "profile_id": profile_id,
+                    "server_url": candidate,
+                    "fingerprint": candidate_fingerprint,
+                }
+            raise ClientConnectionError(
+                "Сервер не найден. В локальной сети он определяется автоматически; "
+                "для первого входа через интернет используйте одноразовую ссылку или QR."
+            )
 
         self._start_task(
             login,
@@ -924,8 +961,14 @@ class ClientWindow(QMainWindow):
             QMessageBox.critical(self, "Токен не сохранён", str(exc))
             return
         self.token = token
-        self.profile.server_url = self.server_url.text().strip().rstrip("/")
-        self.profile.certificate_fingerprint = self.fingerprint.text().strip()
+        selected_url = str(payload.get("server_url") or self.server_url.text()).rstrip("/")
+        selected_fingerprint = str(
+            payload.get("fingerprint") or self.fingerprint.text()
+        ).strip()
+        self.server_url.setText(selected_url)
+        self.fingerprint.setText(selected_fingerprint)
+        self.profile.server_url = selected_url
+        self.profile.certificate_fingerprint = selected_fingerprint
         health = payload.get("health", {})
         self.profile.server_name = str(health.get("server_name") or "Домашнее облако")
         self.profile.device_id = str(device.get("id", ""))

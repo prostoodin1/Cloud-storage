@@ -137,7 +137,7 @@ export class CloudApi {
 
   redeemInvitation(
     code: string,
-    password: string,
+    password: string | null,
     deviceName: string,
     platform: string,
   ): Promise<PairingResult> {
@@ -145,7 +145,12 @@ export class CloudApi {
       '/v1/pairing/redeem',
       {
         method: 'POST',
-        body: JSON.stringify({ code, password, device_name: deviceName, platform }),
+        body: JSON.stringify({
+          code,
+          ...(password ? { password } : {}),
+          device_name: deviceName,
+          platform,
+        }),
       },
       false,
     );

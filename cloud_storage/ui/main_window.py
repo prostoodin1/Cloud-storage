@@ -45,6 +45,7 @@ from cloud_storage.services.core_client import (
     CoreUnavailable,
 )
 from cloud_storage.services.disk_service import DiskService, mark_missing_disks
+from cloud_storage.services.password_vault import ManagerPasswordVault
 from cloud_storage.services.settings_store import SettingsStore
 from cloud_storage.ui.connection_page import ConnectionPage
 from cloud_storage.ui.control_page import ControlCenterPage
@@ -93,6 +94,7 @@ class MainWindow(QMainWindow):
         self.store = store or SettingsStore()
         self.settings: AppSettings = self.store.load()
         self.audit = AuditLog(self.store.data_directory)
+        self.password_vault = ManagerPasswordVault(self.store.data_directory)
         self.knowledge = KnowledgeBase(self.store.data_directory / "knowledge.db")
         self.disk_service = disk_service or DiskService()
         environment_config = CoreConfig.from_environment()
@@ -544,6 +546,14 @@ class MainWindow(QMainWindow):
 
     def _refresh_pages(self) -> None:
         events = self.audit.recent()
+        users_for_ui = [
+            {
+                **user,
+                "managed_password": self.password_vault.load(str(user.get("id") or "")),
+            }
+            for user in self.core_users
+            if user.get("id")
+        ]
         self.dashboard_page.update_data(
             self.disks,
             self.settings,
@@ -563,14 +573,14 @@ class MainWindow(QMainWindow):
         )
         self.connection_page.panel.set_data(
             self.core_health,
-            self.core_users,
+            users_for_ui,
             self.core_tunnels,
         )
         self.settings_page.load_settings(self.settings, str(self.store.path))
         self.settings_page.update_core_data(
             self.core_health,
             self.core_summary,
-            self.core_users,
+            users_for_ui,
             self.core_devices,
             self.core_storage_roots,
             self.core_maintenance_jobs,
@@ -764,6 +774,7 @@ class MainWindow(QMainWindow):
         self.audit.record(
             "core.user.created", f"Создан пользователь {created['user']['display_name']}"
         )
+        self.password_vault.store(str(created["user"]["id"]), str(values["password"]))
         self._show_invitation(
             invitation["id"],
             created["user"]["display_name"],
@@ -874,8 +885,21 @@ class MainWindow(QMainWindow):
             access = self.core_client.prepare_user_access(user_id, ttl_seconds=900)
             package = access["package"]
             connection_code = build_server_code(endpoint, fingerprint, username)
+            alternatives = [
+                str(address).rstrip("/")
+                for address in package.get("addresses", [])
+                if str(address).rstrip("/") != endpoint
+                and (
+                    mode == "internet"
+                    or not str(address).startswith("http://127.")
+                )
+            ]
             pairing_link = build_pairing_uri(
-                package["one_time_code"], endpoint, fingerprint, username
+                package["one_time_code"],
+                endpoint,
+                fingerprint,
+                username,
+                alternate_addresses=alternatives,
             )
         except (CoreApiError, CoreUnavailable, ValueError) as exc:
             message = f"Код не создан: {self._core_error_text(exc)}"
@@ -911,6 +935,7 @@ class MainWindow(QMainWindow):
         self.audit.record(
             "core.user.password.changed", f"Изменён пароль пользователя {display_name}"
         )
+        self.password_vault.store(user_id, new_password)
         QMessageBox.information(
             self,
             "Пароль изменён",

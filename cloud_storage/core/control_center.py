@@ -1058,6 +1058,7 @@ class ControlCenterService:
                 primary_address,
                 pairing_fingerprint,
                 user.username,
+                alternate_addresses=health_addresses[1:],
             ),
             "personal_drive_name": f"Личный диск — {user.display_name}",
             "instructions": (

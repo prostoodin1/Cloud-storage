@@ -42,6 +42,10 @@ def test_pairing_uri_round_trip_contains_tls_identity() -> None:
         "https://192.168.1.20:8766",
         fingerprint,
         "alex",
+        alternate_addresses=(
+            "https://192.168.1.21:8766",
+            "https://10.0.0.5:8766",
+        ),
     )
 
     invitation = parse_pairing_uri(uri)
@@ -51,6 +55,10 @@ def test_pairing_uri_round_trip_contains_tls_identity() -> None:
     assert invitation.server_url == "https://192.168.1.20:8766"
     assert invitation.certificate_fingerprint == fingerprint
     assert invitation.username == "alex"
+    assert invitation.alternate_addresses == (
+        "https://192.168.1.21:8766",
+        "https://10.0.0.5:8766",
+    )
 
 
 def test_connection_code_contains_address_tls_identity_and_username() -> None:

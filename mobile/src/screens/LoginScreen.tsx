@@ -15,6 +15,7 @@ type Mode = 'account' | 'link' | 'qr';
 type Invitation = {
   code: string;
   serverUrl: string;
+  serverUrls: string[];
   username: string;
 };
 
@@ -26,20 +27,31 @@ function parseInvitation(value: string): Invitation {
   const parsed = new URL(candidate);
   const code = (parsed.searchParams.get('code') ?? '').trim().toLocaleUpperCase();
   const serverUrl = (parsed.searchParams.get('server') ?? '').trim().replace(/\/$/, '');
+  const alternateUrls = parsed.searchParams
+    .getAll('alt')
+    .map((item) => item.trim().replace(/\/$/, ''))
+    .filter((item) => /^https?:\/\//i.test(item));
   const username = (parsed.searchParams.get('username') ?? '').trim();
   if (code.replace(/[-\s]/g, '').length !== 8 || !/^https?:\/\//i.test(serverUrl)) {
     throw new Error('Ссылка подключения повреждена или не содержит адрес сервера.');
   }
-  return { code, serverUrl, username };
+  return {
+    code,
+    serverUrl,
+    serverUrls: [...new Set([serverUrl, ...alternateUrls])],
+    username,
+  };
 }
 
 export function LoginScreen({
   onConnected,
+  initialServerUrl = '',
 }: {
   onConnected: (profile: ConnectionProfile, result: PairingResult) => Promise<void>;
+  initialServerUrl?: string;
 }) {
   const [mode, setMode] = useState<Mode>('account');
-  const [serverUrl, setServerUrl] = useState('');
+  const [serverUrl, setServerUrl] = useState(initialServerUrl);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
@@ -69,24 +81,27 @@ export function LoginScreen({
         one_time_code?: unknown;
         login_link?: unknown;
       };
-      if (value.format !== 'cloud-storage-access-v1') {
+      if (!['cloud-storage-access-v1', 'cloud-storage-access-v2'].includes(String(value.format))) {
         throw new Error('Это не файл доступа Cloud Storage.');
       }
       if (!Array.isArray(value.addresses) || !value.addresses[0]) {
         throw new Error('В файле нет адреса сервера.');
       }
+      const importedAddresses = value.addresses.map(String).filter((item) => /^https?:\/\//i.test(item));
+      const importedServerUrl = importedAddresses[0];
+      if (!importedServerUrl) throw new Error('В файле нет рабочего адреса сервера.');
       const importedCode = String(value.one_time_code ?? '').trim();
       const importedUsername = String(value.username ?? '').trim();
       if (!importedCode || !importedUsername) {
         throw new Error('В файле не хватает данных входа.');
       }
-      setServerUrl(String(value.addresses[0]));
+      setServerUrl(importedServerUrl);
       setUsername(importedUsername);
       setCode(importedCode);
       setLink(
         typeof value.login_link === 'string' && value.login_link
           ? value.login_link
-          : `cloudstorage://pair?code=${encodeURIComponent(importedCode)}&server=${encodeURIComponent(String(value.addresses[0]))}&username=${encodeURIComponent(importedUsername)}`,
+          : `cloudstorage://pair?code=${encodeURIComponent(importedCode)}&server=${encodeURIComponent(importedServerUrl)}&username=${encodeURIComponent(importedUsername)}${importedAddresses.slice(1).map((address) => `&alt=${encodeURIComponent(address)}`).join('')}`,
       );
       setMode('link');
     } catch (reason) {
@@ -117,16 +132,18 @@ export function LoginScreen({
   };
 
   const connect = async () => {
-    if (password.length < 10 || !deviceName.trim()) {
-      setError('Введите пароль минимум из 10 символов и название телефона.');
+    if (!deviceName.trim()) {
+      setError('Введите название телефона.');
       return;
     }
     let targetServer = serverUrl;
+    let targetServers = serverUrl ? [serverUrl] : [];
     let targetCode = code;
     if (mode !== 'account') {
       try {
         const invitation = applyInvitation(link);
         targetServer = invitation.serverUrl;
+        targetServers = invitation.serverUrls;
         targetCode = invitation.code;
       } catch (reason) {
         setError(reason instanceof Error ? reason.message : 'Приглашение не распознано.');
@@ -137,6 +154,14 @@ export function LoginScreen({
       setError('Введите логин, созданный администратором.');
       return;
     }
+    if (mode === 'account' && password.length < 10) {
+      setError('Введите пароль минимум из 10 символов.');
+      return;
+    }
+    if (mode === 'account' && !targetServer) {
+      setError('Сервер ещё не сохранён. Для первого входа используйте ссылку или QR.');
+      return;
+    }
     if (mode !== 'account' && targetCode.replace(/[-\s]/g, '').length !== 8) {
       setError('В приглашении нет рабочего одноразового кода.');
       return;
@@ -144,22 +169,37 @@ export function LoginScreen({
     setBusy(true);
     setError('');
     try {
-      const api = new CloudApi(targetServer);
-      const health = await api.health();
-      const result =
-        mode === 'account'
-          ? await api.loginNewDevice(
-              username.trim().toLocaleLowerCase(),
-              password,
-              deviceName.trim(),
-              platformName,
-            )
-          : await api.redeemInvitation(
-              targetCode.trim(),
-              password,
-              deviceName.trim(),
-              platformName,
-            );
+      let connected: { api: CloudApi; health: Awaited<ReturnType<CloudApi['health']>>; result: PairingResult } | null = null;
+      let lastError: unknown = null;
+      for (const candidate of targetServers) {
+        try {
+          const api = new CloudApi(candidate);
+          const health = await api.health();
+          const result = mode === 'account'
+            ? await api.loginNewDevice(
+                username.trim().toLocaleLowerCase(),
+                password,
+                deviceName.trim(),
+                platformName,
+              )
+            : await api.redeemInvitation(
+                targetCode.trim(),
+                '',
+                deviceName.trim(),
+                platformName,
+              );
+          connected = { api, health, result };
+          break;
+        } catch (reason) {
+          lastError = reason;
+        }
+      }
+      if (!connected) {
+        throw lastError instanceof Error
+          ? lastError
+          : new Error('Сервер недоступен ни по одному адресу из приглашения.');
+      }
+      const { api, health, result } = connected;
       await onConnected(
         {
           serverUrl: api.serverUrl,
@@ -193,14 +233,11 @@ export function LoginScreen({
       <Card>
         {mode === 'account' ? (
           <>
-            <Field
-              label="HTTPS-адрес сервера"
-              value={serverUrl}
-              onChangeText={setServerUrl}
-              placeholder="https://ваш-сервер.zrok.io"
-              keyboardType="url"
-              autoCorrect={false}
-            />
+            <Notice tone="blue">
+              {serverUrl
+                ? 'Сохранённый сервер найден. Введите только логин и пароль.'
+                : 'Для первого входа добавьте сервер одноразовой ссылкой или QR. После этого достаточно логина и пароля.'}
+            </Notice>
             <Field
               label="Логин"
               value={username}
@@ -236,14 +273,18 @@ export function LoginScreen({
         ) : (
           <Button title="Разрешить камеру и сканировать QR" onPress={() => void requestCameraPermission()} />
         )}
-        <Field
-          label="Пароль"
-          value={password}
-          onChangeText={setPassword}
-          placeholder="Минимум 10 символов"
-          secureTextEntry
-          textContentType="password"
-        />
+        {mode === 'account' ? (
+          <Field
+            label="Пароль"
+            value={password}
+            onChangeText={setPassword}
+            placeholder="Минимум 10 символов"
+            secureTextEntry
+            textContentType="password"
+          />
+        ) : (
+          <Notice tone="green">Ссылка и QR одноразовые — пароль пользователя не требуется.</Notice>
+        )}
         <Field
           label="Название телефона"
           value={deviceName}

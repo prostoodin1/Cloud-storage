@@ -15,6 +15,10 @@ $payloads = if ($PayloadDirectory) { $PayloadDirectory } else { Join-Path $proje
 $key = if ($PrivateKey) { $PrivateKey } else { Join-Path (Split-Path $projectRoot -Parent) "private\cloud-storage-update-ed25519.pem" }
 $notes = if ($NotesFile) { $NotesFile } else { Join-Path $projectRoot "RELEASE_NOTES_$Version.md" }
 $tag = "v$Version"
+$targetCommit = (& git -C $projectRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $targetCommit -notmatch '^[0-9a-f]{40}$') {
+    throw "Could not resolve the release source commit"
+}
 $expectedUserFiles = @(
     "CloudStorage-Server-Installer-windows-x64.exe",
     "CloudStorage-Client-Installer-windows-x64.exe",
@@ -50,7 +54,7 @@ $actualUserFiles = @(Get-ChildItem -LiteralPath $output -File | Select-Object -E
 $unexpected = @($actualUserFiles | Where-Object { $_ -notin $expectedUserFiles })
 $missing = @($expectedUserFiles | Where-Object { $_ -notin $actualUserFiles })
 if ($unexpected.Count -or $missing.Count -or $actualUserFiles.Count -ne 6) {
-    throw "output must contain exactly six 0.9.13 user files. Missing: $($missing -join ', '); unexpected: $($unexpected -join ', ')"
+    throw "output must contain exactly six $Version user files. Missing: $($missing -join ', '); unexpected: $($unexpected -join ', ')"
 }
 
 & gh auth status | Out-Host
@@ -88,7 +92,7 @@ try {
     & $python (Join-Path $PSScriptRoot "sign-update-catalog.py") --key $key --product server --existing-catalog $oldServerCopy --manifest $serverManifest --output $serverCatalog
     if ($LASTEXITCODE -ne 0) { throw "Server catalog signing failed" }
 
-    & gh release create $tag --repo $Repository --title "Cloud Storage $Version" --notes-file $notes --draft
+    & gh release create $tag --repo $Repository --target $targetCommit --title "Cloud Storage $Version" --notes-file $notes --draft
     if ($LASTEXITCODE -ne 0) { throw "Draft release could not be created" }
     $assets = @($expectedUserFiles | ForEach-Object { Join-Path $output $_ }) + `
         @($payloadNames | ForEach-Object { Join-Path $payloads $_ }) + `

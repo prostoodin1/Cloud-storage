@@ -61,8 +61,8 @@ if ($unexpected.Count -or $missing.Count -or $actualUserFiles.Count -ne 6) {
 
 & gh auth status | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "GitHub CLI is not authenticated" }
-& gh release view $tag --repo $Repository *> $null
-if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists" }
+$existingRelease = & gh release list --repo $Repository --limit 100 --json tagName | ConvertFrom-Json
+if ($existingRelease.tagName -contains $tag) { throw "Release $tag already exists" }
 
 $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("cloud-storage-release-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $temporary | Out-Null

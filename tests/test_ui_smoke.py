@@ -117,6 +117,12 @@ def test_connection_panel_generates_without_manual_ip() -> None:
     app.processEvents()
     spy = QSignalSpy(panel.generation_requested)
 
+    assert panel.layout().indexOf(panel.dynamic_card) < panel.layout().indexOf(panel.users_toggle)
+    assert panel.users_container.isVisibleTo(panel)
+    panel.users_toggle.click()
+    assert not panel.users_container.isVisible()
+    panel.users_toggle.click()
+
     panel.generate_button.click()
 
     assert panel.endpoint.text() == "https://192.168.1.20:8766"

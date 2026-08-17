@@ -1,5 +1,9 @@
+import os
+
+import pytest
+
 from cloud_storage.models import DiskConfiguration, DiskMode, DiskRole, DiskSnapshot, DiskStatus
-from cloud_storage.services.disk_service import evaluate_status
+from cloud_storage.services.disk_service import DiskService, evaluate_status
 
 
 def disk(*, used: int = 50, free: int = 50, available: bool = True) -> DiskSnapshot:
@@ -33,3 +37,13 @@ def test_low_space_uses_percentage_or_absolute_reserve() -> None:
 def test_unavailable_disk_never_claims_health() -> None:
     config = DiskConfiguration(role=DiskRole.SHARED)
     assert evaluate_status(disk(available=False), config) == DiskStatus.UNAVAILABLE
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows volume protection")
+def test_system_volume_is_protected_from_destructive_operations() -> None:
+    snapshot = disk()
+    snapshot.mountpoint = "C:\\"
+    snapshot.is_system = True
+
+    with pytest.raises(PermissionError, match="Системный диск"):
+        DiskService().start_format(snapshot)

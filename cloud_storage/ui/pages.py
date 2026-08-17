@@ -329,6 +329,7 @@ class DashboardPage(QWidget):
 
 class DisksPage(QWidget):
     disk_selected = Signal(str)
+    disk_action_requested = Signal(str, str)
     refresh_requested = Signal()
     configure_first_requested = Signal()
     remind_later_requested = Signal()
@@ -443,6 +444,7 @@ class DisksPage(QWidget):
             if settings.configuration_for(disk.id).role == DiskRole.UNCONFIGURED
             and disk.id not in settings.ignored_disk_ids
             and disk.available
+            and not disk.is_system
         ]
         self.new_disk_banner.setVisible(bool(pending) and not self._reminder_hidden)
         self.new_disk_title.setText(
@@ -458,6 +460,7 @@ class DisksPage(QWidget):
             for index, disk in enumerate(disks):
                 card = DiskCard(disk, settings.configuration_for(disk.id))
                 card.selected.connect(self.disk_selected)
+                card.action_requested.connect(self.disk_action_requested)
                 self.cards.addWidget(card, index // 2, index % 2)
             return
         visible_spaces = [item for item in self._spaces if item.get("kind") in {"shared", "personal"}]

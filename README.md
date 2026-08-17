@@ -1,6 +1,6 @@
 # Cloud Storage Server
 
-Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.14** завершает пользователей, одноразовые файлы входа, подробные права и логические пространства на физических дисках.
+Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.19** завершает живые статусы пользователей и управление физическими дисками.
 
 Текущая ветка также содержит полный слой **Idea 4**: системные профили, питание/ИБП,
 Telegram/email/webhook, 20 шаблонов автоматизаций, отчёты, безопасные контейнерные
@@ -11,12 +11,12 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 | № | Приложение | Файл |
 |---:|---|---|
-| 1 | Постоянный установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Server-Installer-windows-x64.exe) |
-| 2 | Постоянный установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Client-Installer-windows-x64.exe) |
-| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Desktop-Client-0.9.14-windows-x64.zip) |
-| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Server-Manager-0.9.14-windows-x64.zip) |
-| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Mobile-Client-0.9.14-android.apk) |
-| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Mobile-Manager-0.9.14-android.apk) |
+| 1 | Постоянный установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Server-Installer-windows-x64.exe) |
+| 2 | Постоянный установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Client-Installer-windows-x64.exe) |
+| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Desktop-Client-0.9.19-windows-x64.zip) |
+| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Server-Manager-0.9.19-windows-x64.zip) |
+| 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Mobile-Client-0.9.14-android.apk) |
+| 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Mobile-Manager-0.9.14-android.apk) |
 
 ## Шесть приложений проекта
 
@@ -36,6 +36,17 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 - общие логические пространства получают основной и резервный физический диск, отдельные права и отдельные буквы в Проводнике;
 - при недоступности основного диска новые объекты пишутся на резервный, а ручной перенос обратно проверяет размер и SHA-256 и пишется в аудит;
 - обновления различают сетевые ошибки, 404, повреждение и неверную подпись, а установщик проверяется по подписи каталога, размеру и SHA-256.
+
+## Что изменено в версии 0.9.19 — пользователи и диски
+
+- динамический код подключения расположен над сворачиваемым списком пользователей;
+- для пользователя видны дата создания, последний вход и цветное живое состояние от офлайна до передачи или удаления;
+- удаление учётных записей заблокировано в интерфейсе и административном API, доступно безопасное отключение;
+- физические диски показывают подтверждённые Windows объёмы, модель, серийный номер, интерфейс, нагрузку и скорости ввода-вывода;
+- системный диск защищён от использования хранилищем, а виртуальные тома Client и Google Drive исключены из физических дисков;
+- подробные права можно массово применить ко всем общим пространствам выбранного диска;
+- меню диска запускает Проводник, проверку ошибок, штатную оптимизацию, безопасное удаление из Manager и форматирование с двойным подтверждением;
+- недоступный каталог диска возвращает понятную ошибку настройки вместо HTTP 500.
 
 ## Что изменено в версии 0.9.18 — переход на zrok2
 

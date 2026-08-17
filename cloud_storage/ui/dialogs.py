@@ -49,17 +49,43 @@ def _value(value: object | None, suffix: str = "") -> str:
 
 class DiskDetailDialog(QDialog):
     configuration_saved = Signal(str, object)
+    permissions_saved = Signal(str, object)
     refresh_requested = Signal()
     cleanup_requested = Signal(str)
+    check_requested = Signal(str)
+    optimize_requested = Signal(str)
+    format_requested = Signal(str)
+    remove_requested = Signal(str)
 
     def __init__(
         self,
         disk: DiskSnapshot,
         configuration: DiskConfiguration,
+        users: list[dict] | None = None,
+        spaces: list[dict] | None = None,
+        storage_roots: list[dict] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.disk = disk
+        self.core_users = list(users or [])
+        self.core_spaces = list(spaces or [])
+        self.storage_roots = list(storage_roots or [])
+        self.permission_rows: dict[str, dict[str, QCheckBox]] = {}
+        root_ids = {
+            str(item.get("id") or "")
+            for item in self.storage_roots
+            if str(item.get("disk_id") or "") == disk.id
+        }
+        self.disk_spaces = [
+            item
+            for item in self.core_spaces
+            if item.get("kind") == "shared"
+            and (
+                str(item.get("primary_storage_root_id") or "") in root_ids
+                or str(item.get("fallback_storage_root_id") or "") in root_ids
+            )
+        ]
         self.original_role = configuration.role
         self.setWindowTitle(f"Диск · {configuration.display_name or disk.label or disk.mountpoint}")
         self.setMinimumSize(760, 650)
@@ -79,7 +105,7 @@ class DiskDetailDialog(QDialog):
         refresh.clicked.connect(self.refresh_requested)
         header.addWidget(refresh)
         if disk.available:
-            explorer = QPushButton("Открыть папку")
+            explorer = QPushButton("Открыть в Проводнике")
             explorer.clicked.connect(
                 lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(disk.mountpoint))
             )
@@ -90,6 +116,7 @@ class DiskDetailDialog(QDialog):
         self.tabs = tabs
         tabs.addTab(self._overview_tab(), "Обзор")
         tabs.addTab(self._configuration_tab(configuration), "Настройка")
+        tabs.addTab(self._permissions_tab(), "Доступ")
         tabs.addTab(self._operations_tab(configuration), "Состояние")
         root.addWidget(tabs, 1)
 
@@ -111,6 +138,8 @@ class DiskDetailDialog(QDialog):
         grid.setHorizontalSpacing(24)
         grid.setVerticalSpacing(12)
         rows = [
+            ("ID Cloud Storage", self.disk.id),
+            ("Номер физического диска", _value(self.disk.disk_number)),
             ("Точка подключения", self.disk.mountpoint),
             ("Устройство", self.disk.device),
             ("Метка", self.disk.label or "Без метки"),
@@ -163,7 +192,14 @@ class DiskDetailDialog(QDialog):
         self.display_name = QLineEdit(configuration.display_name)
         self.display_name.setPlaceholderText(self.disk.label or self.disk.mountpoint)
         self.role = QComboBox()
-        for role, label in ROLE_LABELS.items():
+        roles = ROLE_LABELS.items()
+        if self.disk.is_system:
+            roles = [
+                (role, label)
+                for role, label in roles
+                if role in {DiskRole.UNCONFIGURED, DiskRole.UNUSED}
+            ]
+        for role, label in roles:
             self.role.addItem(label, role.value)
         self.role.setCurrentIndex(max(0, self.role.findData(configuration.role.value)))
         self.priority = QSpinBox()
@@ -200,6 +236,15 @@ class DiskDetailDialog(QDialog):
         form.addRow("", self.encryption)
         layout.addLayout(form)
 
+        if self.disk.is_system:
+            system_warning = QLabel(
+                "Это системный диск. Он показывается для диагностики, но не может быть "
+                "назначен хранилищем, кэшем, резервом или зеркалом."
+            )
+            system_warning.setWordWrap(True)
+            system_warning.setProperty("danger", True)
+            layout.addWidget(system_warning)
+
         warning = QLabel(
             "Изменение назначения применяет политику новых записей. Перенос существующих "
             "управляемых объектов запускается отдельно в разделе «Обслуживание» и требует "
@@ -210,6 +255,83 @@ class DiskDetailDialog(QDialog):
         layout.addWidget(warning)
         layout.addStretch()
         return content
+
+    def _permissions_tab(self) -> QWidget:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 18, 8, 8)
+        title = QLabel("Права на общие пространства этого диска")
+        title.setObjectName("SectionTitle")
+        names = ", ".join(str(item.get("name") or "Пространство") for item in self.disk_spaces)
+        description_text = (
+            f"Изменения применяются сервером ко всем общим пространствам на диске: {names}."
+            if names
+            else "На этом диске пока нет общих логических пространств. "
+            "Создайте пространство и назначьте ему этот диск."
+        )
+        description = QLabel(description_text)
+        description.setWordWrap(True)
+        description.setProperty("muted", True)
+        layout.addWidget(title)
+        layout.addWidget(description)
+
+        mass = QHBoxLayout()
+        default_access = QPushButton("Всем: просмотр + загрузка")
+        default_access.clicked.connect(lambda: self._set_all_permissions({"read", "upload"}))
+        full_access = QPushButton("Всем: полный доступ")
+        full_access.clicked.connect(
+            lambda: self._set_all_permissions({"read", "upload", "modify", "delete", "share"})
+        )
+        revoke = QPushButton("Снять доступ у всех")
+        revoke.clicked.connect(lambda: self._set_all_permissions(set()))
+        for button in (default_access, full_access, revoke):
+            button.setEnabled(bool(self.disk_spaces and self.core_users))
+            mass.addWidget(button)
+        mass.addStretch()
+        layout.addLayout(mass)
+
+        grid = QGridLayout()
+        headers = ("Пользователь", "Просмотр", "Загрузка", "Изменение", "Удаление", "Ссылки")
+        for column, label in enumerate(headers):
+            heading = QLabel(label)
+            heading.setStyleSheet("font-weight: 700;")
+            grid.addWidget(heading, 0, column)
+        capabilities = ("read", "upload", "modify", "delete", "share")
+        for row_index, user in enumerate(self.core_users, start=1):
+            user_id = str(user.get("id") or "")
+            if not user_id:
+                continue
+            name = str(user.get("display_name") or user.get("username") or "Пользователь")
+            grid.addWidget(QLabel(name), row_index, 0)
+            grants = {
+                str(item.get("space_id") or ""): item.get("capabilities") or {}
+                for item in user.get("space_grants") or []
+            }
+            checks: dict[str, QCheckBox] = {}
+            for column, capability in enumerate(capabilities, start=1):
+                check = QCheckBox()
+                check.setEnabled(bool(self.disk_spaces))
+                values = [
+                    bool((grants.get(str(space.get("id") or "")) or {}).get(capability))
+                    for space in self.disk_spaces
+                ]
+                if values and any(values) and not all(values):
+                    check.setTristate(True)
+                    check.setCheckState(Qt.CheckState.PartiallyChecked)
+                    check.setToolTip("Права различаются между пространствами; состояние сохранится")
+                else:
+                    check.setChecked(bool(values) and all(values))
+                checks[capability] = check
+                grid.addWidget(check, row_index, column, Qt.AlignmentFlag.AlignCenter)
+            self.permission_rows[user_id] = checks
+        layout.addLayout(grid)
+        layout.addStretch()
+        return content
+
+    def _set_all_permissions(self, enabled: set[str]) -> None:
+        for checks in self.permission_rows.values():
+            for capability, check in checks.items():
+                check.setChecked(capability in enabled)
 
     def _operations_tab(self, configuration: DiskConfiguration) -> QWidget:
         content = QWidget()
@@ -246,13 +368,16 @@ class DiskDetailDialog(QDialog):
         ignore.clicked.connect(
             lambda: self.role.setCurrentIndex(self.role.findData(DiskRole.UNUSED.value))
         )
-        check = QPushButton("Проверить")
-        check.clicked.connect(self.refresh_requested)
+        check = QPushButton("Найти ошибки")
+        check.clicked.connect(lambda: self.check_requested.emit(self.disk.id))
         clean = QPushButton("Очистить временное")
         clean.clicked.connect(lambda: self.cleanup_requested.emit(self.disk.id))
+        optimize = QPushButton("Оптимизировать")
+        optimize.setEnabled(self.disk.available and not self.disk.is_system)
+        optimize.clicked.connect(lambda: self.optimize_requested.emit(self.disk.id))
         reassign = QPushButton("Переназначить")
         reassign.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
-        for button in (stop, maintenance, ignore, check, clean, reassign):
+        for button in (stop, maintenance, ignore, check, clean, optimize, reassign):
             actions.addWidget(button)
         actions.addStretch()
         layout.addLayout(actions)
@@ -260,18 +385,29 @@ class DiskDetailDialog(QDialog):
         safety = QFrame()
         safety.setProperty("accent", "red")
         safety_layout = QVBoxLayout(safety)
-        safety_title = QLabel("Опасные операции заблокированы")
+        safety_title = QLabel("Системные операции")
         safety_title.setStyleSheet("font-weight: 700;")
         safety_body = QLabel(
-            "Форматирование, удаление разделов и физическое отключение не вызываются. "
-            "Перенос работает только внутри управляемых каталогов, после явного подтверждения "
-            "и с проверкой SHA-256."
+            "Форматирование доступно только для несистемного тома и требует повторно ввести "
+            "букву диска. Удаление из Manager не стирает файлы и не удаляет раздел."
         )
         safety_body.setWordWrap(True)
         safety_body.setProperty("muted", True)
         safety_layout.addWidget(safety_title)
         safety_layout.addWidget(safety_body)
         layout.addWidget(safety)
+
+        destructive = QHBoxLayout()
+        format_button = QPushButton("Форматировать…")
+        format_button.setEnabled(self.disk.available and not self.disk.is_system)
+        format_button.clicked.connect(lambda: self.format_requested.emit(self.disk.id))
+        remove_button = QPushButton("Удалить диск из Manager")
+        remove_button.setEnabled(not self.disk.is_system)
+        remove_button.clicked.connect(lambda: self.remove_requested.emit(self.disk.id))
+        destructive.addWidget(format_button)
+        destructive.addWidget(remove_button)
+        destructive.addStretch()
+        layout.addLayout(destructive)
 
         self.last_check = QLabel(
             f"Последнее обновление: {configuration.last_check_at or 'ещё не выполнялось'}"
@@ -287,6 +423,13 @@ class DiskDetailDialog(QDialog):
 
     def _save(self) -> None:
         role = DiskRole(self.role.currentData())
+        if self.disk.is_system and role not in {DiskRole.UNCONFIGURED, DiskRole.UNUSED}:
+            QMessageBox.warning(
+                self,
+                "Системный диск защищён",
+                "Системный диск нельзя использовать для данных Cloud Storage.",
+            )
+            return
         if self.original_role not in {DiskRole.UNCONFIGURED, role}:
             response = QMessageBox.question(
                 self,
@@ -314,6 +457,19 @@ class DiskDetailDialog(QDialog):
             identity_serial=self.disk.serial or "",
         )
         self.configuration_saved.emit(self.disk.id, configuration)
+        if self.disk_spaces:
+            permissions = {
+                user_id: {
+                    capability: (
+                        None
+                        if check.checkState() == Qt.CheckState.PartiallyChecked
+                        else check.isChecked()
+                    )
+                    for capability, check in checks.items()
+                }
+                for user_id, checks in self.permission_rows.items()
+            }
+            self.permissions_saved.emit(self.disk.id, permissions)
         self.accept()
 
 

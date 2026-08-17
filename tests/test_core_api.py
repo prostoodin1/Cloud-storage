@@ -83,6 +83,48 @@ def test_health_and_manager_authorization(tmp_path) -> None:
     assert allowed.json()["users"] == 0
 
 
+def test_manager_user_overview_reports_dates_presence_and_current_action(tmp_path) -> None:
+    app, client, manager_headers, device_headers, user, _, _ = provision_trusted_device(tmp_path)
+    assert client.get("/v1/spaces", headers=device_headers).status_code == 200
+    now = "2026-08-17T12:00:00+00:00"
+    with app.state.runtime.database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO transfer_jobs(
+                id, direction, status, file_id, space_id, user_id, logical_path,
+                content_type, total_bytes, network_bytes, storage_bytes, sha256,
+                staging_path, temporary_path, storage_root_id, object_path,
+                error, created_at, updated_at, completed_at
+            ) VALUES(
+                'transfer-presence', 'inbound', 'moving', '', '', ?, 'Фото/лето.jpg',
+                'image/jpeg', 10, 10, 2, '', 'C:/cache/part', '', 'root-photo',
+                'objects/photo.blob', '', ?, ?, NULL
+            )
+            """,
+            (user["id"], now, now),
+        )
+
+    response = client.get("/v1/admin/users", headers=manager_headers)
+
+    assert response.status_code == 200
+    item = next(value for value in response.json() if value["id"] == user["id"])
+    assert item["created_at"]
+    assert item["last_login_at"]
+    assert item["presence_state"] == "transferring"
+    assert item["presence_detail"] == "Идёт передача данных"
+    assert item["activity_detail"] == (
+        "Перенос: Фото/лето.jpg | Откуда: C:/cache/part -> Куда: objects/photo.blob"
+    )
+
+
+def test_user_deletion_is_explicitly_disabled_on_network_api(tmp_path) -> None:
+    _, client, manager_headers = build_client(tmp_path)
+    response = client.delete("/v1/admin/users/user-any", headers=manager_headers)
+
+    assert response.status_code == 405
+    assert "Удаление пользователей отключено" in response.json()["detail"]
+
+
 def test_account_password_registers_each_new_device_for_approval(tmp_path) -> None:
     _, client, manager_headers = build_client(tmp_path)
     created = client.post(

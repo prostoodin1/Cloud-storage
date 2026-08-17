@@ -207,6 +207,138 @@ class CoreRepository:
             ).fetchall()
         return [self._user(row) for row in rows]
 
+    def user_runtime_overview(self) -> dict[str, dict[str, Any]]:
+        """Return Manager-facing presence and current activity without exposing credentials."""
+
+        with self.database.connection() as connection:
+            device_rows = connection.execute(
+                """
+                SELECT u.id AS user_id, u.enabled,
+                       MAX(COALESCE(d.last_seen_at, d.approved_at, d.created_at)) AS last_login_at,
+                       MAX(CASE WHEN d.status = 'trusted' THEN d.last_seen_at END) AS trusted_seen_at,
+                       SUM(CASE WHEN d.status = 'trusted' THEN 1 ELSE 0 END) AS trusted_devices,
+                       SUM(CASE WHEN d.status = 'pending' THEN 1 ELSE 0 END) AS pending_devices
+                FROM users u LEFT JOIN devices d ON d.user_id = u.id
+                GROUP BY u.id
+                """
+            ).fetchall()
+            transfer_rows = connection.execute(
+                """
+                SELECT tj.user_id, tj.direction, tj.status, tj.logical_path, tj.staging_path,
+                       tj.temporary_path, tj.storage_root_id, tj.object_path, tj.updated_at
+                FROM transfer_jobs tj JOIN users u ON u.id = tj.user_id
+                WHERE u.enabled = 1 AND tj.status IN ('receiving', 'moving', 'sending')
+                ORDER BY tj.updated_at DESC
+                """
+            ).fetchall()
+            deletion_rows = connection.execute(
+                """
+                SELECT actor_id, action, target_type, target_id, detail, timestamp
+                FROM audit_events
+                WHERE actor_type = 'user'
+                  AND action IN ('file.deleted', 'directory.deleted')
+                ORDER BY timestamp DESC LIMIT 200
+                """
+            ).fetchall()
+
+        now = utc_now()
+        result: dict[str, dict[str, Any]] = {}
+        for row in device_rows:
+            trusted_seen = self._parse_timestamp(row["trusted_seen_at"])
+            age = (now - trusted_seen).total_seconds() if trusted_seen else None
+            if not bool(row["enabled"]):
+                state = "offline"
+            elif age is not None and age <= 90:
+                state = "connected"
+            elif age is not None and age <= 300:
+                state = "online"
+            elif int(row["pending_devices"] or 0) > 0:
+                state = "online"
+            else:
+                state = "offline"
+            result[str(row["user_id"])] = {
+                "last_login_at": row["last_login_at"],
+                "presence_state": state,
+                "presence_detail": {
+                    "offline": "Не в сети",
+                    "online": "В сети, ресурсы сейчас не используются",
+                    "connected": "Подключён, активного ввода-вывода нет",
+                }[state],
+                "activity_detail": "",
+                "trusted_devices": int(row["trusted_devices"] or 0),
+                "pending_devices": int(row["pending_devices"] or 0),
+            }
+
+        # A deletion is intentionally retained for a few seconds so the Manager poll can show it.
+        for row in deletion_rows:
+            user_id = str(row["actor_id"] or "")
+            if (
+                not user_id
+                or user_id not in result
+                or result[user_id].get("presence_state") == "deleting"
+            ):
+                continue
+            timestamp = self._parse_timestamp(row["timestamp"])
+            if timestamp is None or (now - timestamp).total_seconds() > 15:
+                continue
+            detail = str(row["detail"] or "")
+            object_name = detail.partition(":")[2].strip() or str(row["target_id"] or "объект")
+            target = "Корзина" if row["action"] == "file.deleted" else "Удалено"
+            result[user_id].update(
+                {
+                    "presence_state": "deleting",
+                    "presence_detail": "Удаление",
+                    "activity_detail": (
+                        f"Удаление: {object_name} | Откуда: {object_name} -> Куда: {target}"
+                    ),
+                }
+            )
+
+        seen_transfers: set[str] = set()
+        for row in transfer_rows:
+            user_id = str(row["user_id"] or "")
+            if (
+                not user_id
+                or user_id in seen_transfers
+                or user_id not in result
+                or result[user_id]["presence_state"] == "deleting"
+            ):
+                continue
+            seen_transfers.add(user_id)
+            status_name = str(row["status"])
+            logical_path = str(row["logical_path"] or "файл")
+            if status_name == "receiving":
+                action, source = "Загрузка", "Клиент"
+                destination = str(row["staging_path"] or row["temporary_path"] or "Сервер")
+            elif status_name == "moving":
+                action = "Перенос"
+                source = str(row["staging_path"] or row["temporary_path"] or "Кэш")
+                destination = str(row["object_path"] or row["storage_root_id"] or "Хранилище")
+            else:
+                action = "Скачивание"
+                source = str(row["object_path"] or row["storage_root_id"] or "Хранилище")
+                destination = "Клиент"
+            result[user_id].update(
+                {
+                    "presence_state": "transferring",
+                    "presence_detail": "Идёт передача данных",
+                    "activity_detail": (
+                        f"{action}: {logical_path} | Откуда: {source} -> Куда: {destination}"
+                    ),
+                }
+            )
+        return result
+
+    @staticmethod
+    def _parse_timestamp(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+            return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+        except ValueError:
+            return None
+
     def get_user(self, user_id: str) -> UserRecord:
         with self.database.connection() as connection:
             row = connection.execute(

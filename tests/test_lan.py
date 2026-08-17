@@ -385,11 +385,65 @@ def test_zrok_mobile_admin_control_requires_confirmed_device_and_session(tmp_pat
 def test_zrok_process_environment_does_not_inherit_unrelated_secrets(monkeypatch) -> None:
     monkeypatch.setenv("UNRELATED_API_SECRET", "must-not-leak")
     monkeypatch.setenv("ZROK_API_ENDPOINT", "https://zrok.example")
+    monkeypatch.setenv("ZROK2_API_ENDPOINT", "https://api-v2.zrok.io")
 
     environment = ZrokTunnelService._subprocess_environment()
 
     assert "UNRELATED_API_SECRET" not in environment
     assert environment["ZROK_API_ENDPOINT"] == "https://zrok.example"
+    assert environment["ZROK2_API_ENDPOINT"] == "https://api-v2.zrok.io"
+
+
+def test_zrok2_share_command_uses_public_namespace_and_keeps_v1_compatibility(
+    tmp_path,
+) -> None:
+    zrok2 = ZrokTunnelService(
+        CoreConfig(
+            data_directory=tmp_path,
+            zrok_enabled=True,
+            zrok_executable="zrok2",
+            zrok_share_name="home-cloud",
+        )
+    )
+    legacy = ZrokTunnelService(
+        CoreConfig(
+            data_directory=tmp_path,
+            zrok_enabled=True,
+            zrok_executable="C:/tools/zrok.exe",
+            zrok_share_name="home-cloud",
+        )
+    )
+
+    assert zrok2._share_command("C:/tools/zrok2.exe") == [
+        "C:/tools/zrok2.exe",
+        "share",
+        "public",
+        "--headless",
+        "127.0.0.1:8768",
+        "-n",
+        "public:home-cloud",
+    ]
+    assert legacy._share_command("C:/tools/zrok.exe") == [
+        "C:/tools/zrok.exe",
+        "share",
+        "reserved",
+        "--headless",
+        "home-cloud",
+    ]
+
+
+def test_zrok2_ephemeral_share_uses_loopback_backend(tmp_path) -> None:
+    service = ZrokTunnelService(
+        CoreConfig(data_directory=tmp_path, zrok_enabled=True)
+    )
+
+    assert service._share_command("zrok2") == [
+        "zrok2",
+        "share",
+        "public",
+        "--headless",
+        "127.0.0.1:8768",
+    ]
 
 
 def test_live_https_listener_pinning_discovery_and_local_admin_boundary(tmp_path) -> None:

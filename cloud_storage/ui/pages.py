@@ -652,16 +652,18 @@ class SettingsPage(QWidget):
         self.remote_details_label: QLabel | None = None
         self.remote_audit_rows: QVBoxLayout | None = None
         self.zrok_enabled = QCheckBox(
-            "Подключать сервер к интернету через zrok без открытия порта роутера"
+            "Подключать сервер к интернету через zrok2 без открытия порта роутера"
         )
         self.zrok_port = QSpinBox()
         self.zrok_port.setRange(1024, 65535)
         self.zrok_port.setValue(8768)
-        self.zrok_executable = QLineEdit("zrok")
-        self.zrok_executable.setPlaceholderText("zrok или полный путь к zrok.exe")
+        self.zrok_executable = QLineEdit("zrok2")
+        self.zrok_executable.setPlaceholderText("zrok2 или полный путь к zrok2.exe")
         self.zrok_share_name = QLineEdit()
         self.zrok_share_name.setMaxLength(63)
-        self.zrok_share_name.setPlaceholderText("Необязательно: имя заранее созданного reserved share")
+        self.zrok_share_name.setPlaceholderText(
+            "Необязательно: имя, созданное командой zrok2 create name"
+        )
         self.zrok_status_label: QLabel | None = None
         self.zrok_details_label: QLabel | None = None
         self.zrok_restart_button: QPushButton | None = None
@@ -2188,12 +2190,12 @@ class SettingsPage(QWidget):
             zrok_form.setVerticalSpacing(12)
             zrok_form.addRow("Состояние", self.zrok_status_label)
             zrok_form.addRow("Локальный порт шлюза", self.zrok_port)
-            zrok_form.addRow("Программа zrok", self.zrok_executable)
-            zrok_form.addRow("Reserved share", self.zrok_share_name)
+            zrok_form.addRow("Программа zrok2", self.zrok_executable)
+            zrok_form.addRow("Публичное имя", self.zrok_share_name)
             layout.addWidget(self.zrok_enabled)
             layout.addLayout(zrok_form)
             layout.addWidget(self.zrok_details_label)
-            self.zrok_restart_button = QPushButton("Перезапустить zrok без перезапуска Core")
+            self.zrok_restart_button = QPushButton("Перезапустить zrok2 без перезапуска Core")
             self.zrok_restart_button.clicked.connect(
                 lambda: self.tunnel_restart_requested.emit("zrok")
             )
@@ -2939,7 +2941,7 @@ class SettingsPage(QWidget):
             "remote_pairing_enabled": self.remote_pairing_enabled.isChecked(),
             "zrok_enabled": self.zrok_enabled.isChecked(),
             "zrok_port": self.zrok_port.value(),
-            "zrok_executable": self.zrok_executable.text().strip() or "zrok",
+            "zrok_executable": self.zrok_executable.text().strip() or "zrok2",
             "zrok_share_name": self.zrok_share_name.text().strip(),
         }
 

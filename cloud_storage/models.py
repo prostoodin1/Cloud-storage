@@ -127,7 +127,7 @@ class AppSettings:
     remote_pairing_enabled: bool = False
     zrok_enabled: bool = False
     zrok_port: int = 8768
-    zrok_executable: str = "zrok"
+    zrok_executable: str = "zrok2"
     zrok_share_name: str = ""
     known_disk_ids: list[str] = field(default_factory=list)
     ignored_disk_ids: list[str] = field(default_factory=list)
@@ -171,9 +171,15 @@ class AppSettings:
         result.zrok_port = (
             zrok_port if 1024 <= zrok_port <= 65535 and zrok_port not in used_ports else 8768
         )
-        result.zrok_executable = str(value.get("zrok_executable", "zrok")).strip()[:2048]
+        result.zrok_executable = str(value.get("zrok_executable", "zrok2")).strip()[:2048]
         if not result.zrok_executable:
-            result.zrok_executable = "zrok"
+            result.zrok_executable = "zrok2"
+        elif result.zrok_executable.casefold() in {"zrok", "zrok.exe"}:
+            result.zrok_executable = (
+                "zrok2.exe"
+                if result.zrok_executable.casefold().endswith(".exe")
+                else "zrok2"
+            )
         result.zrok_share_name = str(value.get("zrok_share_name", "")).strip()[:63]
         result.known_disk_ids = [str(item) for item in value.get("known_disk_ids", [])]
         result.ignored_disk_ids = [str(item) for item in value.get("ignored_disk_ids", [])]

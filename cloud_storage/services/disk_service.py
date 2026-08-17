@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -33,6 +34,7 @@ _VIRTUAL_FILESYSTEMS = {
     "sysfs",
     "tmpfs",
     "tracefs",
+    "cloudstorage",
 }
 
 
@@ -61,7 +63,7 @@ def _run_json(command: list[str], timeout: int = 5) -> Any:
 
 
 class DiskService:
-    """Read-only physical storage discovery. It never formats, mounts, or ejects media."""
+    """Discover physical storage and expose OS-backed diagnostics without guessing values."""
 
     def discover(self) -> list[DiskSnapshot]:
         metadata = self._platform_metadata()
@@ -74,12 +76,16 @@ class DiskService:
                 continue
             seen_mounts.add(canonical_mount)
             info = metadata.get(canonical_mount, {})
+            if bool(info.get("virtual")):
+                continue
             serial = self._optional_text(info.get("serial"))
             model = self._optional_text(info.get("model"))
             device = partition.device or mountpoint
             disk_id = _stable_id(serial, device, canonical_mount)
             try:
                 usage = psutil.disk_usage(mountpoint)
+                total_bytes = self._integer(info.get("total_bytes"), usage.total)
+                free_bytes = min(total_bytes, self._integer(info.get("free_bytes"), usage.free))
                 snapshot = DiskSnapshot(
                     id=disk_id,
                     mountpoint=mountpoint,
@@ -93,9 +99,17 @@ class DiskService:
                     filesystem=self._optional_text(info.get("filesystem"))
                     or partition.fstype
                     or None,
-                    total_bytes=usage.total,
-                    used_bytes=usage.used,
-                    free_bytes=usage.free,
+                    total_bytes=total_bytes,
+                    used_bytes=max(0, total_bytes - free_bytes),
+                    free_bytes=free_bytes,
+                    temperature_c=self._number(info.get("temperature_c")),
+                    read_speed_mbps=self._number(info.get("read_speed_mbps")),
+                    write_speed_mbps=self._number(info.get("write_speed_mbps")),
+                    utilization_percent=self._number(info.get("utilization_percent")),
+                    power_on_hours=self._integer_or_none(info.get("power_on_hours")),
+                    health_detail=self._optional_text(info.get("health_detail")),
+                    disk_number=self._integer_or_none(info.get("disk_number")),
+                    is_system=self._is_system_mount(mountpoint),
                 )
             except OSError as exc:
                 snapshot = DiskSnapshot(
@@ -108,10 +122,58 @@ class DiskService:
                     interface=self._optional_text(info.get("interface")),
                     filesystem=partition.fstype or None,
                     health_detail=str(exc),
+                    disk_number=self._integer_or_none(info.get("disk_number")),
+                    is_system=self._is_system_mount(mountpoint),
                     available=False,
                 )
             disks.append(snapshot)
         return sorted(disks, key=lambda item: item.mountpoint.casefold())
+
+    @staticmethod
+    def _windows_volume(snapshot: DiskSnapshot, *, destructive: bool = False) -> str:
+        if os.name != "nt":
+            raise OSError("Эта системная операция сейчас поддерживается только в Windows")
+        mount = snapshot.mountpoint.strip()
+        if not re.fullmatch(r"[A-Za-z]:[\\/]?", mount):
+            raise OSError("Не удалось безопасно определить букву тома")
+        if destructive and snapshot.is_system:
+            raise PermissionError("Системный диск защищён от этой операции")
+        return mount[:2].upper()
+
+    def start_error_check(self, snapshot: DiskSnapshot) -> None:
+        volume = self._windows_volume(snapshot)
+        self._start_elevated("chkdsk.exe", [volume, "/scan"])
+
+    def start_optimize(self, snapshot: DiskSnapshot) -> None:
+        volume = self._windows_volume(snapshot, destructive=True)
+        self._start_elevated("defrag.exe", [volume, "/O", "/U", "/V"])
+
+    def start_format(self, snapshot: DiskSnapshot, *, filesystem: str = "NTFS") -> None:
+        volume = self._windows_volume(snapshot, destructive=True)
+        if filesystem not in {"NTFS", "exFAT"}:
+            raise ValueError("Неподдерживаемая файловая система")
+        drive_letter = volume[0]
+        command = (
+            f"Format-Volume -DriveLetter {drive_letter} -FileSystem {filesystem} "
+            "-NewFileSystemLabel 'CloudStorage' -Force -Confirm:$false"
+        )
+        self._start_elevated(
+            "powershell.exe",
+            ["-NoProfile", "-NonInteractive", "-Command", command],
+        )
+
+    @staticmethod
+    def _start_elevated(executable: str, arguments: list[str]) -> None:
+        # Arguments come only from validated constants/drive letters, never arbitrary paths.
+        quoted = ",".join("'" + item.replace("'", "''") + "'" for item in arguments)
+        script = (
+            f"Start-Process -FilePath '{executable}' -ArgumentList @({quoted}) "
+            "-Verb RunAs -Wait"
+        )
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
 
     @staticmethod
     def _optional_text(value: Any) -> str | None:
@@ -119,6 +181,32 @@ class DiskService:
             return None
         text = str(value).strip()
         return text or None
+
+    @staticmethod
+    def _number(value: Any) -> float | None:
+        try:
+            return round(float(value), 2) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _integer(value: Any, fallback: int = 0) -> int:
+        try:
+            return max(0, int(value)) if value is not None else max(0, int(fallback))
+        except (TypeError, ValueError):
+            return max(0, int(fallback))
+
+    @classmethod
+    def _integer_or_none(cls, value: Any) -> int | None:
+        return cls._integer(value) if value is not None else None
+
+    @staticmethod
+    def _is_system_mount(mountpoint: str) -> bool:
+        canonical = os.path.normcase(os.path.abspath(mountpoint)).rstrip("\\/")
+        if os.name == "nt":
+            system_drive = os.environ.get("SystemDrive", "C:").rstrip("\\/")
+            return canonical == os.path.normcase(system_drive)
+        return canonical in {"", "/"}
 
     @staticmethod
     def _is_real_storage(partition: Any) -> bool:
@@ -148,16 +236,70 @@ class DiskService:
 
     @staticmethod
     def _windows_metadata() -> dict[str, dict[str, Any]]:
-        script = (
-            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
-            "$items = Get-Partition -ErrorAction SilentlyContinue | Where-Object {$_.DriveLetter} | "
-            "ForEach-Object {$p=$_; $d=$p | Get-Disk; "
-            "$v=Get-Volume -DriveLetter $p.DriveLetter -ErrorAction SilentlyContinue; "
-            "[pscustomobject]@{mount=($p.DriveLetter+':\\'); model=$d.FriendlyName; "
-            "serial=$d.SerialNumber; interface=[string]$d.BusType; filesystem=$v.FileSystem; "
-            "label=$v.FileSystemLabel}}; $items | ConvertTo-Json -Compress"
+        script = r"""
+[Console]::OutputEncoding=[Text.Encoding]::UTF8
+$perfItems = @(Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -ErrorAction SilentlyContinue)
+$physicalDisks = @(Get-PhysicalDisk -ErrorAction SilentlyContinue)
+$partitionItems = @(Get-Partition -ErrorAction SilentlyContinue | Where-Object {$_.DriveLetter} | ForEach-Object {
+  $p = $_
+  $d = $p | Get-Disk -ErrorAction SilentlyContinue
+  $v = Get-Volume -DriveLetter $p.DriveLetter -ErrorAction SilentlyContinue
+  $number = [int]$d.Number
+  $perf = $perfItems | Where-Object {$_.Name -match ('^' + $number + '\s')} | Select-Object -First 1
+  $physical = $physicalDisks | Where-Object {[string]$_.DeviceId -eq [string]$number} | Select-Object -First 1
+  $reliability = $null
+  if ($physical) {
+    try { $reliability = $physical | Get-StorageReliabilityCounter -ErrorAction Stop } catch {}
+  }
+  $health = @($d.HealthStatus, ($d.OperationalStatus -join ', ')) | Where-Object {$_} | Select-Object -Unique
+  [pscustomobject]@{
+    mount = ($p.DriveLetter + ':\')
+    model = $d.FriendlyName
+    serial = $d.SerialNumber
+    interface = [string]$d.BusType
+    filesystem = $v.FileSystem
+    label = $v.FileSystemLabel
+    total_bytes = [uint64]$v.Size
+    free_bytes = [uint64]$v.SizeRemaining
+    disk_number = $number
+    temperature_c = if ($reliability) {$reliability.Temperature} else {$null}
+    power_on_hours = if ($reliability) {$reliability.PowerOnHours} else {$null}
+    read_speed_mbps = if ($perf) {[math]::Round(([double]$perf.DiskReadBytesPersec / 1MB), 2)} else {$null}
+    write_speed_mbps = if ($perf) {[math]::Round(([double]$perf.DiskWriteBytesPersec / 1MB), 2)} else {$null}
+    utilization_percent = if ($perf) {[math]::Min(100, [math]::Round([double]$perf.PercentDiskTime, 2))} else {$null}
+    health_detail = if ($health) {($health -join ' / ')} else {$null}
+  }
+})
+$knownMounts = @($partitionItems | ForEach-Object {$_.mount})
+$logicalFallback = @(Get-CimInstance Win32_LogicalDisk -ErrorAction SilentlyContinue | Where-Object {
+  $_.DriveType -in @(2, 3) -and (($_.DeviceID + '\') -notin $knownMounts)
+} | ForEach-Object {
+  [pscustomobject]@{
+    mount = ($_.DeviceID + '\')
+    model = $null
+    serial = $null
+    interface = $null
+    filesystem = $_.FileSystem
+    label = $_.VolumeName
+    total_bytes = [uint64]$_.Size
+    free_bytes = [uint64]$_.FreeSpace
+    disk_number = $null
+    temperature_c = $null
+    power_on_hours = $null
+    read_speed_mbps = $null
+    write_speed_mbps = $null
+    utilization_percent = $null
+    health_detail = $null
+    virtual = ($_.VolumeName -match 'Google Drive|OneDrive|Dropbox')
+  }
+})
+$items = @($partitionItems) + @($logicalFallback)
+$items | ConvertTo-Json -Compress
+"""
+        raw = _run_json(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            timeout=12,
         )
-        raw = _run_json(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script])
         if isinstance(raw, dict):
             raw = [raw]
         result: dict[str, dict[str, Any]] = {}

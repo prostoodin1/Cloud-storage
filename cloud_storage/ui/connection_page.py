@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 
 import qrcode
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -34,6 +35,7 @@ class ConnectionCodePanel(QFrame):
         self.setProperty("card", True)
         self._health: dict | None = None
         self._tunnels: dict = {}
+        self._users_count = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -83,11 +85,16 @@ class ConnectionCodePanel(QFrame):
         self.create_user_button.setVisible(False)
         self.generate_button.setVisible(False)
 
-        users_title = QLabel("Пользователи")
-        users_title.setStyleSheet("font-size: 16px; font-weight: 700;")
-        layout.addWidget(users_title)
-        self.users_rows = QVBoxLayout()
-        layout.addLayout(self.users_rows)
+        self.users_toggle = QPushButton("Пользователи (0)  ▾")
+        self.users_toggle.setCheckable(True)
+        self.users_toggle.setChecked(True)
+        self.users_toggle.setStyleSheet("font-size: 16px; font-weight: 700; text-align: left;")
+        layout.addWidget(self.users_toggle)
+        self.users_container = QWidget()
+        self.users_rows = QVBoxLayout(self.users_container)
+        self.users_rows.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.users_container)
+        self.users_toggle.toggled.connect(self._toggle_users)
 
         self.access_tabs = QTabWidget()
         credentials_tab = QWidget()
@@ -148,6 +155,7 @@ class ConnectionCodePanel(QFrame):
         self.access_tabs.setVisible(False)
 
         dynamic_card = QFrame()
+        self.dynamic_card = dynamic_card
         dynamic_card.setProperty("card", True)
         dynamic_layout = QVBoxLayout(dynamic_card)
         dynamic_title = QLabel("Динамический код подключения")
@@ -171,6 +179,8 @@ class ConnectionCodePanel(QFrame):
         dynamic_layout.addWidget(self.dynamic_code)
         dynamic_layout.addLayout(dynamic_actions)
         layout.addWidget(dynamic_card)
+        # The one-time code is the primary action and must stay above the user list.
+        layout.insertWidget(2, dynamic_card)
         self._dynamic_expires_at = 0
         self._dynamic_refresh_requested = False
         self._dynamic_timer = QTimer(self)
@@ -213,6 +223,10 @@ class ConnectionCodePanel(QFrame):
                     break
         self.user.blockSignals(False)
         clear_layout(self.users_rows)
+        self._users_count = len(users)
+        self.users_toggle.setText(
+            f"Пользователи ({len(users)})  {'▾' if self.users_toggle.isChecked() else '▸'}"
+        )
         if not users:
             empty = QLabel("Пользователей пока нет.")
             empty.setProperty("muted", True)
@@ -221,6 +235,20 @@ class ConnectionCodePanel(QFrame):
             card = QFrame()
             card.setProperty("card", True)
             row = QHBoxLayout(card)
+            state = str(item.get("presence_state") or "offline")
+            state_colors = {
+                "offline": "#8b949e",
+                "online": "#f59e0b",
+                "connected": "#22c55e",
+                "transferring": "#3b82f6",
+                "deleting": "#ef4444",
+            }
+            status_dot = QLabel("●")
+            status_dot.setToolTip(str(item.get("presence_detail") or "Не в сети"))
+            status_dot.setStyleSheet(
+                f"font-size: 22px; color: {state_colors.get(state, state_colors['offline'])};"
+            )
+            row.addWidget(status_dot, 0, Qt.AlignmentFlag.AlignTop)
             text = QVBoxLayout()
             name = str(item.get("display_name") or item.get("username") or "Пользователь")
             title = QLabel(name)
@@ -232,8 +260,24 @@ class ConnectionCodePanel(QFrame):
                 f"{'включён' if item.get('enabled', True) else 'отключён'}"
             )
             detail.setProperty("muted", True)
+            dates = QLabel(
+                f"Создан: {self._display_time(item.get('created_at'))} · "
+                f"Последний вход: {self._display_time(item.get('last_login_at'))} · "
+                f"{item.get('presence_detail') or 'Не в сети'}"
+            )
+            dates.setProperty("muted", True)
+            dates.setWordWrap(True)
             text.addWidget(title)
             text.addWidget(detail)
+            text.addWidget(dates)
+            activity = str(item.get("activity_detail") or "").strip()
+            if activity:
+                activity_label = QLabel(activity)
+                activity_label.setWordWrap(True)
+                activity_label.setStyleSheet(
+                    f"color: {state_colors.get(state, state_colors['offline'])};"
+                )
+                text.addWidget(activity_label)
             row.addLayout(text, 1)
             user_id = str(item.get("id") or "")
             username = str(item.get("username") or "")
@@ -302,6 +346,21 @@ class ConnectionCodePanel(QFrame):
             email_access.setVisible(False)
             self.users_rows.addWidget(card)
         self._render_endpoint()
+
+    def _toggle_users(self, expanded: bool) -> None:
+        self.users_container.setVisible(expanded)
+        self.users_toggle.setText(
+            f"Пользователи ({self._users_count})  {'▾' if expanded else '▸'}"
+        )
+
+    @staticmethod
+    def _display_time(value: object) -> str:
+        if not value:
+            return "никогда"
+        try:
+            return datetime.fromisoformat(str(value)).astimezone().strftime("%d.%m.%Y %H:%M")
+        except ValueError:
+            return str(value)
 
     def selected_endpoint(self, mode: str | None = None) -> tuple[str, str]:
         if not self._health:

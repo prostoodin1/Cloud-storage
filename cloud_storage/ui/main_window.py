@@ -7,8 +7,8 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -305,6 +305,7 @@ class MainWindow(QMainWindow):
         self.connection_page.panel.email_access_requested.connect(self.send_user_access_email)
         self.connection_page.panel.refresh_button.clicked.connect(self.refresh_core)
         self.disks_page.disk_selected.connect(self.open_disk)
+        self.disks_page.disk_action_requested.connect(self.run_disk_action)
         self.disks_page.refresh_requested.connect(self.refresh_disks)
         self.disks_page.configure_first_requested.connect(self.configure_first_unconfigured)
         self.disks_page.remind_later_requested.connect(self.hide_disk_reminder)
@@ -479,7 +480,11 @@ class MainWindow(QMainWindow):
     def refresh_disks(self) -> None:
         self._refresh_core_state()
         try:
-            discovered = self.disk_service.discover()
+            discovered = [
+                item
+                for item in self.disk_service.discover()
+                if item.id not in self.settings.removed_disk_ids
+            ]
         except Exception as exc:  # UI boundary: discovery failures must not crash the manager
             self.audit.record("disk.scan.failed", f"Ошибка обнаружения дисков: {exc}", "warning")
             QMessageBox.warning(
@@ -1858,6 +1863,7 @@ class MainWindow(QMainWindow):
             config = self.settings.configuration_for(disk.id)
             if (
                 not disk.available
+                or disk.is_system
                 or config.role not in eligible_roles
                 or config.mode == DiskMode.DISCONNECTED
             ):
@@ -1923,7 +1929,7 @@ class MainWindow(QMainWindow):
                 )
 
     def open_setup(self) -> None:
-        available = [item for item in self.disks if item.available]
+        available = [item for item in self.disks if item.available and not item.is_system]
         if not available:
             QMessageBox.information(
                 self,
@@ -1971,6 +1977,7 @@ class MainWindow(QMainWindow):
                 item
                 for item in self.disks
                 if item.available
+                and not item.is_system
                 and self.settings.configuration_for(item.id).role == DiskRole.UNCONFIGURED
             ),
             None,
@@ -1983,6 +1990,7 @@ class MainWindow(QMainWindow):
             item
             for item in self.disks
             if item.available
+            and not item.is_system
             and self.settings.configuration_for(item.id).role == DiskRole.UNCONFIGURED
         ]
         if not pending:
@@ -2007,11 +2015,217 @@ class MainWindow(QMainWindow):
         disk = next((item for item in self.disks if item.id == disk_id), None)
         if disk is None:
             return
-        dialog = DiskDetailDialog(disk, self.settings.configuration_for(disk.id), self)
+        dialog = DiskDetailDialog(
+            disk,
+            self.settings.configuration_for(disk.id),
+            users=self.core_users,
+            spaces=self.core_spaces,
+            storage_roots=self.core_storage_roots,
+            parent=self,
+        )
         dialog.configuration_saved.connect(self.save_disk_configuration)
+        dialog.permissions_saved.connect(self.save_disk_permissions)
         dialog.refresh_requested.connect(self.refresh_disks)
         dialog.cleanup_requested.connect(self.cleanup_disk_temporary)
+        dialog.check_requested.connect(self.check_disk_errors)
+        dialog.optimize_requested.connect(self.optimize_disk)
+        dialog.format_requested.connect(self.format_disk)
+        dialog.remove_requested.connect(self.remove_disk)
         dialog.exec()
+
+    def save_disk_permissions(
+        self, disk_id: str, permissions: dict[str, dict[str, bool | None]]
+    ) -> None:
+        root_ids = {
+            str(item.get("id") or "")
+            for item in self.core_storage_roots
+            if str(item.get("disk_id") or "") == disk_id
+        }
+        spaces = [
+            item
+            for item in self.core_spaces
+            if item.get("kind") == "shared"
+            and (
+                str(item.get("primary_storage_root_id") or "") in root_ids
+                or str(item.get("fallback_storage_root_id") or "") in root_ids
+            )
+        ]
+        try:
+            for space in spaces:
+                space_id = str(space.get("id") or "")
+                members = {
+                    str(item.get("user_id") or ""): item.get("capabilities") or {}
+                    for item in space.get("members") or []
+                }
+                for user_id, changes in permissions.items():
+                    capabilities = {
+                        name: bool((members.get(user_id) or {}).get(name))
+                        for name in ("read", "upload", "modify", "delete", "share")
+                    }
+                    for capability, enabled in changes.items():
+                        if enabled is not None:
+                            capabilities[capability] = enabled
+                    self.core_client.set_space_member(space_id, user_id, capabilities)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Права не сохранены", self._core_error_text(exc))
+            return
+        self.audit.record(
+            "disk.permissions.saved",
+            f"Права диска применены: пространств {len(spaces)}, пользователей {len(permissions)}",
+        )
+        self.refresh_core()
+
+    def _disk_by_id(self, disk_id: str) -> DiskSnapshot | None:
+        return next((item for item in self.disks if item.id == disk_id), None)
+
+    def run_disk_action(self, disk_id: str, action: str) -> None:
+        disk = self._disk_by_id(disk_id)
+        if disk is None:
+            return
+        if action == "open":
+            if disk.available:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(disk.mountpoint))
+            return
+        handlers = {
+            "check": self.check_disk_errors,
+            "optimize": self.optimize_disk,
+            "format": self.format_disk,
+            "remove": self.remove_disk,
+        }
+        handler = handlers.get(action)
+        if handler is not None:
+            handler(disk_id)
+
+    def check_disk_errors(self, disk_id: str) -> None:
+        disk = self._disk_by_id(disk_id)
+        if disk is None or not disk.available:
+            return
+        try:
+            self.disk_service.start_error_check(disk)
+        except (OSError, PermissionError, ValueError) as exc:
+            QMessageBox.warning(self, "Проверка не запущена", str(exc))
+            return
+        self.audit.record("disk.check.started", f"Запущена проверка ошибок: {disk.mountpoint}")
+        QMessageBox.information(
+            self,
+            "Проверка запущена",
+            "Windows запросит права администратора и выполнит проверку тома без исправления данных.",
+        )
+
+    def optimize_disk(self, disk_id: str) -> None:
+        disk = self._disk_by_id(disk_id)
+        if disk is None or not disk.available:
+            return
+        try:
+            self.disk_service.start_optimize(disk)
+        except (OSError, PermissionError, ValueError) as exc:
+            QMessageBox.warning(self, "Оптимизация не запущена", str(exc))
+            return
+        self.audit.record("disk.optimize.started", f"Запущена оптимизация: {disk.mountpoint}")
+        QMessageBox.information(
+            self,
+            "Оптимизация запущена",
+            "Windows самостоятельно выберет TRIM для SSD или оптимизацию для HDD.",
+        )
+
+    def format_disk(self, disk_id: str) -> None:
+        disk = self._disk_by_id(disk_id)
+        if disk is None or not disk.available:
+            return
+        config = self.settings.configuration_for(disk_id)
+        if disk.is_system:
+            QMessageBox.warning(self, "Операция запрещена", "Системный диск форматировать нельзя.")
+            return
+        if config.role not in {DiskRole.UNCONFIGURED, DiskRole.UNUSED}:
+            QMessageBox.warning(
+                self,
+                "Сначала отключите диск от хранилища",
+                "Выберите назначение «Пока не использовать», сохраните настройки и повторите.",
+            )
+            return
+        response = QMessageBox.warning(
+            self,
+            "Все данные будут удалены",
+            f"Форматирование {disk.mountpoint} безвозвратно удалит все данные на томе. Продолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        confirmation, accepted = QInputDialog.getText(
+            self,
+            "Подтверждение форматирования",
+            f"Введите FORMAT {disk.mountpoint[:2].upper()}",
+        )
+        if not accepted or confirmation.strip().upper() != f"FORMAT {disk.mountpoint[:2].upper()}":
+            QMessageBox.information(self, "Отменено", "Контрольная строка не совпала.")
+            return
+        filesystem, accepted = QInputDialog.getItem(
+            self,
+            "Файловая система",
+            "Выберите файловую систему:",
+            ["NTFS", "exFAT"],
+            0,
+            False,
+        )
+        if not accepted:
+            return
+        try:
+            self.disk_service.start_format(disk, filesystem=filesystem)
+        except (OSError, PermissionError, ValueError) as exc:
+            QMessageBox.warning(self, "Форматирование не запущено", str(exc))
+            return
+        self.audit.record(
+            "disk.format.started",
+            f"Подтверждено форматирование тома {disk.mountpoint} в {filesystem}",
+            "warning",
+        )
+        QMessageBox.information(
+            self,
+            "Форматирование запущено",
+            "Подтвердите запрос Windows. После завершения нажмите «Обновить данные».",
+        )
+
+    def remove_disk(self, disk_id: str) -> None:
+        disk = self._disk_by_id(disk_id)
+        if disk is None or disk.is_system:
+            return
+        root_ids = {
+            str(item.get("id") or "")
+            for item in self.core_storage_roots
+            if str(item.get("disk_id") or "") == disk_id
+        }
+        assigned_spaces = [
+            item
+            for item in self.core_spaces
+            if str(item.get("primary_storage_root_id") or "") in root_ids
+            or str(item.get("fallback_storage_root_id") or "") in root_ids
+        ]
+        if assigned_spaces:
+            QMessageBox.warning(
+                self,
+                "Диск используется",
+                "Сначала переназначьте логические пространства: "
+                + ", ".join(str(item.get("name") or "Пространство") for item in assigned_spaces),
+            )
+            return
+        response = QMessageBox.question(
+            self,
+            "Удалить диск из Manager?",
+            "Диск исчезнет из списка и будет отключён от Cloud Storage. "
+            "Файлы и разделы на физическом диске не удаляются.",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        self.settings.disk_configurations.pop(disk_id, None)
+        self.settings.known_disk_ids = [item for item in self.settings.known_disk_ids if item != disk_id]
+        self.settings.ignored_disk_ids = [item for item in self.settings.ignored_disk_ids if item != disk_id]
+        if disk_id not in self.settings.removed_disk_ids:
+            self.settings.removed_disk_ids.append(disk_id)
+        self.store.save(self.settings)
+        self.audit.record("disk.removed", f"Диск удалён из Manager: {disk.mountpoint}")
+        self._sync_storage_roots(show_errors=True)
+        self.refresh_disks()
 
     def cleanup_disk_temporary(self, disk_id: str) -> None:
         root = next(
@@ -2051,6 +2265,16 @@ class MainWindow(QMainWindow):
         old = self.settings.configuration_for(disk_id)
         disk = next((item for item in self.disks if item.id == disk_id), None)
         if disk is not None:
+            if disk.is_system and configuration.role not in {
+                DiskRole.UNCONFIGURED,
+                DiskRole.UNUSED,
+            }:
+                QMessageBox.warning(
+                    self,
+                    "Системный диск защищён",
+                    "Системный диск нельзя назначить хранилищем Cloud Storage.",
+                )
+                return
             configuration = replace(
                 configuration,
                 identity_mountpoint=disk.mountpoint,

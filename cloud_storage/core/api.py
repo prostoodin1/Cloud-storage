@@ -1804,6 +1804,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
 
     @app.get("/v1/admin/users", tags=["manager"], dependencies=[Depends(require_manager)])
     def list_users() -> list[dict[str, Any]]:
+        runtime_overview = runtime.repository.user_runtime_overview()
         spaces = runtime.repository.list_spaces_admin()
         grants: dict[str, list[dict[str, Any]]] = {}
         for space in spaces:
@@ -1817,9 +1818,29 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                     }
                 )
         return [
-            {**asdict(item), "space_grants": grants.get(item.id, [])}
+            {
+                **asdict(item),
+                **runtime_overview.get(item.id, {}),
+                "space_grants": grants.get(item.id, []),
+            }
             for item in runtime.repository.list_users()
         ]
+
+    @app.delete(
+        "/v1/admin/users/{user_id}",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+    )
+    def delete_user_disabled(user_id: str) -> None:
+        del user_id
+        raise HTTPException(
+            status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+            detail=(
+                "Удаление пользователей отключено. Отключите учётную запись — "
+                "файлы, аудит и устройства будут сохранены."
+            ),
+        )
 
     @app.post(
         "/v1/admin/users",

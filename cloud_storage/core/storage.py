@@ -386,7 +386,12 @@ class StorageService:
             path = parent / path.name
             if path in seen_paths:
                 raise InvalidStorageRoot("duplicate managed storage path")
-            self._initialize_managed_root(path, request.disk_id)
+            try:
+                self._initialize_managed_root(path, request.disk_id)
+            except OSError as exc:
+                raise InvalidStorageRoot(
+                    f"managed storage path is unavailable: {path} ({exc})"
+                ) from exc
             prepared.append(
                 ManagedRootRequest(
                     disk_id=request.disk_id,

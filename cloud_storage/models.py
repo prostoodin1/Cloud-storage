@@ -58,6 +58,8 @@ class DiskSnapshot:
     utilization_percent: float | None = None
     power_on_hours: int | None = None
     health_detail: str | None = None
+    disk_number: int | None = None
+    is_system: bool = False
     available: bool = True
 
     @property
@@ -112,7 +114,7 @@ class DiskConfiguration:
 
 @dataclass(slots=True)
 class AppSettings:
-    schema_version: int = 5
+    schema_version: int = 6
     server_name: str = "Домашнее облако"
     setup_complete: bool = False
     setup_reminded_later: bool = False
@@ -131,6 +133,7 @@ class AppSettings:
     zrok_share_name: str = ""
     known_disk_ids: list[str] = field(default_factory=list)
     ignored_disk_ids: list[str] = field(default_factory=list)
+    removed_disk_ids: list[str] = field(default_factory=list)
     disk_configurations: dict[str, DiskConfiguration] = field(default_factory=dict)
     extra_fields: dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -140,7 +143,7 @@ class AppSettings:
         result = cls()
         known = {item.name for item in cls.__dataclass_fields__.values()} - {"extra_fields"}
         result.extra_fields = {key: val for key, val in value.items() if key not in known}
-        result.schema_version = 5
+        result.schema_version = 6
         result.server_name = str(value.get("server_name", result.server_name))[:80]
         result.setup_complete = bool(value.get("setup_complete", False))
         result.setup_reminded_later = bool(value.get("setup_reminded_later", False))
@@ -183,6 +186,7 @@ class AppSettings:
         result.zrok_share_name = str(value.get("zrok_share_name", "")).strip()[:63]
         result.known_disk_ids = [str(item) for item in value.get("known_disk_ids", [])]
         result.ignored_disk_ids = [str(item) for item in value.get("ignored_disk_ids", [])]
+        result.removed_disk_ids = [str(item) for item in value.get("removed_disk_ids", [])]
         configs = value.get("disk_configurations", {})
         if isinstance(configs, dict):
             result.disk_configurations = {
@@ -218,6 +222,7 @@ class AppSettings:
             "zrok_share_name": self.zrok_share_name,
             "known_disk_ids": self.known_disk_ids,
             "ignored_disk_ids": self.ignored_disk_ids,
+            "removed_disk_ids": self.removed_disk_ids,
             "disk_configurations": {
                 key: config.to_dict() for key, config in self.disk_configurations.items()
             },

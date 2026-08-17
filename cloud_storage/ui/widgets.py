@@ -8,9 +8,11 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -102,6 +104,7 @@ class StatCard(QFrame):
 
 class DiskCard(QFrame):
     selected = Signal(str)
+    action_requested = Signal(str, str)
 
     def __init__(
         self,
@@ -127,6 +130,27 @@ class DiskCard(QFrame):
         mount.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         top.addWidget(title, 1)
         top.addWidget(mount)
+        actions_button = QToolButton()
+        actions_button.setText("Действия ▾")
+        actions_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        actions_menu = QMenu(actions_button)
+        for label, action_name in (
+            ("Открыть в Проводнике", "open"),
+            ("Найти ошибки", "check"),
+            ("Оптимизировать", "optimize"),
+            ("Форматировать…", "format"),
+            ("Удалить из Manager", "remove"),
+        ):
+            action = actions_menu.addAction(label)
+            if disk.is_system and action_name in {"optimize", "format", "remove"}:
+                action.setEnabled(False)
+            action.triggered.connect(
+                lambda _checked=False, name=action_name: self.action_requested.emit(
+                    self.disk_id, name
+                )
+            )
+        actions_button.setMenu(actions_menu)
+        top.addWidget(actions_button)
         layout.addLayout(top)
 
         status = evaluate_status(disk, configuration)
@@ -137,7 +161,7 @@ class DiskCard(QFrame):
             if configuration
             else ROLE_LABELS[next(iter(ROLE_LABELS))]
         )
-        role_label = QLabel(role)
+        role_label = QLabel("Системный диск · только диагностика" if disk.is_system else role)
         role_label.setProperty("muted", True)
         row.addWidget(role_label)
         row.addStretch()

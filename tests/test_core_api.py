@@ -398,7 +398,7 @@ def test_tunnel_registry_is_builtin_and_restart_is_manager_only(tmp_path) -> Non
                 "status",
                 "restart",
                 "public_https",
-                "reserved_share",
+                "named_share",
             ],
         }
     ]

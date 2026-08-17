@@ -25,3 +25,12 @@ def test_invalid_enum_values_fall_back_safely() -> None:
 
     assert config.role == DiskRole.UNCONFIGURED
     assert config.mode == DiskMode.ACTIVE
+
+
+def test_legacy_default_zrok_executable_migrates_to_zrok2() -> None:
+    assert AppSettings.from_dict({"zrok_executable": "zrok"}).zrok_executable == "zrok2"
+    assert AppSettings.from_dict({"zrok_executable": "zrok.exe"}).zrok_executable == "zrok2.exe"
+    assert (
+        AppSettings.from_dict({"zrok_executable": "C:/tools/zrok.exe"}).zrok_executable
+        == "C:/tools/zrok.exe"
+    )

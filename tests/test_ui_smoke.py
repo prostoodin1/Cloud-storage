@@ -75,6 +75,7 @@ def test_main_window_smoke(tmp_path) -> None:
     assert window.settings_page.remote_audit_rows is not None
     assert window.settings_page.zrok_port.value() == 8768
     assert window.settings_page.zrok_enabled.isChecked() is False
+    assert window.settings_page.zrok_executable.text() == "zrok2"
     assert window.settings_page.zrok_status_label is not None
     assert window.settings_page.zrok_restart_button is not None
     assert window.settings_page.support_bundle_button is not None

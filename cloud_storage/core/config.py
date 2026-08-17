@@ -27,7 +27,7 @@ class CoreConfig:
     zrok_enabled: bool = False
     zrok_host: str = "127.0.0.1"
     zrok_port: int = 8768
-    zrok_executable: str = "zrok"
+    zrok_executable: str = "zrok2"
     zrok_share_name: str = ""
     server_name: str = "Домашнее облако"
     max_upload_bytes: int = 20 * 1024**3
@@ -135,8 +135,13 @@ class CoreConfig:
             os.environ.get("CLOUD_STORAGE_ZROK_PORT", str(persisted.get("zrok_port", 8768)))
         )
         zrok_executable = os.environ.get(
-            "CLOUD_STORAGE_ZROK_EXECUTABLE", str(persisted.get("zrok_executable", "zrok"))
+            "CLOUD_STORAGE_ZROK_EXECUTABLE", str(persisted.get("zrok_executable", "zrok2"))
         ).strip()
+        if (
+            "CLOUD_STORAGE_ZROK_EXECUTABLE" not in os.environ
+            and zrok_executable.casefold() in {"zrok", "zrok.exe"}
+        ):
+            zrok_executable = "zrok2.exe" if zrok_executable.casefold().endswith(".exe") else "zrok2"
         zrok_share_name = os.environ.get(
             "CLOUD_STORAGE_ZROK_SHARE_NAME", str(persisted.get("zrok_share_name", ""))
         ).strip()

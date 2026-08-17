@@ -95,12 +95,13 @@ class ZrokTunnelService:
                 "status",
                 "restart",
                 "public_https",
-                "reserved_share",
+                "named_share",
             ],
         }
 
     def status(self) -> dict[str, Any]:
         executable = self._resolve_executable()
+        cli_version = self._cli_version(executable or self.config.zrok_executable)
         with self._lock:
             running = self._process is not None and self._process.poll() is None
             return {
@@ -112,8 +113,10 @@ class ZrokTunnelService:
                 "process_running": running,
                 "listener": f"http://{self.config.zrok_host}:{self.config.zrok_port}",
                 "public_url": self._public_url,
-                "share_type": "reserved" if self.config.zrok_share_name else "ephemeral",
+                "share_type": "named" if self.config.zrok_share_name else "ephemeral",
                 "share_name": self.config.zrok_share_name,
+                "share_namespace": "public" if self.config.zrok_share_name else "",
+                "cli_version": cli_version,
                 "login_required": True,
                 "manager_api_exposed": False,
                 "automatic_router_changes": False,
@@ -127,22 +130,12 @@ class ZrokTunnelService:
         if executable is None:
             self._set_state(
                 "not_installed",
-                "zrok executable was not found; install zrok and enable its environment",
+                "zrok2 executable was not found; install zrok2 and run zrok2 enable",
             )
             return
         delay = 1.0
         while not self._stop_event.is_set():
-            command = [executable, "share"]
-            if self.config.zrok_share_name:
-                command.extend(["reserved", "--headless", self.config.zrok_share_name])
-            else:
-                command.extend(
-                    [
-                        "public",
-                        "--headless",
-                        f"{self.config.zrok_host}:{self.config.zrok_port}",
-                    ]
-                )
+            command = self._share_command(executable)
             arguments: dict[str, Any] = {
                 "stdin": subprocess.DEVNULL,
                 "stdout": subprocess.PIPE,
@@ -214,6 +207,28 @@ class ZrokTunnelService:
             self._resolved_executable = resolved or ""
         return resolved
 
+    def _share_command(self, executable: str) -> list[str]:
+        backend = f"{self.config.zrok_host}:{self.config.zrok_port}"
+        if self._cli_version(executable) >= 2:
+            command = [executable, "share", "public", "--headless", backend]
+            if self.config.zrok_share_name:
+                command.extend(["-n", f"public:{self.config.zrok_share_name}"])
+            return command
+        if self.config.zrok_share_name:
+            return [
+                executable,
+                "share",
+                "reserved",
+                "--headless",
+                self.config.zrok_share_name,
+            ]
+        return [executable, "share", "public", "--headless", backend]
+
+    @staticmethod
+    def _cli_version(executable: str) -> int:
+        name = re.split(r"[\\/]", executable.strip())[-1].casefold()
+        return 2 if name in {"zrok2", "zrok2.exe"} else 1
+
     @staticmethod
     def _subprocess_environment() -> dict[str, str]:
         allowed = {
@@ -238,7 +253,7 @@ class ZrokTunnelService:
             key: value
             for key, value in os.environ.items()
             if key.casefold() in allowed
-            or key.casefold().startswith(("zrok_", "pfxlog_"))
+            or key.casefold().startswith(("zrok2_", "zrok_", "pfxlog_"))
         }
 
     def _set_state(self, state: str, error: str = "") -> None:

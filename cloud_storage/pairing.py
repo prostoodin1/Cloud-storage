@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import re
+import time
 import urllib.parse
 import zlib
 from dataclasses import dataclass
@@ -11,6 +14,7 @@ _FINGERPRINT = re.compile(r"^[0-9a-fA-F]{64}$")
 DISCOVERY_PREFIX = "CLOUD_STORAGE_DISCOVER_V1:"
 CONNECTION_CODE_PREFIX = "CS1."
 SERVER_CODE_PREFIX = "CS2."
+DYNAMIC_CODE_PREFIX = "CS3."
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +40,131 @@ class ServerLocator:
     @property
     def addresses(self) -> tuple[str, ...]:
         return (self.server_url, *self.alternate_addresses)
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicPairingCode:
+    raw_code: str
+    server_id: str
+    server_url: str
+    certificate_fingerprint: str
+    expires_at: int
+    nonce: str
+    alternate_addresses: tuple[str, ...] = ()
+
+    @property
+    def addresses(self) -> tuple[str, ...]:
+        return (self.server_url, *self.alternate_addresses)
+
+
+def build_dynamic_pairing_code(
+    *,
+    server_id: str,
+    server_url: str,
+    certificate_fingerprint: str,
+    expires_at: int,
+    nonce: str,
+    signing_key: bytes,
+    alternate_addresses: list[str] | tuple[str, ...] = (),
+) -> str:
+    locator = _validated_invitation("SERVER00", server_url, certificate_fingerprint, "")
+    alternatives = []
+    for address in alternate_addresses:
+        validated = _validated_invitation("SERVER00", str(address), "", "")
+        if validated.server_url != locator.server_url:
+            alternatives.append(validated.server_url)
+    payload = {
+        "v": 3,
+        "sid": server_id,
+        "s": locator.server_url,
+        "f": locator.certificate_fingerprint,
+        "a": list(dict.fromkeys(alternatives))[:8],
+        "exp": int(expires_at),
+        "n": nonce,
+    }
+    if not re.fullmatch(r"[a-f0-9]{16,64}", server_id) or not re.fullmatch(
+        r"[A-Za-z0-9_-]{16,64}", nonce
+    ):
+        raise ValueError("invalid dynamic pairing identity")
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    ).decode("ascii").rstrip("=")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(signing_key, b"dynamic-pairing\0" + encoded.encode("ascii"), hashlib.sha256).digest()
+    ).decode("ascii").rstrip("=")
+    return f"{DYNAMIC_CODE_PREFIX}{encoded}.{signature}"
+
+
+def parse_dynamic_pairing_code(value: str) -> DynamicPairingCode | None:
+    candidate = value.strip()
+    if not candidate.upper().startswith(DYNAMIC_CODE_PREFIX):
+        return None
+    parts = candidate[len(DYNAMIC_CODE_PREFIX) :].split(".")
+    if len(parts) != 2 or any(
+        not item or len(item) > 4096 or not re.fullmatch(r"[A-Za-z0-9_-]+", item)
+        for item in parts
+    ):
+        raise ValueError("invalid dynamic pairing code")
+    try:
+        raw = base64.urlsafe_b64decode(parts[0] + "=" * (-len(parts[0]) % 4))
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid dynamic pairing code") from exc
+    if not isinstance(payload, dict) or set(payload) != {"v", "sid", "s", "f", "a", "exp", "n"}:
+        raise ValueError("invalid dynamic pairing code")
+    if payload["v"] != 3 or not isinstance(payload["exp"], int):
+        raise ValueError("invalid dynamic pairing code")
+    server_id, nonce = str(payload["sid"]), str(payload["n"])
+    if not re.fullmatch(r"[a-f0-9]{16,64}", server_id) or not re.fullmatch(
+        r"[A-Za-z0-9_-]{16,64}", nonce
+    ):
+        raise ValueError("invalid dynamic pairing code")
+    invitation = _validated_invitation(
+        "SERVER00", str(payload["s"]), str(payload["f"]), ""
+    )
+    if not isinstance(payload["a"], list) or len(payload["a"]) > 8:
+        raise ValueError("invalid dynamic pairing code")
+    alternatives = tuple(
+        dict.fromkeys(
+            _validated_invitation("SERVER00", str(item), "", "").server_url
+            for item in payload["a"]
+            if str(item).rstrip("/") != invitation.server_url
+        )
+    )
+    return DynamicPairingCode(
+        candidate,
+        server_id,
+        invitation.server_url,
+        invitation.certificate_fingerprint,
+        payload["exp"],
+        nonce,
+        alternatives,
+    )
+
+
+def verify_dynamic_pairing_code(
+    value: str,
+    *,
+    signing_key: bytes,
+    expected_server_id: str,
+    now: int | None = None,
+) -> DynamicPairingCode:
+    parsed = parse_dynamic_pairing_code(value)
+    if parsed is None:
+        raise ValueError("dynamic pairing code is required")
+    encoded, supplied_signature = value.strip()[len(DYNAMIC_CODE_PREFIX) :].split(".")
+    expected_signature = base64.urlsafe_b64encode(
+        hmac.new(signing_key, b"dynamic-pairing\0" + encoded.encode("ascii"), hashlib.sha256).digest()
+    ).decode("ascii").rstrip("=")
+    timestamp = int(time.time()) if now is None else now
+    if (
+        not hmac.compare_digest(supplied_signature, expected_signature)
+        or parsed.server_id != expected_server_id
+        or parsed.expires_at <= timestamp
+        or parsed.expires_at > timestamp + 300
+    ):
+        raise ValueError("dynamic pairing code is invalid or expired")
+    return parsed
 
 
 def build_server_code(
@@ -191,6 +320,15 @@ def build_pairing_uri(
 
 def parse_pairing_uri(value: str) -> PairingInvitation | None:
     candidate = value.strip()
+    dynamic = parse_dynamic_pairing_code(candidate)
+    if dynamic is not None:
+        return PairingInvitation(
+            dynamic.raw_code,
+            dynamic.server_url,
+            dynamic.certificate_fingerprint,
+            "",
+            dynamic.alternate_addresses,
+        )
     connection_code = parse_connection_code(candidate)
     if connection_code is not None:
         return connection_code

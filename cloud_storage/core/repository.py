@@ -488,6 +488,71 @@ class CoreRepository:
             )
         return PairingResult(device=self.get_device(device_id), device_token=token)
 
+    def redeem_dynamic_pairing(
+        self,
+        *,
+        device_name: str,
+        platform: str,
+        remote_address: str | None,
+    ) -> PairingResult:
+        """Create an approved passwordless account for a newly paired device."""
+        device_name, platform = self._validate_device_identity(device_name, platform)
+        token = self.credentials.generate_device_token()
+        token_hash = self.credentials.device_token_hash(token)
+        user_id = str(uuid.uuid4())
+        device_id = str(uuid.uuid4())
+        space_id = str(uuid.uuid4())
+        username = f"device_{device_id.replace('-', '')[:16]}"
+        created = utc_text()
+        quota_bytes = 100 * 1024**3
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO users(
+                    id, username, display_name, email, password_hash, password_version,
+                    role, quota_bytes, enabled, created_at
+                ) VALUES(?, ?, ?, '', NULL, 0, 'member', ?, 1, ?)
+                """,
+                (user_id, username, device_name, quota_bytes, created),
+            )
+            connection.execute(
+                """
+                INSERT INTO spaces(
+                    id, owner_user_id, name, kind, quota_bytes,
+                    primary_storage_root_id, fallback_storage_root_id, created_at
+                ) VALUES(?, ?, 'Мои файлы', 'personal', ?, NULL, NULL, ?)
+                """,
+                (space_id, user_id, quota_bytes, created),
+            )
+            connection.execute(
+                """
+                INSERT INTO space_members(
+                    space_id, user_id, permission, can_read, can_upload,
+                    can_modify, can_delete, can_share
+                ) VALUES(?, ?, 'owner', 1, 1, 1, 1, 1)
+                """,
+                (space_id, user_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO devices(
+                    id, user_id, name, platform, token_hash, status, created_at, approved_at
+                ) VALUES(?, ?, ?, ?, ?, 'trusted', ?, ?)
+                """,
+                (device_id, user_id, device_name, platform, token_hash, created, created),
+            )
+            self._audit_tx(
+                connection,
+                actor_type="device",
+                actor_id=device_id,
+                action="device.dynamic_pairing.completed",
+                target_type="user",
+                target_id=user_id,
+                detail=f"Устройство {device_name} подключено динамическим кодом",
+                remote_address=remote_address,
+            )
+        return PairingResult(device=self.get_device(device_id), device_token=token)
+
     def revoke_unused_access_invitations(self, user_id: str) -> int:
         with self.database.transaction() as connection:
             changed = connection.execute(

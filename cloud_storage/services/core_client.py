@@ -576,6 +576,9 @@ class CoreClient:
             payload={"user_id": user_id, "ttl_seconds": ttl_seconds},
         )
 
+    def dynamic_pairing_code(self) -> dict[str, Any]:
+        return self._manager_request("/v1/admin/dynamic-pairing-code")
+
     def cancel_invitation(self, invitation_id: str) -> bool:
         result = self._manager_request(f"/v1/admin/invitations/{invitation_id}", method="DELETE")
         return bool(result.get("cancelled"))

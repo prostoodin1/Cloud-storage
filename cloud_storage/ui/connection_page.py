@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
+
 import qrcode
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -40,8 +42,8 @@ class ConnectionCodePanel(QFrame):
         title = QLabel("Код подключения клиента")
         title.setStyleSheet("font-size: 18px; font-weight: 700;")
         description = QLabel(
-            "Обычный вход использует только логин и пароль. Для первого подключения "
-            "из другой сети создайте одноразовую ссылку или QR без пароля."
+            "Сервер автоматически меняет защищённый код каждые 5 минут. Введите его "
+            "в Desktop Client один раз — дальнейшие подключения выполняются автоматически."
         )
         description.setWordWrap(True)
         description.setProperty("muted", True)
@@ -61,6 +63,9 @@ class ConnectionCodePanel(QFrame):
         form.addRow("Пользователь", self.user)
         form.addRow("Доступ", self.scope)
         form.addRow("Адрес внутри кода", self.endpoint)
+        form.setRowVisible(self.user, False)
+        form.setRowVisible(self.scope, False)
+        form.setRowVisible(self.endpoint, False)
         layout.addLayout(form)
 
         controls = QHBoxLayout()
@@ -75,6 +80,8 @@ class ConnectionCodePanel(QFrame):
         controls.addWidget(self.refresh_button)
         controls.addStretch()
         layout.addLayout(controls)
+        self.create_user_button.setVisible(False)
+        self.generate_button.setVisible(False)
 
         users_title = QLabel("Пользователи")
         users_title.setStyleSheet("font-size: 16px; font-weight: 700;")
@@ -138,6 +145,38 @@ class ConnectionCodePanel(QFrame):
         qr_layout.addWidget(qr_help, 1)
         self.access_tabs.addTab(qr_tab, "3. QR-code")
         layout.addWidget(self.access_tabs)
+        self.access_tabs.setVisible(False)
+
+        dynamic_card = QFrame()
+        dynamic_card.setProperty("card", True)
+        dynamic_layout = QVBoxLayout(dynamic_card)
+        dynamic_title = QLabel("Динамический код подключения")
+        dynamic_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        self.dynamic_code = QLineEdit()
+        self.dynamic_code.setReadOnly(True)
+        self.dynamic_code.setPlaceholderText("Запустите Core и включите локальный HTTPS")
+        self.dynamic_code.setMinimumHeight(46)
+        self.dynamic_code.setMaxLength(4096)
+        dynamic_actions = QHBoxLayout()
+        self.dynamic_countdown = QLabel("Код ещё не получен")
+        self.dynamic_countdown.setProperty("muted", True)
+        self.copy_dynamic_button = QPushButton("Копировать код")
+        self.copy_dynamic_button.setProperty("primary", True)
+        self.copy_dynamic_button.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(self.dynamic_code.text())
+        )
+        dynamic_actions.addWidget(self.dynamic_countdown, 1)
+        dynamic_actions.addWidget(self.copy_dynamic_button)
+        dynamic_layout.addWidget(dynamic_title)
+        dynamic_layout.addWidget(self.dynamic_code)
+        dynamic_layout.addLayout(dynamic_actions)
+        layout.addWidget(dynamic_card)
+        self._dynamic_expires_at = 0
+        self._dynamic_refresh_requested = False
+        self._dynamic_timer = QTimer(self)
+        self._dynamic_timer.setInterval(1000)
+        self._dynamic_timer.timeout.connect(self._update_dynamic_countdown)
+        self._dynamic_timer.start()
 
         self.result_detail = QLabel(
             "Интернет-код станет доступен после запуска zrok или настройки публичного HTTPS-входа."
@@ -188,7 +227,7 @@ class ConnectionCodePanel(QFrame):
             title.setStyleSheet("font-weight: 700;")
             grants = item.get("space_grants") or []
             detail = QLabel(
-                f"@{item.get('username', '')} · {item.get('email') or 'email не задан'} · "
+                f"{'Администратор' if item.get('role') == 'admin' else 'Обычный пользователь'} · "
                 f"пространств: {len(grants)} · "
                 f"{'включён' if item.get('enabled', True) else 'отключён'}"
             )
@@ -255,6 +294,12 @@ class ConnectionCodePanel(QFrame):
             row.addWidget(edit)
             row.addWidget(password)
             row.addWidget(email_access)
+            copy_login.setVisible(False)
+            password_value.setVisible(False)
+            show_password.setVisible(False)
+            copy_password.setVisible(False)
+            password.setVisible(False)
+            email_access.setVisible(False)
             self.users_rows.addWidget(card)
         self._render_endpoint()
 
@@ -323,6 +368,25 @@ class ConnectionCodePanel(QFrame):
 
     def show_error(self, message: str) -> None:
         self.result_detail.setText(message)
+
+    def set_dynamic_code(self, value: dict | None) -> None:
+        value = value or {}
+        self.dynamic_code.setText(str(value.get("code") or ""))
+        self._dynamic_expires_at = int(value.get("expires_at") or 0)
+        self._dynamic_refresh_requested = False
+        self.copy_dynamic_button.setEnabled(bool(self.dynamic_code.text()))
+        self._update_dynamic_countdown()
+
+    def _update_dynamic_countdown(self) -> None:
+        remaining = max(0, self._dynamic_expires_at - int(time.time()))
+        if not self.dynamic_code.text():
+            self.dynamic_countdown.setText("Код недоступен")
+            return
+        minutes, seconds = divmod(remaining, 60)
+        self.dynamic_countdown.setText(f"Сменится через {minutes:02d}:{seconds:02d}")
+        if remaining == 0 and not self._dynamic_refresh_requested:
+            self._dynamic_refresh_requested = True
+            self.refresh_button.click()
 
     def copy_code(self) -> None:
         if not self.generated_username.text() or not self.generated_password.text():

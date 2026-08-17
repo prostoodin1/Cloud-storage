@@ -241,7 +241,8 @@ class ClientWindow(QMainWindow):
         layout.addWidget(
             make_header(
                 "Подключиться",
-                "Вставьте единый код из Server Manager — адрес и защита сервера настроятся автоматически.",
+                "Введите динамический код из Server Manager. Адрес и защита сервера "
+                "настроятся автоматически.",
             )
         )
 
@@ -251,8 +252,8 @@ class ClientWindow(QMainWindow):
         self.connection_title = QLabel("Клиент не подключён")
         self.connection_title.setStyleSheet("font-weight: 700; font-size: 18px;")
         self.connection_detail = QLabel(
-            "Получите код вида CS1.… у администратора, вставьте его ниже, задайте пароль "
-            "и название этого компьютера. Ручной адрес нужен только для старых серверов."
+            "Получите действующий пять минут код вида CS3.… у администратора и вставьте "
+            "его ниже. После первого подключения этот компьютер будет входить автоматически."
         )
         self.connection_detail.setWordWrap(True)
         self.connection_detail.setProperty("muted", True)
@@ -273,6 +274,7 @@ class ClientWindow(QMainWindow):
             button.setCheckable(True)
             button.clicked.connect(lambda _checked=False, page=index: self._set_connection_mode(page))
             mode_controls.addWidget(button)
+            button.setVisible(False)
             self.connection_mode_buttons.append(button)
         mode_controls.addStretch()
         card_layout.addLayout(mode_controls)
@@ -314,15 +316,15 @@ class ClientWindow(QMainWindow):
         link_page = QWidget()
         link_form = QFormLayout(link_page)
         link_help = QLabel(
-            "Вставьте рабочую ссылку cloudstorage://pair?… из Server Manager. IP, TLS и логин заполнятся автоматически."
+            "Код обновляется на сервере каждые пять минут и нужен только для первого подключения."
         )
         link_help.setWordWrap(True)
         link_help.setProperty("muted", True)
         self.pairing_code = QLineEdit()
-        self.pairing_code.setPlaceholderText("cloudstorage://pair?… или CS1.…")
+        self.pairing_code.setPlaceholderText("A7K9-4Q2M-X8P3 или CS3.…")
         self.pairing_code.setMaxLength(4096)
         link_form.addRow(link_help)
-        link_form.addRow("Ссылка", self.pairing_code)
+        link_form.addRow("Код подключения", self.pairing_code)
         self.connection_modes.addWidget(link_page)
 
         qr_page = QWidget()
@@ -349,6 +351,8 @@ class ClientWindow(QMainWindow):
         self.password_label = QLabel("Пароль")
         common_form.addRow(self.password_label, self.password)
         common_form.addRow("Название устройства", self.device_name)
+        common_form.setRowVisible(self.password, False)
+        common_form.setRowVisible(self.device_name, False)
         card_layout.addLayout(common_form)
         enrollment_controls = QHBoxLayout()
         self.account_login_button = QPushButton("Войти по логину")
@@ -361,9 +365,11 @@ class ClientWindow(QMainWindow):
         enrollment_controls.addWidget(self.account_login_button)
         enrollment_controls.addWidget(self.connect_button)
         enrollment_controls.addWidget(self.import_access_button)
+        self.account_login_button.setVisible(False)
+        self.import_access_button.setVisible(False)
         enrollment_controls.addStretch()
         card_layout.addLayout(enrollment_controls)
-        self._set_connection_mode(0)
+        self._set_connection_mode(1)
         controls = QHBoxLayout()
         self.status_button = QPushButton("Проверить подтверждение")
         self.status_button.clicked.connect(self.refresh_connection)
@@ -374,6 +380,8 @@ class ClientWindow(QMainWindow):
         controls.addWidget(self.status_button)
         controls.addWidget(self.remote_login_button)
         controls.addWidget(self.forget_button)
+        self.status_button.setVisible(False)
+        self.remote_login_button.setVisible(False)
         controls.addStretch()
         card_layout.addLayout(controls)
         layout.addWidget(form_card)
@@ -391,15 +399,11 @@ class ClientWindow(QMainWindow):
             button.style().unpolish(button)
             button.style().polish(button)
         if hasattr(self, "account_login_button"):
-            self.account_login_button.setVisible(safe_index == 0)
-            self.connect_button.setVisible(safe_index in {1, 2})
-            self.connect_button.setText(
-                "Подключиться по ссылке"
-                if safe_index == 1
-                else "Подключиться по QR"
-            )
-            self.password_label.setVisible(safe_index == 0)
-            self.password.setVisible(safe_index == 0)
+            self.account_login_button.setVisible(False)
+            self.connect_button.setVisible(True)
+            self.connect_button.setText("Подключиться")
+            self.password_label.setVisible(False)
+            self.password.setVisible(False)
 
     def connect_selected_invitation(self) -> None:
         if self.connection_modes.currentIndex() == 2:
@@ -834,14 +838,11 @@ class ClientWindow(QMainWindow):
             return
         code = raw_code
         device_name = self.device_name.text().strip()
-        if (
-            len(code.replace("-", "")) != 8
-            or not device_name
-        ):
+        if not code.upper().startswith("CS3.") or not device_name:
             QMessageBox.warning(
                 self,
                 "Проверьте данные",
-                "Нужны рабочая одноразовая ссылка или QR и название устройства.",
+                "Введите действующий динамический код CS3 из Server Manager.",
             )
             return
         self.connect_button.setEnabled(False)
@@ -984,11 +985,12 @@ class ClientWindow(QMainWindow):
         self.status_button.setEnabled(True)
         self.forget_button.setEnabled(True)
         self.remote_login_button.setEnabled(True)
-        self._set_connection_state("pending")
+        pairing_state = str(device.get("status", "trusted"))
+        self._set_connection_state(pairing_state)
         QMessageBox.information(
             self,
-            "Запрос отправлен",
-            "Теперь администратор должен подтвердить устройство в Server Manager.",
+            "Подключение выполнено",
+            "Сервер сохранён. При следующих запусках клиент подключится автоматически.",
         )
 
     def discover_lan_servers(self) -> None:

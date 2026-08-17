@@ -546,6 +546,12 @@ class MainWindow(QMainWindow):
 
     def _refresh_pages(self) -> None:
         events = self.audit.recent()
+        dynamic_pairing: dict[str, object] = {}
+        if self.core_health is not None:
+            try:
+                dynamic_pairing = self.core_client.dynamic_pairing_code()
+            except (CoreApiError, CoreUnavailable):
+                dynamic_pairing = {}
         users_for_ui = [
             {
                 **user,
@@ -576,6 +582,7 @@ class MainWindow(QMainWindow):
             users_for_ui,
             self.core_tunnels,
         )
+        self.connection_page.panel.set_dynamic_code(dynamic_pairing)
         self.settings_page.load_settings(self.settings, str(self.store.path))
         self.settings_page.update_core_data(
             self.core_health,
@@ -597,6 +604,8 @@ class MainWindow(QMainWindow):
             self.core_integrations,
             spaces=self.core_spaces,
         )
+        if self.settings_page.connection_panel is not None:
+            self.settings_page.connection_panel.set_dynamic_code(dynamic_pairing)
         self.receive_page.update_data(self.core_transfers, online=self.core_health is not None)
         self.send_page.update_data(self.core_transfers, online=self.core_health is not None)
         self.control_page.update_data(self.core_control, online=self.core_health is not None)

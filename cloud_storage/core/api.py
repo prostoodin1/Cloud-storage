@@ -58,6 +58,7 @@ from cloud_storage.core.storage import (
 from cloud_storage.core.support import SupportBundleService
 from cloud_storage.core.tls import TlsIdentity, lan_endpoints, load_or_create_tls_identity
 from cloud_storage.core.tunnels import TunnelProviderRegistry
+from cloud_storage.pairing import build_dynamic_pairing_code, verify_dynamic_pairing_code
 
 
 class SpaceCapabilitiesRequest(BaseModel):
@@ -116,7 +117,7 @@ class CreateInvitationRequest(BaseModel):
 
 
 class RedeemInvitationRequest(BaseModel):
-    code: str = Field(min_length=8, max_length=16)
+    code: str = Field(min_length=8, max_length=4096)
     password: SecretStr | None = None
     device_name: str = Field(min_length=1, max_length=100)
     platform: str = Field(min_length=1, max_length=50)
@@ -476,6 +477,62 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     app.state.runtime = runtime
     app.state.shutdown_callback = None
     app.state.restart_callback = None
+
+    dynamic_server_id = runtime.repository.credentials.fingerprint(
+        runtime.config.server_name, "dynamic-server-id"
+    )[:32]
+
+    def current_dynamic_pairing() -> dict[str, Any]:
+        now = int(time.time())
+        expires_at = ((now // 300) + 1) * 300
+        nonce = runtime.repository.credentials.fingerprint(
+            f"{dynamic_server_id}:{expires_at}", "dynamic-pairing-nonce"
+        )[:24]
+        addresses: list[str] = []
+        if runtime.config.lan_enabled:
+            addresses.extend(lan_endpoints(runtime.config))
+        zrok_status = runtime.tunnels.status("zrok")
+        zrok_url = str(zrok_status.get("public_url") or "").rstrip("/")
+        if (
+            runtime.config.zrok_enabled
+            and runtime.config.remote_pairing_enabled
+            and zrok_status.get("state") == "online"
+            and zrok_url.startswith("https://")
+        ):
+            addresses.append(zrok_url)
+        remote_url = runtime.config.remote_public_url.rstrip("/")
+        if (
+            runtime.config.remote_enabled
+            and runtime.config.remote_pairing_enabled
+            and remote_url.startswith("https://")
+        ):
+            addresses.append(remote_url)
+        addresses = list(dict.fromkeys(item for item in addresses if item))
+        if not addresses:
+            raise HTTPException(
+                status_code=503,
+                detail="Включите локальный HTTPS или защищённый интернет-вход для pairing",
+            )
+        fingerprint = (
+            runtime.tls_identity.fingerprint
+            if runtime.tls_identity and addresses[0] != zrok_url
+            else ""
+        )
+        code = build_dynamic_pairing_code(
+            server_id=dynamic_server_id,
+            server_url=addresses[0],
+            certificate_fingerprint=fingerprint,
+            expires_at=expires_at,
+            nonce=nonce,
+            signing_key=runtime.repository.credentials.hmac_secret,
+            alternate_addresses=addresses[1:],
+        )
+        return {
+            "code": code,
+            "server_id": dynamic_server_id,
+            "expires_at": expires_at,
+            "seconds_remaining": max(0, expires_at - now),
+        }
     bearer = HTTPBearer(auto_error=False)
     pairing_limiter = SlidingWindowLimiter(limit=10, window_seconds=300)
     remote_pairing_limiter = SlidingWindowLimiter(limit=5, window_seconds=900)
@@ -2280,23 +2337,48 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         background.add_task(callback)
         return {"accepted": True}
 
+    @app.get(
+        "/v1/admin/dynamic-pairing-code",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def dynamic_pairing_code() -> dict[str, Any]:
+        return current_dynamic_pairing()
+
     @app.post("/v1/pairing/redeem", tags=["pairing"], status_code=status.HTTP_201_CREATED)
     def redeem_invitation(body: RedeemInvitationRequest, request: Request) -> dict[str, Any]:
         remote = request.client.host if request.client else "unknown"
         limiter = remote_pairing_limiter if request.state.remote_request else pairing_limiter
         if not limiter.allow(remote):
             raise HTTPException(status_code=429, detail="too many pairing attempts")
-        result = runtime.repository.redeem_invitation(
-            code=body.code,
-            password=body.password.get_secret_value() if body.password is not None else None,
-            device_name=body.device_name,
-            platform=body.platform,
-            remote_address=remote,
-        )
+        if body.code.strip().upper().startswith("CS3."):
+            current = current_dynamic_pairing()
+            verified = verify_dynamic_pairing_code(
+                body.code,
+                signing_key=runtime.repository.credentials.hmac_secret,
+                expected_server_id=dynamic_server_id,
+            )
+            if not secrets.compare_digest(verified.raw_code, current["code"]):
+                raise InvalidCredential("dynamic pairing code is invalid or expired")
+            result = runtime.repository.redeem_dynamic_pairing(
+                device_name=body.device_name,
+                platform=body.platform,
+                remote_address=remote,
+            )
+            message = "Подключение выполнено"
+        else:
+            result = runtime.repository.redeem_invitation(
+                code=body.code,
+                password=body.password.get_secret_value() if body.password is not None else None,
+                device_name=body.device_name,
+                platform=body.platform,
+                remote_address=remote,
+            )
+            message = "Ожидается подтверждение администратора"
         return {
             "device": asdict(result.device),
             "device_token": result.device_token,
-            "message": "Ожидается подтверждение администратора",
+            "message": message,
         }
 
     @app.post(

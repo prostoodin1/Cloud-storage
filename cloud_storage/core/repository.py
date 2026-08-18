@@ -746,6 +746,58 @@ class CoreRepository:
             )
         return PairingResult(device=self.get_device(device_id), device_token=token)
 
+    def request_google_device_login(
+        self,
+        email: str,
+        device_name: str,
+        platform: str,
+        remote_address: str | None,
+    ) -> PairingResult:
+        normalized_email = email.strip().casefold()
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT id FROM users WHERE email = ? COLLATE NOCASE AND enabled = 1",
+                (normalized_email,),
+            ).fetchall()
+        if len(rows) != 1:
+            raise InvalidCredential(
+                "Google email is not assigned to exactly one enabled Cloud Storage user"
+            )
+        user_id = str(rows[0]["id"])
+        device_name, platform = self._validate_device_identity(device_name, platform)
+        token = self.credentials.generate_device_token()
+        token_hash = self.credentials.device_token_hash(token)
+        device_id = str(uuid.uuid4())
+        with self.database.transaction() as connection:
+            pending = connection.execute(
+                "SELECT count(*) FROM devices WHERE user_id = ? AND status = 'pending'",
+                (user_id,),
+            ).fetchone()[0]
+            if pending >= 10:
+                raise ConflictError("too many devices are waiting for approval")
+            connection.execute(
+                "UPDATE devices SET status = 'revoked' WHERE user_id = ? "
+                "AND name = ? COLLATE NOCASE AND platform = ? COLLATE NOCASE "
+                "AND status = 'pending'",
+                (user_id, device_name, platform),
+            )
+            connection.execute(
+                "INSERT INTO devices(id, user_id, name, platform, token_hash, status, created_at) "
+                "VALUES(?, ?, ?, ?, ?, 'pending', ?)",
+                (device_id, user_id, device_name, platform, token_hash, utc_text()),
+            )
+            self._audit_tx(
+                connection,
+                actor_type="device",
+                actor_id=device_id,
+                action="device.google_login.requested",
+                target_type="device",
+                target_id=device_id,
+                detail=f"Запрошен вход нового устройства {device_name} через Google",
+                remote_address=remote_address,
+            )
+        return PairingResult(device=self.get_device(device_id), device_token=token)
+
     @staticmethod
     def _validate_device_identity(device_name: str, platform: str) -> tuple[str, str]:
         device_name = device_name.strip()
@@ -1141,6 +1193,14 @@ class CoreRepository:
                 (max(1, min(limit, 500)),),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def purge_audit(self, retention_days: int = 30) -> int:
+        threshold = utc_text(utc_now() - timedelta(days=max(1, retention_days)))
+        with self.database.transaction() as connection:
+            changed = connection.execute(
+                "DELETE FROM audit_events WHERE timestamp < ?", (threshold,)
+            )
+        return int(changed.rowcount)
 
     def recent_user_operations(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
         self.get_user(user_id)

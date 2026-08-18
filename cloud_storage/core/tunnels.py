@@ -4,12 +4,14 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
 
 from cloud_storage.core.config import CoreConfig
+from cloud_storage.core.zrok_installer import ZROK2_VERSION, download_zrok2, managed_zrok2_path
 
 _PUBLIC_URL = re.compile(r"https?://[a-zA-Z0-9.-]+(?::\d+)?")
 
@@ -44,6 +46,7 @@ class ZrokTunnelService:
     _last_output: str = field(default="", init=False)
     _restart_count: int = field(default=0, init=False)
     _resolved_executable: str = field(default="", init=False)
+    _installing: bool = field(default=False, init=False)
 
     def start(self) -> None:
         if not self.config.zrok_enabled or self._thread is not None:
@@ -123,7 +126,58 @@ class ZrokTunnelService:
                 "restart_count": self._restart_count,
                 "last_error": self._last_error,
                 "last_output": self._last_output,
+                "installing": self._installing,
+                "managed_version": ZROK2_VERSION,
             }
+
+    def install(self) -> dict[str, Any]:
+        with self._lock:
+            if self._installing:
+                return self.status()
+            self._installing = True
+            self._state = "installing"
+            self._last_error = ""
+        thread = threading.Thread(target=self._install_worker, name="zrok2-installer", daemon=True)
+        thread.start()
+        return self.status()
+
+    def _install_worker(self) -> None:
+        try:
+            path = download_zrok2(self.config.data_directory)
+            with self._lock:
+                self._resolved_executable = str(path)
+                self._state = "installed"
+            if self.config.zrok_enabled:
+                self.stop()
+                self.start()
+        except (OSError, RuntimeError) as exc:
+            self._set_state("install_error", str(exc))
+        finally:
+            with self._lock:
+                self._installing = False
+
+    def enable(self, token: str) -> dict[str, Any]:
+        executable = self._resolve_executable()
+        if executable is None:
+            raise RuntimeError("install zrok2 before connecting the account")
+        if not token.strip() or len(token) > 4096:
+            raise ValueError("invalid zrok2 enable token")
+        arguments: dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": 45,
+            "env": self._runtime_environment(force_managed=True),
+        }
+        if os.name == "nt":
+            arguments["creationflags"] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run([executable, "enable", token.strip()], **arguments)
+        if result.returncode:
+            raise RuntimeError((result.stdout or "zrok2 enable failed")[-500:])
+        return self.status()
 
     def _monitor(self) -> None:
         executable = self._resolve_executable()
@@ -145,7 +199,7 @@ class ZrokTunnelService:
                 "errors": "replace",
                 "bufsize": 1,
                 "close_fds": True,
-                "env": self._subprocess_environment(),
+                "env": self._runtime_environment(),
             }
             if os.name == "nt":
                 arguments["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -202,7 +256,21 @@ class ZrokTunnelService:
         if path.is_absolute() or path.parent != Path("."):
             resolved = str(path.resolve()) if path.is_file() else None
         else:
-            resolved = shutil.which(configured)
+            candidates = [
+                managed_zrok2_path(self.config.data_directory),
+                Path(sys.executable).resolve().parent / ("zrok2.exe" if os.name == "nt" else "zrok2"),
+            ]
+            if os.name == "nt":
+                for variable, suffix in (
+                    ("LOCALAPPDATA", "Microsoft/WinGet/Links/zrok2.exe"),
+                    ("USERPROFILE", "scoop/shims/zrok2.exe"),
+                    ("ChocolateyInstall", "bin/zrok2.exe"),
+                ):
+                    root = os.environ.get(variable)
+                    if root:
+                        candidates.append(Path(root) / suffix)
+            match = next((item.resolve() for item in candidates if item.is_file()), None)
+            resolved = str(match) if match else shutil.which(configured)
         with self._lock:
             self._resolved_executable = resolved or ""
         return resolved
@@ -256,6 +324,20 @@ class ZrokTunnelService:
             or key.casefold().startswith(("zrok2_", "zrok_", "pfxlog_"))
         }
 
+    def _runtime_environment(self, *, force_managed: bool = False) -> dict[str, str]:
+        environment = self._subprocess_environment()
+        profile = self.config.data_directory / "zrok2-profile"
+        managed_identity = profile / ".zrok2"
+        using_managed_binary = self._resolved_executable == str(
+            managed_zrok2_path(self.config.data_directory)
+        )
+        if force_managed or using_managed_binary or managed_identity.exists():
+            profile.mkdir(parents=True, exist_ok=True)
+            environment["HOME"] = str(profile)
+            if os.name == "nt":
+                environment["USERPROFILE"] = str(profile)
+        return environment
+
     def _set_state(self, state: str, error: str = "") -> None:
         with self._lock:
             self._state = state
@@ -284,6 +366,24 @@ class TunnelProviderRegistry:
         if provider is None:
             raise KeyError(provider_id)
         return provider.restart()
+
+    def install(self, provider_id: str) -> dict[str, Any]:
+        provider = self.providers.get(provider_id)
+        if provider is None:
+            raise KeyError(provider_id)
+        installer = getattr(provider, "install", None)
+        if installer is None:
+            raise RuntimeError("provider does not support automatic installation")
+        return installer()
+
+    def enable(self, provider_id: str, token: str) -> dict[str, Any]:
+        provider = self.providers.get(provider_id)
+        if provider is None:
+            raise KeyError(provider_id)
+        enabler = getattr(provider, "enable", None)
+        if enabler is None:
+            raise RuntimeError("provider does not support account connection")
+        return enabler(token)
 
     def status(self, provider_id: str) -> dict[str, Any]:
         provider = self.providers.get(provider_id)

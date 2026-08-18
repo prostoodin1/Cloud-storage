@@ -5,9 +5,13 @@ from collections.abc import Callable
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
+    QAbstractButton,
+    QAbstractSpinBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
     QProgressBar,
     QPushButton,
@@ -49,6 +53,24 @@ def clear_layout(layout: QVBoxLayout | QHBoxLayout) -> None:
             widget.deleteLater()
         elif child is not None:
             clear_layout(child)  # type: ignore[arg-type]
+
+
+def apply_context_tooltips(root: QWidget) -> None:
+    """Give every interactive configuration control a short plain-language hint."""
+    for widget in root.findChildren(QWidget):
+        if widget.toolTip().strip():
+            continue
+        if isinstance(widget, QAbstractButton):
+            text = widget.text().replace("&", "").strip()
+            if text:
+                widget.setToolTip(f"Действие: {text}.")
+        elif isinstance(widget, QLineEdit):
+            hint = widget.placeholderText().strip()
+            widget.setToolTip(hint or "Введите значение этой настройки.")
+        elif isinstance(widget, QComboBox):
+            widget.setToolTip("Выберите подходящий вариант из списка.")
+        elif isinstance(widget, QAbstractSpinBox):
+            widget.setToolTip("Измените числовое значение этой настройки.")
 
 
 class StatusBadge(QLabel):
@@ -125,9 +147,27 @@ class DiskCard(QFrame):
             (configuration.display_name if configuration else "") or disk.label or disk.mountpoint
         )
         title.setObjectName("SectionTitle")
+        activity = QLabel("●")
+        busy = (
+            (disk.utilization_percent or 0) >= 5
+            or (disk.read_speed_mbps or 0) >= 0.1
+            or (disk.write_speed_mbps or 0) >= 0.1
+        )
+        configured_active = configuration is not None and configuration.mode.value == "active"
+        if not disk.available or (disk.health_detail and "error" in disk.health_detail.casefold()):
+            activity_color, activity_text = COLORS["red"], "Ошибка"
+        elif busy:
+            activity_color, activity_text = COLORS["blue"], "I/O: диск занят"
+        elif configured_active:
+            activity_color, activity_text = COLORS["green"], "Активен"
+        else:
+            activity_color, activity_text = COLORS["gray"], "Простаивает"
+        activity.setStyleSheet(f"color: {activity_color}; font-size: 18px;")
+        activity.setToolTip(activity_text)
         mount = QLabel(disk.mountpoint)
         mount.setProperty("muted", True)
         mount.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(activity)
         top.addWidget(title, 1)
         top.addWidget(mount)
         actions_button = QToolButton()
@@ -161,7 +201,9 @@ class DiskCard(QFrame):
             if configuration
             else ROLE_LABELS[next(iter(ROLE_LABELS))]
         )
-        role_label = QLabel("Системный диск · только диагностика" if disk.is_system else role)
+        role_label = QLabel(
+            f"Системный раздел · {role}" if disk.is_system else role
+        )
         role_label.setProperty("muted", True)
         row.addWidget(role_label)
         row.addStretch()

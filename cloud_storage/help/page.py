@@ -25,6 +25,7 @@ class HelpPage(QWidget):
     """FAQ browser and private retrieval assistant shared by Manager and Client."""
 
     navigate_requested = Signal(str)
+    open_logs_requested = Signal()
 
     def __init__(
         self,
@@ -66,6 +67,15 @@ class HelpPage(QWidget):
         privacy_layout.addWidget(privacy_title)
         privacy_layout.addWidget(privacy_text, 1)
         layout.addWidget(privacy)
+
+        log_row = QHBoxLayout()
+        log_hint = QLabel("Если что-то не работает, журнал поможет найти причину.")
+        log_hint.setProperty("muted", True)
+        self.open_logs_button = QPushButton("Открыть папку журналов")
+        self.open_logs_button.clicked.connect(self.open_logs_requested)
+        log_row.addWidget(log_hint, 1)
+        log_row.addWidget(self.open_logs_button)
+        layout.addLayout(log_row)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)

@@ -363,6 +363,7 @@ class StorageService:
         prepared: list[ManagedRootRequest] = []
         seen_disks: set[str] = set()
         seen_paths: set[Path] = set()
+        existing_root_ids: dict[Path, str] = {}
         for request in requests:
             if request.disk_id in seen_disks:
                 raise InvalidStorageRoot("a physical disk can have only one managed storage root")
@@ -386,8 +387,21 @@ class StorageService:
             path = parent / path.name
             if path in seen_paths:
                 raise InvalidStorageRoot("duplicate managed storage path")
+            previous_disk_id = ""
+            with self.database.connection() as connection:
+                previous = connection.execute(
+                    "SELECT id, disk_id FROM storage_roots WHERE path = ?",
+                    (str(path),),
+                ).fetchone()
+                if previous is not None:
+                    previous_disk_id = str(previous["disk_id"] or "")
+                    existing_root_ids[path] = str(previous["id"])
             try:
-                self._initialize_managed_root(path, request.disk_id)
+                self._initialize_managed_root(
+                    path,
+                    request.disk_id,
+                    previous_disk_id=previous_disk_id,
+                )
             except OSError as exc:
                 raise InvalidStorageRoot(
                     f"managed storage path is unavailable: {path} ({exc})"
@@ -415,7 +429,7 @@ class StorageService:
                 (0 if prepared else 1,),
             )
             for request in prepared:
-                root_id = (
+                root_id = existing_root_ids.get(request.path) or (
                     "managed-" + hashlib.sha256(request.disk_id.encode("utf-8")).hexdigest()[:16]
                 )
                 root_ids.append(root_id)
@@ -461,7 +475,9 @@ class StorageService:
         return [active[item] for item in expected if item in active]
 
     @staticmethod
-    def _initialize_managed_root(path: Path, disk_id: str) -> None:
+    def _initialize_managed_root(
+        path: Path, disk_id: str, *, previous_disk_id: str = ""
+    ) -> None:
         marker = path / ".cloud-storage-root.json"
         if path.exists() and not path.is_dir():
             raise InvalidStorageRoot("managed storage path is not a directory")
@@ -473,8 +489,20 @@ class StorageService:
                 payload = json.loads(marker.read_text(encoding="utf-8"))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 raise InvalidStorageRoot("managed storage marker is damaged") from exc
-            if payload.get("disk_id") != disk_id:
+            marker_disk_id = str(payload.get("disk_id") or "")
+            if marker_disk_id != disk_id and marker_disk_id != previous_disk_id:
                 raise InvalidStorageRoot("managed storage belongs to a different physical disk")
+            if marker_disk_id != disk_id:
+                # Disk identifiers can legitimately change after an OS/driver update.  A
+                # previous database record for this exact path is the proof that this is
+                # our existing root, so update the marker without adopting arbitrary data.
+                temporary = marker.with_suffix(".tmp")
+                payload["disk_id"] = disk_id
+                payload["identity_updated_at"] = utc_text()
+                temporary.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                os.replace(temporary, marker)
         else:
             temporary = marker.with_suffix(".tmp")
             temporary.write_text(
@@ -2445,7 +2473,12 @@ class StorageService:
                 destination_relative = (
                     Path("objects")
                     / str(item["entity"])
-                    / f"{item['id']}-{uuid.uuid4().hex[:8]}.blob"
+                    / (
+                        hashlib.sha256(
+                            f"{item['entity']}:{item['id']}".encode()
+                        ).hexdigest()[:32]
+                        + ".blob"
+                    )
                 )
                 destination = staging / destination_relative
                 destination.parent.mkdir(parents=True, exist_ok=True)

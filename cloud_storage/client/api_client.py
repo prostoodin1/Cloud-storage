@@ -115,6 +115,16 @@ class ClientApi:
             timeout=10.0,
         )
 
+    def login_google_device(
+        self, id_token: str, device_name: str, platform: str
+    ) -> dict[str, Any]:
+        return self._json_request(
+            "/v1/auth/google-device-login",
+            method="POST",
+            payload={"id_token": id_token, "device_name": device_name, "platform": platform},
+            timeout=20.0,
+        )
+
     def pairing_status(self) -> dict[str, Any]:
         return self._json_request("/v1/pairing/status")
 

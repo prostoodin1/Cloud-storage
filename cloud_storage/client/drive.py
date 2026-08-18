@@ -32,9 +32,20 @@ class DriveManager:
         wanted: dict[tuple[str, str], tuple[ClientProfile, str]] = {}
         for profile in profiles:
             token = DeviceTokenVault(self.data_directory, profile.profile_id).load()
-            if profile.drive_enabled and token and profile.device_status in {"trusted", "offline"}:
+            # An offline helper leaves a broken drive in Explorer.  Unmount it until the
+            # connection monitor confirms that this server is available again.
+            if profile.drive_enabled and token and profile.device_status == "trusted":
                 for space_id, letter in profile.drive_letters.items():
                     wanted[(profile.profile_id, space_id)] = (profile, letter)
+
+        # The same logical storage must never be mounted twice through duplicate profiles.
+        targets: set[tuple[str, str]] = set()
+        for key, (profile, _letter) in list(wanted.items()):
+            target = (profile.server_url.rstrip("/").casefold(), key[1])
+            if target in targets:
+                del wanted[key]
+            else:
+                targets.add(target)
 
         for key in set(self._processes) - set(wanted):
             self._stop_key(key)

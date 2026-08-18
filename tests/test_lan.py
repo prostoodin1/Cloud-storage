@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -444,6 +445,15 @@ def test_zrok2_ephemeral_share_uses_loopback_backend(tmp_path) -> None:
         "--headless",
         "127.0.0.1:8768",
     ]
+
+
+def test_zrok2_detects_core_managed_binary(tmp_path) -> None:
+    executable = tmp_path / "tools" / "zrok2" / ("zrok2.exe" if os.name == "nt" else "zrok2")
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"test")
+    service = ZrokTunnelService(CoreConfig(data_directory=tmp_path))
+
+    assert service._resolve_executable() == str(executable.resolve())
 
 
 def test_live_https_listener_pinning_discovery_and_local_admin_boundary(tmp_path) -> None:

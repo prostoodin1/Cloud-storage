@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import secrets
 import sqlite3
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -69,6 +73,10 @@ class SpaceCapabilitiesRequest(BaseModel):
     share: bool = False
 
 
+class ZrokEnableRequest(BaseModel):
+    token: SecretStr
+
+
 class SpaceGrantRequest(BaseModel):
     space_id: str = Field(min_length=1, max_length=100)
     capabilities: SpaceCapabilitiesRequest = Field(default_factory=SpaceCapabilitiesRequest)
@@ -126,6 +134,12 @@ class RedeemInvitationRequest(BaseModel):
 class DeviceLoginRequest(BaseModel):
     username: str = Field(min_length=3, max_length=32)
     password: SecretStr
+    device_name: str = Field(min_length=1, max_length=100)
+    platform: str = Field(min_length=1, max_length=50)
+
+
+class GoogleDeviceLoginRequest(BaseModel):
+    id_token: SecretStr
     device_name: str = Field(min_length=1, max_length=100)
     platform: str = Field(min_length=1, max_length=50)
 
@@ -383,6 +397,15 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
     database.initialize()
     credentials = CredentialService.from_secret(secrets_store.hmac_secret)
     repository = CoreRepository(database, credentials)
+    repository.purge_audit(30)
+    repository.record_audit(
+        actor_type="system",
+        actor_id=None,
+        action="core.started",
+        target_type="core",
+        target_id=None,
+        detail=f"Cloud Storage Core {__version__} запущен",
+    )
     repository.initialize_default_storage(config.default_storage_root)
     storage = StorageService(config, database, repository)
     storage.cleanup_expired_uploads()
@@ -562,6 +585,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "/",
             "/v1/health",
             "/v1/auth/device-login",
+            "/v1/auth/google-device-login",
             "/v1/pairing/redeem",
             "/v1/pairing/status",
             "/v1/remote/session",
@@ -890,6 +914,11 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "manager_api_exposed": False,
             "automatic_router_changes": False,
         }
+        google_client_id = str(
+            runtime.control.settings().get("integrations", {}).get("email", {}).get(
+                "gmail_client_id", ""
+            )
+        )
         return {
             "status": "ok" if database_status == "ok" else "degraded",
             "version": __version__,
@@ -902,6 +931,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "lan": lan,
             "remote": remote,
             "zrok": zrok,
+            "google_oauth_client_id": google_client_id,
         }
 
     @app.get("/v1/admin/summary", tags=["manager"], dependencies=[Depends(require_manager)])
@@ -931,6 +961,51 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             target_type="tunnel_provider",
             target_id=provider_id,
             detail=f"Перезапущен встроенный tunnel-provider {provider_id}",
+        )
+        return result
+
+    @app.post(
+        "/v1/admin/tunnels/{provider_id}/install",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def install_tunnel(provider_id: str) -> dict[str, Any]:
+        try:
+            result = runtime.tunnels.install(provider_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="tunnel provider not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        runtime.repository.record_audit(
+            actor_type="manager",
+            actor_id=None,
+            action="tunnel.provider.install.started",
+            target_type="tunnel_provider",
+            target_id=provider_id,
+            detail=f"Запущена проверяемая установка tunnel-provider {provider_id}",
+        )
+        return result
+
+    @app.post(
+        "/v1/admin/tunnels/{provider_id}/enable",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
+    def enable_tunnel(provider_id: str, body: ZrokEnableRequest) -> dict[str, Any]:
+        try:
+            result = runtime.tunnels.enable(provider_id, body.token.get_secret_value())
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="tunnel provider not found") from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        runtime.repository.record_audit(
+            actor_type="manager",
+            actor_id=None,
+            action="tunnel.provider.account.enabled",
+            target_type="tunnel_provider",
+            target_id=provider_id,
+            detail=f"Аккаунт tunnel-provider {provider_id} подключён; токен не сохранён",
         )
         return result
 
@@ -2416,6 +2491,51 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         result = runtime.repository.request_device_login(
             username=body.username,
             password=body.password.get_secret_value(),
+            device_name=body.device_name,
+            platform=body.platform,
+            remote_address=remote_address,
+        )
+        return {
+            "device": asdict(result.device),
+            "device_token": result.device_token,
+            "message": "Ожидается подтверждение администратора",
+        }
+
+    @app.post(
+        "/v1/auth/google-device-login",
+        tags=["pairing"],
+        status_code=status.HTTP_201_CREATED,
+    )
+    def google_device_login(body: GoogleDeviceLoginRequest, request: Request) -> dict[str, Any]:
+        client_id = str(
+            runtime.control.settings().get("integrations", {}).get("email", {}).get(
+                "gmail_client_id", ""
+            )
+        )
+        if not client_id:
+            raise HTTPException(status_code=409, detail="Google-вход не настроен")
+        remote_address = request.client.host if request.client else "unknown"
+        limiter = remote_login_limiter if request.state.external_request else pairing_limiter
+        if not limiter.allow(f"google:{remote_address}"):
+            raise HTTPException(status_code=429, detail="too many Google login attempts")
+        token = urllib.parse.quote(body.id_token.get_secret_value(), safe="")
+        google_request = urllib.request.Request(
+            f"https://oauth2.googleapis.com/tokeninfo?id_token={token}",
+            headers={"User-Agent": "CloudStorageCore/1"},
+        )
+        try:
+            with urllib.request.urlopen(google_request, timeout=15) as response:
+                identity = json.loads(response.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=401, detail="Google не подтвердил вход") from exc
+        if (
+            identity.get("aud") != client_id
+            or str(identity.get("email_verified", "")).casefold() not in {"true", "1"}
+            or not identity.get("email")
+        ):
+            raise HTTPException(status_code=401, detail="Google-вход не прошёл проверку")
+        result = runtime.repository.request_google_device_login(
+            email=str(identity["email"]),
             device_name=body.device_name,
             platform=body.platform,
             remote_address=remote_address,

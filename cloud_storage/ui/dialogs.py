@@ -40,7 +40,7 @@ from cloud_storage.models import (
     DiskSnapshot,
 )
 from cloud_storage.pairing import build_pairing_uri
-from cloud_storage.ui.widgets import format_bytes
+from cloud_storage.ui.widgets import apply_context_tooltips, format_bytes
 
 
 def _value(value: object | None, suffix: str = "") -> str:
@@ -129,6 +129,7 @@ class DiskDetailDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+        apply_context_tooltips(self)
 
     def _overview_tab(self) -> QWidget:
         content = QWidget()
@@ -193,12 +194,6 @@ class DiskDetailDialog(QDialog):
         self.display_name.setPlaceholderText(self.disk.label or self.disk.mountpoint)
         self.role = QComboBox()
         roles = ROLE_LABELS.items()
-        if self.disk.is_system:
-            roles = [
-                (role, label)
-                for role, label in roles
-                if role in {DiskRole.UNCONFIGURED, DiskRole.UNUSED}
-            ]
         for role, label in roles:
             self.role.addItem(label, role.value)
         self.role.setCurrentIndex(max(0, self.role.findData(configuration.role.value)))
@@ -224,6 +219,10 @@ class DiskDetailDialog(QDialog):
         self.read_only.setChecked(configuration.read_only)
         self.encryption = QCheckBox("Запросить шифрование после появления серверного ядра")
         self.encryption.setChecked(configuration.encryption_requested)
+        self.explorer_mark = QCheckBox("Отмечать диск как Cloud Storage в Проводнике Windows")
+        self.explorer_mark.setChecked(configuration.explorer_mark_enabled)
+        self.explorer_label = QLineEdit(configuration.explorer_label)
+        self.explorer_label.setPlaceholderText("Например: Семейное облако")
         form.addRow("Название", self.display_name)
         form.addRow("Назначение", self.role)
         form.addRow("Приоритет записи", self.priority)
@@ -234,12 +233,15 @@ class DiskDetailDialog(QDialog):
         form.addRow("", self.auto_move)
         form.addRow("", self.read_only)
         form.addRow("", self.encryption)
+        form.addRow("Метка в Проводнике", self.explorer_label)
+        form.addRow("", self.explorer_mark)
         layout.addLayout(form)
 
         if self.disk.is_system:
             system_warning = QLabel(
-                "Это системный диск. Он показывается для диагностики, но не может быть "
-                "назначен хранилищем, кэшем, резервом или зеркалом."
+                "Это системный раздел. Его можно выбрать явно, но это не рекомендуется: "
+                "заполнение C: может остановить Windows. Форматирование, удаление и оптимизация "
+                "системного раздела всё равно запрещены."
             )
             system_warning.setWordWrap(True)
             system_warning.setProperty("danger", True)
@@ -291,7 +293,7 @@ class DiskDetailDialog(QDialog):
         layout.addLayout(mass)
 
         grid = QGridLayout()
-        headers = ("Пользователь", "Просмотр", "Загрузка", "Изменение", "Удаление", "Ссылки")
+        headers = ("Пользователь", "Чтение", "Добавление", "Изменение", "Удаление", "Ссылки")
         for column, label in enumerate(headers):
             heading = QLabel(label)
             heading.setStyleSheet("font-weight: 700;")
@@ -382,6 +384,14 @@ class DiskDetailDialog(QDialog):
         actions.addStretch()
         layout.addLayout(actions)
 
+        remove_button = QPushButton("Удалить диск из Manager")
+        remove_button.setEnabled(not self.disk.is_system)
+        remove_button.setToolTip(
+            "Убирает диск из Cloud Storage, но не стирает файлы и не удаляет раздел."
+        )
+        remove_button.clicked.connect(lambda: self.remove_requested.emit(self.disk.id))
+        layout.addWidget(remove_button)
+
         safety = QFrame()
         safety.setProperty("accent", "red")
         safety_layout = QVBoxLayout(safety)
@@ -401,11 +411,7 @@ class DiskDetailDialog(QDialog):
         format_button = QPushButton("Форматировать…")
         format_button.setEnabled(self.disk.available and not self.disk.is_system)
         format_button.clicked.connect(lambda: self.format_requested.emit(self.disk.id))
-        remove_button = QPushButton("Удалить диск из Manager")
-        remove_button.setEnabled(not self.disk.is_system)
-        remove_button.clicked.connect(lambda: self.remove_requested.emit(self.disk.id))
         destructive.addWidget(format_button)
-        destructive.addWidget(remove_button)
         destructive.addStretch()
         layout.addLayout(destructive)
 
@@ -424,12 +430,16 @@ class DiskDetailDialog(QDialog):
     def _save(self) -> None:
         role = DiskRole(self.role.currentData())
         if self.disk.is_system and role not in {DiskRole.UNCONFIGURED, DiskRole.UNUSED}:
-            QMessageBox.warning(
+            response = QMessageBox.warning(
                 self,
-                "Системный диск защищён",
-                "Системный диск нельзя использовать для данных Cloud Storage.",
+                "Использовать системный раздел?",
+                "Вы явно выбрали системный раздел. Следите за свободным местом: заполнение C: "
+                "может нарушить работу Windows. Продолжить?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
             )
-            return
+            if response != QMessageBox.StandardButton.Yes:
+                return
         if self.original_role not in {DiskRole.UNCONFIGURED, role}:
             response = QMessageBox.question(
                 self,
@@ -451,6 +461,8 @@ class DiskDetailDialog(QDialog):
             auto_move_allowed=self.auto_move.isChecked(),
             read_only=self.read_only.isChecked(),
             encryption_requested=self.encryption.isChecked(),
+            explorer_mark_enabled=self.explorer_mark.isChecked(),
+            explorer_label=self.explorer_label.text().strip()[:80],
             last_check_at=datetime.now(UTC).isoformat(timespec="seconds"),
             identity_mountpoint=self.disk.mountpoint,
             identity_device=self.disk.device,

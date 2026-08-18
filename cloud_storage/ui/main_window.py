@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -61,6 +62,7 @@ from cloud_storage.ui.dialogs import (
 from cloud_storage.ui.pages import DashboardPage, DisksPage, SettingsPage
 from cloud_storage.ui.transfer_page import TransfersPage
 from cloud_storage.ui.update_page import UpdatePage
+from cloud_storage.ui.widgets import apply_context_tooltips
 
 
 class _CoreHealthSignals(QObject):
@@ -164,6 +166,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1040, 700)
         self.resize(1380, 860)
         self._build_ui()
+        apply_context_tooltips(self)
         self._connect_pages()
 
         self.refresh_timer = QTimer(self)
@@ -216,6 +219,7 @@ class MainWindow(QMainWindow):
             before_install=self._prepare_server_update,
         )
         self.help_page = HelpPage(self.knowledge, "server")
+        self.help_page.open_logs_requested.connect(self.open_logs_directory)
         for label, page in (
             ("⌂   Основная", self.dashboard_page),
             ("⌁   Подключение", self.connection_page),
@@ -301,6 +305,7 @@ class MainWindow(QMainWindow):
         )
         self.connection_page.panel.create_user_requested.connect(self.add_user)
         self.connection_page.panel.edit_user_requested.connect(self.edit_user)
+        self.connection_page.panel.delete_user_requested.connect(self.delete_user_access)
         self.connection_page.panel.reset_password_requested.connect(self.reset_user_password)
         self.connection_page.panel.email_access_requested.connect(self.send_user_access_email)
         self.connection_page.panel.refresh_button.clicked.connect(self.refresh_core)
@@ -380,6 +385,8 @@ class MainWindow(QMainWindow):
             self.remediate_diagnostic_incident
         )
         self.settings_page.tunnel_restart_requested.connect(self.restart_tunnel)
+        self.settings_page.tunnel_install_requested.connect(self.install_tunnel)
+        self.settings_page.tunnel_enable_requested.connect(self.enable_tunnel)
         self.settings_page.support_bundle_requested.connect(self.export_support_bundle)
         self.settings_page.automation_rule_create_requested.connect(self.create_automation_rule)
         self.settings_page.automation_rule_update_requested.connect(self.update_automation_rule)
@@ -396,6 +403,7 @@ class MainWindow(QMainWindow):
         self.settings_page.connection_generation_requested.connect(
             self.generate_connection_code
         )
+        self.settings_page.open_logs_requested.connect(self.open_logs_directory)
 
     def _prepare_server_update(self) -> None:
         if self.core_health is None:
@@ -1800,6 +1808,74 @@ class MainWindow(QMainWindow):
             f"Провайдер {provider_id} перезапущен. Текущее состояние: {state}.",
         )
 
+    def install_tunnel(self, provider_id: str) -> None:
+        try:
+            self.core_client.install_tunnel(provider_id)
+        except (CoreApiError, CoreUnavailable, ValueError) as exc:
+            QMessageBox.warning(self, "Установка не запущена", self._core_error_text(exc))
+            return
+        self.audit.record("core.tunnel.install", f"Запущена установка {provider_id}")
+        self.refresh_core()
+        QMessageBox.information(
+            self,
+            "Установка запущена",
+            "Core скачает официальный zrok2, проверит SHA-256 и установит его в свою папку. "
+            "Состояние обновится автоматически.",
+        )
+
+    def delete_user_access(self, user_id: str) -> None:
+        user = next((item for item in self.core_users if str(item.get("id")) == user_id), None)
+        if user is None:
+            return
+        response = QMessageBox.question(
+            self,
+            "Удалить доступ пользователя?",
+            "Вход будет отключён, а активные устройства перестанут работать. Файлы и история "
+            "сохранятся, поэтому доступ можно вернуть позже.",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        values = {
+            "display_name": str(user.get("display_name") or user.get("username") or "Пользователь"),
+            "email": str(user.get("email") or ""),
+            "quota_gib": max(1, round(int(user.get("quota_bytes") or 1024**3) / 1024**3)),
+            "role": str(user.get("role") or "member"),
+            "enabled": False,
+        }
+        try:
+            self.core_client.update_user(user_id, values)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Пользователь не отключён", self._core_error_text(exc))
+            return
+        self.audit.record(
+            "core.user.deleted",
+            f"Отключён доступ пользователя {values['display_name']}; данные сохранены",
+            "warning",
+        )
+        self.refresh_core()
+
+    def enable_tunnel(self, provider_id: str) -> None:
+        token, accepted = QInputDialog.getText(
+            self,
+            "Подключить аккаунт zrok2",
+            "Вставьте enable-токен из аккаунта zrok. Он будет передан zrok2 один раз и не сохранится:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not accepted or not token.strip():
+            return
+        try:
+            self.core_client.enable_tunnel(provider_id, token.strip())
+        except (CoreApiError, CoreUnavailable, ValueError) as exc:
+            QMessageBox.warning(self, "Аккаунт не подключён", self._core_error_text(exc))
+            return
+        self.audit.record("core.tunnel.enabled", f"Подключён аккаунт {provider_id}")
+        self.refresh_core()
+        QMessageBox.information(
+            self,
+            "Аккаунт подключён",
+            "Теперь включите zrok2 в настройках и сохраните их. Токен подключения не сохранён.",
+        )
+
     def export_support_bundle(self) -> None:
         if not self.core_health:
             QMessageBox.information(self, "Ядро выключено", "Сначала запустите серверное ядро.")
@@ -1839,6 +1915,12 @@ class MainWindow(QMainWindow):
             f"Файл: {bundle['path']}\nSHA-256: {bundle['sha256']}",
         )
 
+    def open_logs_directory(self) -> None:
+        directory = self.audit.path.parent
+        directory.mkdir(parents=True, exist_ok=True)
+        self.audit.record("manager.logs.opened", "Открыта папка журналов Server Manager")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
+
     @staticmethod
     def _core_error_text(error: Exception) -> str:
         if isinstance(error, CoreApiError):
@@ -1863,7 +1945,6 @@ class MainWindow(QMainWindow):
             config = self.settings.configuration_for(disk.id)
             if (
                 not disk.available
-                or disk.is_system
                 or config.role not in eligible_roles
                 or config.mode == DiskMode.DISCONNECTED
             ):
@@ -1929,7 +2010,9 @@ class MainWindow(QMainWindow):
                 )
 
     def open_setup(self) -> None:
-        available = [item for item in self.disks if item.available and not item.is_system]
+        available = sorted(
+            (item for item in self.disks if item.available), key=lambda item: item.is_system
+        )
         if not available:
             QMessageBox.information(
                 self,
@@ -1977,7 +2060,6 @@ class MainWindow(QMainWindow):
                 item
                 for item in self.disks
                 if item.available
-                and not item.is_system
                 and self.settings.configuration_for(item.id).role == DiskRole.UNCONFIGURED
             ),
             None,
@@ -1990,7 +2072,6 @@ class MainWindow(QMainWindow):
             item
             for item in self.disks
             if item.available
-            and not item.is_system
             and self.settings.configuration_for(item.id).role == DiskRole.UNCONFIGURED
         ]
         if not pending:
@@ -2265,16 +2346,6 @@ class MainWindow(QMainWindow):
         old = self.settings.configuration_for(disk_id)
         disk = next((item for item in self.disks if item.id == disk_id), None)
         if disk is not None:
-            if disk.is_system and configuration.role not in {
-                DiskRole.UNCONFIGURED,
-                DiskRole.UNUSED,
-            }:
-                QMessageBox.warning(
-                    self,
-                    "Системный диск защищён",
-                    "Системный диск нельзя назначить хранилищем Cloud Storage.",
-                )
-                return
             configuration = replace(
                 configuration,
                 identity_mountpoint=disk.mountpoint,
@@ -2282,6 +2353,15 @@ class MainWindow(QMainWindow):
                 identity_serial=disk.serial or "",
             )
         self.settings.disk_configurations[disk_id] = configuration
+        if disk is not None:
+            try:
+                self.disk_service.apply_explorer_identity(disk, configuration)
+            except (OSError, PermissionError) as exc:
+                QMessageBox.warning(
+                    self,
+                    "Метка Проводника не применена",
+                    f"Настройки диска сохранены, но Windows не применила метку: {exc}",
+                )
         if disk_id in self.settings.ignored_disk_ids and configuration.role != DiskRole.UNUSED:
             self.settings.ignored_disk_ids.remove(disk_id)
         configured = [
@@ -2357,8 +2437,7 @@ class MainWindow(QMainWindow):
                 "Включить интернет-доступ через zrok?",
                 "Core запустит установленный zrok и опубликует только клиентский шлюз на 127.0.0.1. "
                 "Доступ к файлам потребует логин, пароль и токен подтверждённого устройства. "
-                "Аккаунт zrok2 должен быть заранее включён штатной командой "
-                "zrok2 enable. Продолжить?",
+                "Установить zrok2 и подключить аккаунт можно кнопками в этом разделе. Продолжить?",
             )
             if response != QMessageBox.StandardButton.Yes:
                 return
@@ -2414,6 +2493,7 @@ class MainWindow(QMainWindow):
         self.settings.zrok_port = values["zrok_port"]
         self.settings.zrok_executable = values["zrok_executable"]
         self.settings.zrok_share_name = values["zrok_share_name"]
+        self.settings.disk_defaults = DiskConfiguration.from_dict(values["disk_defaults"])
         self.store.save(self.settings)
         self.settings_page.mark_settings_saved()
         if network_changed:

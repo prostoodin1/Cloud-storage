@@ -58,8 +58,9 @@ foreach ($payload in $payloadNames) {
 $actualUserFiles = @(Get-ChildItem -LiteralPath $output -File | Select-Object -ExpandProperty Name)
 $unexpected = @($actualUserFiles | Where-Object { $_ -notin $expectedUserFiles })
 $missing = @($expectedUserFiles | Where-Object { $_ -notin $actualUserFiles })
-if ($unexpected.Count -or $missing.Count -or $actualUserFiles.Count -ne 6) {
-    throw "output must contain exactly six $Version user files. Missing: $($missing -join ', '); unexpected: $($unexpected -join ', ')"
+$expectedUserFileCount = $expectedUserFiles.Count
+if ($unexpected.Count -or $missing.Count -or $actualUserFiles.Count -ne $expectedUserFileCount) {
+    throw "output must contain exactly $expectedUserFileCount $Version user files. Missing: $($missing -join ', '); unexpected: $($unexpected -join ', ')"
 }
 
 & gh auth status | Out-Host
@@ -110,7 +111,7 @@ try {
     $expectedAssets = @($expectedUserFiles + $payloadNames + $catalogNames)
     $missingAssets = @($expectedAssets | Where-Object { $_ -notin $assetNames })
     $extraAssets = @($assetNames | Where-Object { $_ -notin $expectedAssets })
-    if ($missingAssets.Count -or $extraAssets.Count -or $assetNames.Count -ne 10) {
+    if ($missingAssets.Count -or $extraAssets.Count -or $assetNames.Count -ne $expectedAssets.Count) {
         throw "Draft verification failed; release remains private. Missing: $($missingAssets -join ', '); extra: $($extraAssets -join ', ')"
     }
     foreach ($file in $expectedUserFiles) {
@@ -126,7 +127,7 @@ try {
 
     & gh release edit $tag --repo $Repository --draft=false --latest
     if ($LASTEXITCODE -ne 0) { throw "Draft is complete but could not be published" }
-    Write-Host "Published $tag atomically with six user files, two setup payloads and two signed catalogs."
+    Write-Host "Published $tag atomically with $expectedUserFileCount user files, two setup payloads and two signed catalogs."
 }
 finally {
     if (Test-Path -LiteralPath $temporary) {

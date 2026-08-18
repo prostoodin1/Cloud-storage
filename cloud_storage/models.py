@@ -82,6 +82,8 @@ class DiskConfiguration:
     auto_move_allowed: bool = False
     read_only: bool = False
     encryption_requested: bool = False
+    explorer_mark_enabled: bool = False
+    explorer_label: str = ""
     check_schedule: str = "Еженедельно"
     maintenance_schedule: str = "Вручную"
     last_check_at: str | None = None
@@ -135,6 +137,7 @@ class AppSettings:
     ignored_disk_ids: list[str] = field(default_factory=list)
     removed_disk_ids: list[str] = field(default_factory=list)
     disk_configurations: dict[str, DiskConfiguration] = field(default_factory=dict)
+    disk_defaults: DiskConfiguration = field(default_factory=DiskConfiguration)
     extra_fields: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -194,11 +197,20 @@ class AppSettings:
                 for key, item in configs.items()
                 if isinstance(item, dict)
             }
+        defaults = DiskConfiguration.from_dict(
+            value.get("disk_defaults") if isinstance(value.get("disk_defaults"), dict) else {}
+        )
+        defaults.role = DiskRole.UNCONFIGURED
+        defaults.display_name = ""
+        result.disk_defaults = defaults
         return result
 
     def configuration_for(self, disk_id: str) -> DiskConfiguration:
         if disk_id not in self.disk_configurations:
-            self.disk_configurations[disk_id] = DiskConfiguration()
+            default = DiskConfiguration.from_dict(self.disk_defaults.to_dict())
+            default.role = DiskRole.UNCONFIGURED
+            default.display_name = ""
+            self.disk_configurations[disk_id] = default
         return self.disk_configurations[disk_id]
 
     def to_dict(self) -> dict[str, Any]:
@@ -226,6 +238,7 @@ class AppSettings:
             "disk_configurations": {
                 key: config.to_dict() for key, config in self.disk_configurations.items()
             },
+            "disk_defaults": self.disk_defaults.to_dict(),
         }
         return {**self.extra_fields, **value}
 

@@ -34,3 +34,23 @@ def test_legacy_default_zrok_executable_migrates_to_zrok2() -> None:
         AppSettings.from_dict({"zrok_executable": "C:/tools/zrok.exe"}).zrok_executable
         == "C:/tools/zrok.exe"
     )
+
+
+def test_new_disks_inherit_global_defaults_without_becoming_active() -> None:
+    settings = AppSettings(
+        disk_defaults=DiskConfiguration(
+            role=DiskRole.SHARED,
+            write_priority=73,
+            max_fill_percent=82,
+            min_free_gib=25,
+            auto_move_allowed=True,
+        )
+    )
+
+    created = settings.configuration_for("new-disk")
+
+    assert created.role == DiskRole.UNCONFIGURED
+    assert created.write_priority == 73
+    assert created.max_fill_percent == 82
+    assert created.min_free_gib == 25
+    assert created.auto_move_allowed is True

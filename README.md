@@ -1,6 +1,6 @@
 # Cloud Storage Server
 
-Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.19** завершает живые статусы пользователей и управление физическими дисками.
+Домашний облачный сервер для Windows, Linux, macOS, Android и iOS. Версия **0.9.20** улучшает подключения, zrok2, журналы и управление дисками.
 
 Текущая ветка также содержит полный слой **Idea 4**: системные профили, питание/ИБП,
 Telegram/email/webhook, 20 шаблонов автоматизаций, отчёты, безопасные контейнерные
@@ -11,10 +11,10 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 
 | № | Приложение | Файл |
 |---:|---|---|
-| 1 | Постоянный установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Server-Installer-windows-x64.exe) |
-| 2 | Постоянный установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Client-Installer-windows-x64.exe) |
-| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Desktop-Client-0.9.19-windows-x64.zip) |
-| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Server-Manager-0.9.19-windows-x64.zip) |
+| 1 | Постоянный установщик сервера | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.20/CloudStorage-Server-Installer-windows-x64.exe) |
+| 2 | Постоянный установщик клиента | [Скачать EXE](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.20/CloudStorage-Client-Installer-windows-x64.exe) |
+| 3 | Клиент на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.20/CloudStorage-Desktop-Client-0.9.20-windows-x64.zip) |
+| 4 | Менеджер на ПК | [Скачать ZIP](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.20/CloudStorage-Server-Manager-0.9.20-windows-x64.zip) |
 | 5 | Телефонный клиент | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Mobile-Client-0.9.14-android.apk) |
 | 6 | Телефонный менеджер | [Скачать APK](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.19/CloudStorage-Mobile-Manager-0.9.14-android.apk) |
 
@@ -23,6 +23,16 @@ MacBook/iPhone/iPad. Подробности: [docs/idea4.md](docs/idea4.md).
 Репозиторий разделён на шесть понятных мини-проектов: установщики сервера и клиента, Desktop Client, Server Manager, мобильный клиент и мобильный менеджер. У каждого раздела есть собственный README, manifest, карта исходников, ссылки на сборки и история изменений.
 
 **[Открыть каталог всех приложений](apps/README.md)**
+
+## Что изменено в версии 0.9.20 — подключения и управление
+
+- Client автоматически восстанавливает соединения со всеми сохранёнными серверами и скрывает сетевой диск, пока сервер недоступен;
+- Core распознаёт ручную установку zrok2 и умеет безопасно скачать официальный zrok2 с проверкой SHA-256;
+- исправлена ложная ошибка принадлежности уже известного каталога другому физическому диску;
+- Manager различает физические накопители и разделы, показывает I/O-состояние и позволяет явно выбрать любой том;
+- добавлены журналы с хранением 30 дней, подсказки настроек, Google OAuth и автоматическое открытие скачанных файлов.
+
+Полный список: [RELEASE_NOTES_0.9.20.md](RELEASE_NOTES_0.9.20.md).
 
 ## Что работает в версии 0.9.14
 
@@ -291,8 +301,8 @@ Beta 0.2 **не форматирует диски, не меняет разде�
 
 ## Подключение из интернета
 
-1. Установите актуальный zrok2 по официальной инструкции, получите токен аккаунта и один раз выполните `zrok2 enable <токен>` от имени учётной записи, под которой работает Core.
-2. В Server Manager откройте расширенный режим → «Удалённый доступ», включите zrok2 и сохраните настройки. После запуска Manager покажет публичный HTTPS-адрес. Роутер и firewall менять не нужно.
+1. В Server Manager откройте расширенный режим → «Удалённый доступ» и нажмите «Установить zrok2 автоматически». Уже установленный вручную zrok2 также будет найден.
+2. Нажмите «Подключить аккаунт zrok2», вставьте одноразовый enable-токен, затем включите zrok2 и сохраните настройки. После запуска Manager покажет публичный HTTPS-адрес. Роутер и firewall менять не нужно.
 3. В Desktop Client или Mobile введите публичный HTTPS-адрес, логин, пароль и название нового устройства. Подключение по одноразовому коду можно временно разрешить только как резервный способ.
 4. Подтвердите новое устройство в Manager, затем в клиенте выполните защищённый интернет-вход тем же логином и паролем.
 5. Альтернативы остаются прежними: VPN либо отдельный прямой HTTPS-порт с ручной настройкой. Все внешние файловые запросы требуют интернет-сессию.

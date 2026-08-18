@@ -231,6 +231,27 @@ class CoreClient:
             timeout=10.0,
         )
 
+    def install_tunnel(self, provider_id: str) -> dict[str, Any]:
+        safe_provider_id = provider_id.strip().casefold()
+        if not safe_provider_id or not safe_provider_id.replace("-", "").isalnum():
+            raise ValueError("invalid tunnel provider id")
+        return self._manager_request(
+            f"/v1/admin/tunnels/{safe_provider_id}/install",
+            method="POST",
+            timeout=10.0,
+        )
+
+    def enable_tunnel(self, provider_id: str, token: str) -> dict[str, Any]:
+        safe_provider_id = provider_id.strip().casefold()
+        if not safe_provider_id or not safe_provider_id.replace("-", "").isalnum():
+            raise ValueError("invalid tunnel provider id")
+        return self._manager_request(
+            f"/v1/admin/tunnels/{safe_provider_id}/enable",
+            method="POST",
+            payload={"token": token},
+            timeout=60.0,
+        )
+
     def download_support_bundle(self, destination: Path) -> dict[str, Any]:
         destination = destination.expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)

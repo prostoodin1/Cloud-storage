@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -162,6 +163,35 @@ class DiskService:
             ["-NoProfile", "-NonInteractive", "-Command", command],
         )
 
+    def apply_explorer_identity(
+        self, snapshot: DiskSnapshot, configuration: DiskConfiguration
+    ) -> None:
+        if os.name != "nt":
+            return
+        import ctypes
+        import winreg
+
+        volume = self._windows_volume(snapshot)
+        drive = volume[0]
+        base = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{drive}"
+        if configuration.explorer_mark_enabled:
+            label = configuration.explorer_label or configuration.display_name or "Cloud Storage"
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\DefaultLabel") as key:
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, label)
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\DefaultIcon") as key:
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"{sys.executable},0")
+        else:
+            for suffix in (r"\DefaultIcon", r"\DefaultLabel"):
+                try:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, base + suffix)
+                except FileNotFoundError:
+                    pass
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, base)
+            except (FileNotFoundError, OSError):
+                pass
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
+
     @staticmethod
     def _start_elevated(executable: str, arguments: list[str]) -> None:
         # Arguments come only from validated constants/drive letters, never arbitrary paths.
@@ -240,13 +270,18 @@ class DiskService:
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $perfItems = @(Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -ErrorAction SilentlyContinue)
 $physicalDisks = @(Get-PhysicalDisk -ErrorAction SilentlyContinue)
+$wmiDisks = @(Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue)
 $partitionItems = @(Get-Partition -ErrorAction SilentlyContinue | Where-Object {$_.DriveLetter} | ForEach-Object {
   $p = $_
   $d = $p | Get-Disk -ErrorAction SilentlyContinue
   $v = Get-Volume -DriveLetter $p.DriveLetter -ErrorAction SilentlyContinue
   $number = [int]$d.Number
   $perf = $perfItems | Where-Object {$_.Name -match ('^' + $number + '\s')} | Select-Object -First 1
-  $physical = $physicalDisks | Where-Object {[string]$_.DeviceId -eq [string]$number} | Select-Object -First 1
+  $wmi = $wmiDisks | Where-Object {[int]$_.Index -eq $number} | Select-Object -First 1
+  $physical = $physicalDisks | Where-Object {
+    ($wmi.SerialNumber -and ([string]$_.SerialNumber).Trim() -eq ([string]$wmi.SerialNumber).Trim()) -or
+    ($wmi.Model -and ([string]$_.FriendlyName).Trim() -eq ([string]$wmi.Model).Trim())
+  } | Select-Object -First 1
   $reliability = $null
   if ($physical) {
     try { $reliability = $physical | Get-StorageReliabilityCounter -ErrorAction Stop } catch {}
@@ -254,8 +289,8 @@ $partitionItems = @(Get-Partition -ErrorAction SilentlyContinue | Where-Object {
   $health = @($d.HealthStatus, ($d.OperationalStatus -join ', ')) | Where-Object {$_} | Select-Object -Unique
   [pscustomobject]@{
     mount = ($p.DriveLetter + ':\')
-    model = $d.FriendlyName
-    serial = $d.SerialNumber
+    model = if ($wmi.Model) {$wmi.Model.Trim()} else {$d.FriendlyName}
+    serial = if ($wmi.SerialNumber) {$wmi.SerialNumber.Trim()} else {$d.SerialNumber}
     interface = [string]$d.BusType
     filesystem = $v.FileSystem
     label = $v.FileSystemLabel

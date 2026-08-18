@@ -23,6 +23,7 @@ class ClientProfile:
     download_directory: str = ""
     last_space_id: str = ""
     close_to_tray: bool = True
+    open_downloads_automatically: bool = False
     drive_enabled: bool = True
     drive_letter: str = "S"
     drive_letters: dict[str, str] = field(default_factory=dict)

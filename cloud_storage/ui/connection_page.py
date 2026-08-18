@@ -27,6 +27,7 @@ class ConnectionCodePanel(QFrame):
     generation_requested = Signal(str, str, str)
     create_user_requested = Signal()
     edit_user_requested = Signal(str)
+    delete_user_requested = Signal(str)
     reset_password_requested = Signal(str, str)
     email_access_requested = Signal(str, str)
 
@@ -292,6 +293,14 @@ class ConnectionCodePanel(QFrame):
             edit.clicked.connect(
                 lambda _checked=False, value=user_id: self.edit_user_requested.emit(value)
             )
+            delete_user = QPushButton("Удалить")
+            delete_user.setEnabled(bool(item.get("enabled", True)))
+            delete_user.setToolTip(
+                "Безопасно отключает вход пользователя; его файлы и журнал сохраняются."
+            )
+            delete_user.clicked.connect(
+                lambda _checked=False, value=user_id: self.delete_user_requested.emit(value)
+            )
             password = QPushButton("Новый пароль")
             password.clicked.connect(
                 lambda _checked=False, value=user_id, label=name: (
@@ -335,6 +344,7 @@ class ConnectionCodePanel(QFrame):
             row.addWidget(password_value)
             row.addWidget(show_password)
             row.addWidget(copy_password)
+            row.addWidget(delete_user)
             row.addWidget(edit)
             row.addWidget(password)
             row.addWidget(email_access)

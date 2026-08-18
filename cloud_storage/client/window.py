@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import platform
 import time
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
@@ -60,12 +62,19 @@ from cloud_storage.client.settings import (
     validate_server_url,
 )
 from cloud_storage.client.transfers import TransferRecord, TransferStore
+from cloud_storage.google_oauth import authorize_google_identity
 from cloud_storage.help.knowledge import KnowledgeBase
 from cloud_storage.help.page import HelpPage
 from cloud_storage.pairing import build_pairing_uri, parse_pairing_uri
+from cloud_storage.services.audit_log import AuditLog
 from cloud_storage.ui.theme import create_app_icon
 from cloud_storage.ui.update_page import UpdatePage
-from cloud_storage.ui.widgets import clear_layout, format_bytes, make_header
+from cloud_storage.ui.widgets import (
+    apply_context_tooltips,
+    clear_layout,
+    format_bytes,
+    make_header,
+)
 
 
 class WorkerSignals(QObject):
@@ -114,6 +123,8 @@ class ClientWindow(QMainWindow):
         self.transfer_store = TransferStore(self.store.data_directory / "transfers.db")
         self.offline_store = OfflineStore(self.store.data_directory / "offline.db")
         self.drive_manager = DriveManager(self.store.data_directory)
+        self.audit = AuditLog(self.store.data_directory / "logs")
+        self.audit.record("client.started", f"Cloud Storage Client {__version__} запущен")
         self.transfer_store.recover_interrupted()
         self.token = self.vault.load()
         self.remote_session = self.session_vault.load()
@@ -127,6 +138,9 @@ class ClientWindow(QMainWindow):
         self._transfer_retry_after: dict[str, float] = {}
         self._open_after_transfer_ids: set[str] = set()
         self._connection_check_running = False
+        self._profile_checks_running: set[str] = set()
+        self._profile_failures: dict[str, int] = {}
+        self._profile_retry_after: dict[str, float] = {}
         self._profile_generation = 0
         self._offline_scan_running = False
         self._quit_requested = False
@@ -138,14 +152,15 @@ class ClientWindow(QMainWindow):
         self.setMinimumSize(1040, 700)
         self.resize(1320, 820)
         self._build_ui()
+        apply_context_tooltips(self)
         self._setup_tray()
         self._load_profile()
         self._refresh_transfer_cards()
         self._render_offline_records(self.offline_store.list())
 
         self.reconnect_timer = QTimer(self)
-        self.reconnect_timer.setInterval(10_000)
-        self.reconnect_timer.timeout.connect(self.refresh_connection)
+        self.reconnect_timer.setInterval(3_000)
+        self.reconnect_timer.timeout.connect(self.refresh_all_connections)
         self.reconnect_timer.start()
         self.transfer_timer = QTimer(self)
         self.transfer_timer.setInterval(500)
@@ -155,7 +170,7 @@ class ClientWindow(QMainWindow):
         self.drive_timer.setInterval(5_000)
         self.drive_timer.timeout.connect(self._reconcile_drives)
         self.drive_timer.start()
-        QTimer.singleShot(100, self.refresh_connection)
+        QTimer.singleShot(100, self.refresh_all_connections)
         QTimer.singleShot(250, self._reconcile_drives)
 
     def _build_ui(self) -> None:
@@ -195,6 +210,7 @@ class ClientWindow(QMainWindow):
         self.offline_page = self._make_offline_page()
         self.update_page = UpdatePage("client", self.store.data_directory)
         self.help_page = HelpPage(self.knowledge, "client")
+        self.help_page.open_logs_requested.connect(self.open_logs_directory)
         self.nav_buttons: list[QPushButton] = []
         for label, page in (
             ("⌁   Подключиться", self.connection_page),
@@ -294,6 +310,8 @@ class ClientWindow(QMainWindow):
         self.remove_server_button.clicked.connect(self.remove_server)
         profile_row.addWidget(self.add_server_button)
         profile_row.addWidget(self.remove_server_button)
+        self.connections_summary = QLabel("Подключений: 0")
+        self.connections_summary.setProperty("muted", True)
         self.server_url = QLineEdit()
         self.server_url.setPlaceholderText("http://127.0.0.1:8765")
         self.server_url.setVisible(False)
@@ -311,6 +329,7 @@ class ClientWindow(QMainWindow):
         self.username.setPlaceholderText("Логин, созданный администратором")
         login_form.addRow("Логин", self.username)
         login_form.addRow("Сохранённый сервер", profile_row)
+        login_form.addRow("Активные подключения", self.connections_summary)
         self.connection_modes.addWidget(login_page)
 
         link_page = QWidget()
@@ -357,15 +376,19 @@ class ClientWindow(QMainWindow):
         enrollment_controls = QHBoxLayout()
         self.account_login_button = QPushButton("Войти по логину")
         self.account_login_button.clicked.connect(self.login_new_device)
+        self.google_login_button = QPushButton("Войти через Google")
+        self.google_login_button.clicked.connect(self.login_google_device)
         self.connect_button = QPushButton("Подключиться по коду")
         self.connect_button.setProperty("primary", True)
         self.connect_button.clicked.connect(self.connect_selected_invitation)
         self.import_access_button = QPushButton("Импортировать файл входа")
         self.import_access_button.clicked.connect(self.import_access_file)
         enrollment_controls.addWidget(self.account_login_button)
+        enrollment_controls.addWidget(self.google_login_button)
         enrollment_controls.addWidget(self.connect_button)
         enrollment_controls.addWidget(self.import_access_button)
         self.account_login_button.setVisible(False)
+        self.google_login_button.setVisible(True)
         self.import_access_button.setVisible(False)
         enrollment_controls.addStretch()
         card_layout.addLayout(enrollment_controls)
@@ -548,8 +571,11 @@ class ClientWindow(QMainWindow):
         self.autostart_checkbox.toggled.connect(self._autostart_toggled)
         self.close_to_tray_checkbox = QCheckBox("Сворачивать в трей при закрытии")
         self.close_to_tray_checkbox.toggled.connect(self._close_to_tray_toggled)
+        self.auto_open_downloads_checkbox = QCheckBox("Открывать скачанные файлы автоматически")
+        self.auto_open_downloads_checkbox.toggled.connect(self._auto_open_downloads_toggled)
         system_options.addWidget(self.autostart_checkbox)
         system_options.addWidget(self.close_to_tray_checkbox)
+        system_options.addWidget(self.auto_open_downloads_checkbox)
         system_options.addStretch()
         card_layout.addLayout(system_options)
         self.integration_status = QLabel(
@@ -716,6 +742,9 @@ class ClientWindow(QMainWindow):
         self.close_to_tray_checkbox.blockSignals(True)
         self.close_to_tray_checkbox.setChecked(self.profile.close_to_tray)
         self.close_to_tray_checkbox.blockSignals(False)
+        self.auto_open_downloads_checkbox.blockSignals(True)
+        self.auto_open_downloads_checkbox.setChecked(self.profile.open_downloads_automatically)
+        self.auto_open_downloads_checkbox.blockSignals(False)
         self.autostart_checkbox.blockSignals(True)
         try:
             self.autostart_checkbox.setChecked(autostart_enabled())
@@ -734,11 +763,17 @@ class ClientWindow(QMainWindow):
         selected = 0
         for index, profile in enumerate(profiles):
             name = profile.server_name.strip() or "Сервер"
-            self.server_selector.addItem(name, profile.profile_id)
+            indicator = "●" if profile.device_status == "trusted" else "○"
+            self.server_selector.addItem(f"{indicator} {name}", profile.profile_id)
             if profile.profile_id == self.profile.profile_id:
                 selected = index
         self.server_selector.setCurrentIndex(selected)
         self.server_selector.blockSignals(False)
+        connected = sum(item.device_status == "trusted" for item in profiles)
+        self.connections_summary.setText(f"Подключено серверов: {connected} из {len(profiles)}")
+        self.connections_summary.setToolTip(
+            "Зелёная точка означает доступное активное соединение. Клиент проверяет все сохранённые серверы."
+        )
 
     def _server_name(self, server_url: str) -> str:
         normalized = server_url.rstrip("/")
@@ -855,8 +890,7 @@ class ClientWindow(QMainWindow):
             for candidate in dict.fromkeys(candidates):
                 candidate_fingerprint = (
                     self.fingerprint.text()
-                    if candidate.startswith("https://")
-                    and candidate.rsplit(":", 1)[-1] == server_url.rsplit(":", 1)[-1]
+                    if self._needs_pinned_server_certificate(candidate)
                     else ""
                 )
                 candidate_api = ClientApi(
@@ -1040,33 +1074,107 @@ class ClientWindow(QMainWindow):
         self.connection_detail.setText(f"Поиск сервера не выполнен: {message}")
 
     def refresh_connection(self) -> None:
-        if self._connection_check_running or not self.token:
+        self._check_profile_connection(self.profile, force=True)
+
+    def refresh_all_connections(self) -> None:
+        for profile in self.store.list_profiles():
+            self._check_profile_connection(profile)
+
+    def _check_profile_connection(self, profile: ClientProfile, *, force: bool = False) -> None:
+        profile_id = profile.profile_id
+        if profile_id in self._profile_checks_running:
             return
-        self._connection_check_running = True
-        profile_id = self.profile.profile_id
+        if not force and time.monotonic() < self._profile_retry_after.get(profile_id, 0.0):
+            return
+        try:
+            token = DeviceTokenVault(self.store.data_directory, profile_id).load()
+        except OSError:
+            return
+        if not token:
+            return
+        session = RemoteSessionVault(self.store.data_directory, profile_id).load()
+        self._profile_checks_running.add(profile_id)
+        if profile_id == self.profile.profile_id:
+            self._connection_check_running = True
         try:
             api = ClientApi(
-                self.profile.server_url,
-                token=self.token,
-                certificate_fingerprint=self.profile.certificate_fingerprint,
-                remote_session=self.remote_session,
+                profile.server_url,
+                token=token,
+                certificate_fingerprint=profile.certificate_fingerprint,
+                remote_session=session,
             )
-            self.api = api
         except ValueError:
-            self._connection_check_running = False
+            self._profile_checks_running.discard(profile_id)
+            if profile_id == self.profile.profile_id:
+                self._connection_check_running = False
             return
 
         def check() -> dict[str, Any]:
             api.health()
             status = api.pairing_status()
-            spaces = api.list_spaces() if status.get("status") == "trusted" else []
-            return {"status": status, "spaces": spaces, "profile_id": profile_id}
+            spaces = (
+                api.list_spaces()
+                if profile_id == self.profile.profile_id and status.get("status") == "trusted"
+                else []
+            )
+            return {"status": status, "spaces": spaces, "profile_id": profile_id, "api": api}
 
         self._start_task(
             check,
-            self._connection_refreshed,
-            lambda message: self._connection_refresh_failed_for(profile_id, message),
+            self._profile_connection_refreshed,
+            lambda message: self._profile_connection_failed(profile_id, message),
         )
+
+    def login_google_device(self) -> None:
+        device_name = self.device_name.text().strip() or platform.node() or "Мой компьютер"
+        try:
+            server_url = validate_server_url(self.server_url.text())
+            api = ClientApi(
+                server_url,
+                certificate_fingerprint=self.fingerprint.text().strip(),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Сервер не выбран", str(exc))
+            return
+        profile_id = self.profile.profile_id
+        self.google_login_button.setEnabled(False)
+        self.connection_detail.setText("Открываем защищённый вход Google в браузере…")
+
+        def google_login() -> dict[str, Any]:
+            health = api.health()
+            client_id = str(health.get("google_oauth_client_id") or "")
+            identity = authorize_google_identity(client_id)
+            result = api.login_google_device(identity, device_name, platform.system())
+            return {
+                "health": health,
+                "pairing": result,
+                "profile_id": profile_id,
+                "server_url": server_url,
+                "fingerprint": self.fingerprint.text().strip(),
+            }
+
+        self._start_task(
+            google_login,
+            self._pairing_complete,
+            lambda message: self._google_login_failed(profile_id, message),
+        )
+
+    @staticmethod
+    def _needs_pinned_server_certificate(url: str) -> bool:
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return False
+        host = parsed.hostname.casefold()
+        if host in {"localhost"} or host.endswith(".local"):
+            return True
+        try:
+            return ipaddress.ip_address(host).is_private
+        except ValueError:
+            return False
+
+    def _google_login_failed(self, profile_id: str, message: str) -> None:
+        self.google_login_button.setEnabled(True)
+        self._connection_failed_for(profile_id, message)
 
     def login_remote(self) -> None:
         if not self.token:
@@ -1135,13 +1243,29 @@ class ClientWindow(QMainWindow):
         QMessageBox.warning(self, "Интернет-вход не выполнен", message)
 
     def _connection_refreshed(self, result: object) -> None:
+        self._profile_connection_refreshed(result)
+
+    def _profile_connection_refreshed(self, result: object) -> None:
         payload = result if isinstance(result, dict) else {}
-        if payload.get("profile_id") != self.profile.profile_id:
+        profile_id = str(payload.get("profile_id") or "")
+        self._profile_checks_running.discard(profile_id)
+        self._profile_failures.pop(profile_id, None)
+        self._profile_retry_after.pop(profile_id, None)
+        profile = next(
+            (item for item in self.store.list_profiles() if item.profile_id == profile_id), None
+        )
+        if profile is None:
+            return
+        status = str(payload.get("status", {}).get("status", "disconnected"))
+        profile.device_status = status
+        self.store.save(profile, make_active=False)
+        if profile_id != self.profile.profile_id:
+            self._refresh_server_selector()
+            self._reconcile_drives()
             return
         self._connection_check_running = False
-        status = str(payload.get("status", {}).get("status", "disconnected"))
         self.profile.device_status = status
-        self.store.save(self.profile)
+        self.api = payload.get("api") if status == "trusted" else None
         self._set_connection_state(status)
         if status == "trusted":
             self._set_spaces(payload.get("spaces", []))
@@ -1153,12 +1277,32 @@ class ClientWindow(QMainWindow):
         self._set_connection_state("offline", message)
 
     def _connection_refresh_failed_for(self, profile_id: str, message: str) -> None:
+        self._profile_connection_failed(profile_id, message)
+
+    def _profile_connection_failed(self, profile_id: str, message: str) -> None:
+        self._profile_checks_running.discard(profile_id)
+        failures = self._profile_failures.get(profile_id, 0) + 1
+        self._profile_failures[profile_id] = failures
+        delay = min(60, 2 ** min(failures, 5))
+        self._profile_retry_after[profile_id] = time.monotonic() + delay
+        profile = next(
+            (item for item in self.store.list_profiles() if item.profile_id == profile_id), None
+        )
+        if profile is not None:
+            profile.device_status = "offline"
+            self.store.save(profile, make_active=False)
         if profile_id == self.profile.profile_id:
+            self.profile.device_status = "offline"
+            self.api = None
+            self._set_spaces([])
             self._connection_refresh_failed(message)
+        self._refresh_server_selector()
+        self._reconcile_drives()
 
     def _connection_failed(self, message: str) -> None:
         self.connect_button.setEnabled(True)
         self.account_login_button.setEnabled(True)
+        self.google_login_button.setEnabled(True)
         self._set_connection_state("disconnected", message)
         QMessageBox.warning(self, "Подключение не выполнено", message)
 
@@ -1375,7 +1519,7 @@ class ClientWindow(QMainWindow):
             total_bytes=int(entry.get("size_bytes", 0)),
             expected_sha256=str(entry.get("sha256", "")),
         )
-        if open_after:
+        if open_after or self.profile.open_downloads_automatically:
             self._open_after_transfer_ids.add(transfer.id)
         self._refresh_transfer_cards()
         self._start_queued_transfers()
@@ -1846,6 +1990,16 @@ class ClientWindow(QMainWindow):
         self.profile.close_to_tray = enabled
         self.store.save(self.profile)
 
+    def _auto_open_downloads_toggled(self, enabled: bool) -> None:
+        self.profile.open_downloads_automatically = enabled
+        self.store.save(self.profile)
+
+    def open_logs_directory(self) -> None:
+        directory = self.audit.path.parent
+        directory.mkdir(parents=True, exist_ok=True)
+        self.audit.record("client.logs.opened", "Открыта папка журналов клиента")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
+
     def _drive_settings_changed(self) -> None:
         self.profile.drive_enabled = self.drive_enabled_checkbox.isChecked()
         selected = str(self.drive_letter_selector.currentData() or "S")
@@ -1889,7 +2043,7 @@ class ClientWindow(QMainWindow):
             self.drive_open_button.setEnabled(False)
             return
         # Each allowed logical space receives its own helper and drive letter.
-        statuses = self.drive_manager.reconcile([self.profile])
+        statuses = self.drive_manager.reconcile(self.store.list_profiles())
         status = statuses.get(self.profile.profile_id)
         if status is None:
             self.drive_status.setText("Диск отключён в настройках.")

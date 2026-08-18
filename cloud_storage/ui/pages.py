@@ -257,7 +257,16 @@ class DashboardPage(QWidget):
             f"Свободно {format_bytes(free)}" if total else "Нет настроенных дисков",
         )
         unavailable = sum(not item.available for item in disks)
-        self.disk_card.set_value(str(len(disks)), f"Недоступно: {unavailable}")
+        physical_keys = {
+            f"number:{item.disk_number}"
+            if item.disk_number is not None
+            else f"serial:{item.serial}" if item.serial else f"device:{item.device}"
+            for item in disks
+        }
+        self.disk_card.set_value(
+            f"{len(physical_keys)} / {len(disks)}",
+            f"Физических / логических · недоступно: {unavailable}",
+        )
         if core_health:
             users = (core_summary or {}).get("users", 0)
             devices = (core_summary or {}).get("trusted_devices", 0)
@@ -529,6 +538,8 @@ class SettingsPage(QWidget):
     diagnostics_full_requested = Signal()
     diagnostic_remediation_requested = Signal(str, str)
     tunnel_restart_requested = Signal(str)
+    tunnel_install_requested = Signal(str)
+    tunnel_enable_requested = Signal(str)
     support_bundle_requested = Signal()
     automation_rule_create_requested = Signal(dict)
     automation_rule_update_requested = Signal(str, dict)
@@ -548,6 +559,7 @@ class SettingsPage(QWidget):
     system_section_requested = Signal(str)
     disks_requested = Signal()
     connection_generation_requested = Signal(str, str, str)
+    open_logs_requested = Signal()
 
     _SECTIONS = [
         ("Сервер", False),
@@ -670,6 +682,8 @@ class SettingsPage(QWidget):
         self.zrok_status_label: QLabel | None = None
         self.zrok_details_label: QLabel | None = None
         self.zrok_restart_button: QPushButton | None = None
+        self.zrok_install_button: QPushButton | None = None
+        self.zrok_enable_button: QPushButton | None = None
         self.users_rows: QVBoxLayout | None = None
         self.trusted_device_rows: QVBoxLayout | None = None
         self.pending_device_rows: QVBoxLayout | None = None
@@ -726,6 +740,16 @@ class SettingsPage(QWidget):
         self.security_connection_label: QLabel | None = None
         self.storage_status_label: QLabel | None = None
         self.disk_settings_status_label: QLabel | None = None
+        self.disk_default_priority = QSpinBox()
+        self.disk_default_priority.setRange(0, 100)
+        self.disk_default_fill = QSpinBox()
+        self.disk_default_fill.setRange(50, 99)
+        self.disk_default_fill.setSuffix(" %")
+        self.disk_default_free = QSpinBox()
+        self.disk_default_free.setRange(1, 10000)
+        self.disk_default_free.setSuffix(" ГБ")
+        self.disk_default_auto_move = QCheckBox("Разрешать автоматический перенос")
+        self.disk_default_read_only = QCheckBox("Новые диски только для чтения")
         self.access_status_label: QLabel | None = None
         self._current_settings = AppSettings()
         self._pages_by_name = {name: self._make_section(name) for name, _ in self._SECTIONS}
@@ -966,12 +990,24 @@ class SettingsPage(QWidget):
         zrok = (tunnels or {}).get("zrok", {})
         if self.zrok_restart_button is not None:
             self.zrok_restart_button.setEnabled(online and bool(zrok.get("enabled")))
+        if self.zrok_install_button is not None:
+            self.zrok_install_button.setEnabled(
+                online and not bool(zrok.get("installed")) and not bool(zrok.get("installing"))
+            )
+            self.zrok_install_button.setText(
+                "Установка zrok2…" if zrok.get("installing") else "Установить zrok2 автоматически"
+            )
+        if self.zrok_enable_button is not None:
+            self.zrok_enable_button.setEnabled(online and bool(zrok.get("installed")))
         if self.zrok_status_label is not None:
             state = str(zrok.get("state", "disabled"))
             labels = {
                 "online": "Подключён к интернету",
                 "starting": "Запускается",
                 "not_installed": "zrok не установлен",
+                "installing": "Устанавливается",
+                "installed": "Установлен — подключите аккаунт",
+                "install_error": "Ошибка установки",
                 "error": "Ошибка — будет повтор",
                 "stopped": "Остановлен",
                 "disabled": "Выключен",
@@ -1902,6 +1938,11 @@ class SettingsPage(QWidget):
         self.zrok_port.setValue(settings.zrok_port)
         self.zrok_executable.setText(settings.zrok_executable)
         self.zrok_share_name.setText(settings.zrok_share_name)
+        self.disk_default_priority.setValue(settings.disk_defaults.write_priority)
+        self.disk_default_fill.setValue(settings.disk_defaults.max_fill_percent)
+        self.disk_default_free.setValue(settings.disk_defaults.min_free_gib)
+        self.disk_default_auto_move.setChecked(settings.disk_defaults.auto_move_allowed)
+        self.disk_default_read_only.setChecked(settings.disk_defaults.read_only)
         self.config_path.setText(config_path)
         if self.log_path is not None:
             self.log_path.setText(str(Path(config_path).parent / "audit.jsonl"))
@@ -2179,7 +2220,8 @@ class SettingsPage(QWidget):
             layout.addWidget(zrok_title)
             zrok_text = QLabel(
                 "Core запускает внешний zrok-клиент и публикует только отдельный loopback-шлюз. "
-                "Перед включением установите zrok и один раз выполните его штатную команду enable. "
+                "Его можно установить автоматически и подключить аккаунт кнопками ниже; уже "
+                "установленный вручную zrok2 также определяется автоматически. "
                 "Пароль Cloud Storage не передаётся zrok и никогда не попадает в командную строку."
             )
             zrok_text.setWordWrap(True)
@@ -2203,6 +2245,19 @@ class SettingsPage(QWidget):
                 lambda: self.tunnel_restart_requested.emit("zrok")
             )
             layout.addWidget(self.zrok_restart_button)
+            zrok_account_row = QHBoxLayout()
+            self.zrok_install_button = QPushButton("Установить zrok2 автоматически")
+            self.zrok_install_button.clicked.connect(
+                lambda: self.tunnel_install_requested.emit("zrok")
+            )
+            self.zrok_enable_button = QPushButton("Подключить аккаунт zrok2")
+            self.zrok_enable_button.clicked.connect(
+                lambda: self.tunnel_enable_requested.emit("zrok")
+            )
+            zrok_account_row.addWidget(self.zrok_install_button)
+            zrok_account_row.addWidget(self.zrok_enable_button)
+            zrok_account_row.addStretch()
+            layout.addLayout(zrok_account_row)
         elif name == "Диагностика":
             description = QLabel(
                 "Core автоматически проверяет SQLite, доступность дисков, безопасный запас места "
@@ -2364,6 +2419,16 @@ class SettingsPage(QWidget):
             note.setWordWrap(True)
             note.setProperty("emptyState", True)
             layout.addWidget(note)
+            defaults_title = QLabel("Общие значения для новых дисков")
+            defaults_title.setStyleSheet("font-weight: 700; font-size: 16px;")
+            defaults_form = QFormLayout()
+            defaults_form.addRow("Приоритет записи", self.disk_default_priority)
+            defaults_form.addRow("Максимальное заполнение", self.disk_default_fill)
+            defaults_form.addRow("Минимальный запас", self.disk_default_free)
+            defaults_form.addRow("", self.disk_default_auto_move)
+            defaults_form.addRow("", self.disk_default_read_only)
+            layout.addWidget(defaults_title)
+            layout.addLayout(defaults_form)
             disk_controls = QHBoxLayout()
             open_disks = QPushButton("Открыть диски")
             open_disks.setProperty("primary", True)
@@ -2423,6 +2488,9 @@ class SettingsPage(QWidget):
             path_form = QFormLayout()
             path_form.addRow("Локальный журнал Manager", self.log_path)
             layout.addLayout(path_form)
+            open_logs = QPushButton("Открыть папку журналов")
+            open_logs.clicked.connect(self.open_logs_requested)
+            layout.addWidget(open_logs)
             self.log_rows = QVBoxLayout()
             layout.addLayout(self.log_rows)
         elif name == "Обновления":
@@ -2946,6 +3014,13 @@ class SettingsPage(QWidget):
             "zrok_port": self.zrok_port.value(),
             "zrok_executable": self.zrok_executable.text().strip() or "zrok2",
             "zrok_share_name": self.zrok_share_name.text().strip(),
+            "disk_defaults": {
+                "write_priority": self.disk_default_priority.value(),
+                "max_fill_percent": self.disk_default_fill.value(),
+                "min_free_gib": self.disk_default_free.value(),
+                "auto_move_allowed": self.disk_default_auto_move.isChecked(),
+                "read_only": self.disk_default_read_only.isChecked(),
+            },
         }
 
     def _emit_save(self) -> None:
@@ -2962,6 +3037,8 @@ class SettingsPage(QWidget):
             self.remote_enabled,
             self.remote_pairing_enabled,
             self.zrok_enabled,
+            self.disk_default_auto_move,
+            self.disk_default_read_only,
         ):
             checkbox.toggled.connect(self._settings_changed)
         for spinbox in (
@@ -2969,6 +3046,9 @@ class SettingsPage(QWidget):
             self.lan_port,
             self.remote_port,
             self.zrok_port,
+            self.disk_default_priority,
+            self.disk_default_fill,
+            self.disk_default_free,
         ):
             spinbox.valueChanged.connect(self._settings_changed)
         for line_edit in (

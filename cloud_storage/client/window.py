@@ -137,6 +137,8 @@ class ClientWindow(QMainWindow):
         self.spaces: list[dict[str, Any]] = []
         self.entries: list[dict[str, Any]] = []
         self.current_directory = ""
+        self._entries_generation = 0
+        self._entries_pending: tuple[str, str, str] | None = None
         self._workers: set[BackgroundTask] = set()
         self._active_transfer_ids: set[str] = set()
         self._transfer_widgets: dict[str, dict[str, QWidget]] = {}
@@ -1120,7 +1122,7 @@ class ClientWindow(QMainWindow):
             status = api.pairing_status()
             spaces = (
                 api.list_spaces()
-                if profile_id == self.profile.profile_id and status.get("status") == "trusted"
+                if status.get("status") == "trusted"
                 else []
             )
             return {"status": status, "spaces": spaces, "profile_id": profile_id, "api": api}
@@ -1266,6 +1268,12 @@ class ClientWindow(QMainWindow):
         profile.device_status = status
         self.store.save(profile, make_active=False)
         if profile_id != self.profile.profile_id:
+            if status == "trusted":
+                self.store.ensure_space_drive_letters(
+                    profile,
+                    [str(item["id"]) for item in payload.get("spaces", []) if item.get("id")],
+                    make_active=False,
+                )
             self._refresh_server_selector()
             self._reconcile_drives()
             return
@@ -1276,6 +1284,8 @@ class ClientWindow(QMainWindow):
         if status == "trusted":
             self._set_spaces(payload.get("spaces", []))
             self._start_queued_transfers()
+        else:
+            self._set_spaces([], authoritative=False)
         self._reconcile_drives()
 
     def _connection_refresh_failed(self, message: str) -> None:
@@ -1300,7 +1310,7 @@ class ClientWindow(QMainWindow):
         if profile_id == self.profile.profile_id:
             self.profile.device_status = "offline"
             self.api = None
-            self._set_spaces([])
+            self._set_spaces([], authoritative=False)
             self._connection_refresh_failed(message)
         self._refresh_server_selector()
         self._reconcile_drives()
@@ -1385,9 +1395,10 @@ class ClientWindow(QMainWindow):
         self.status_button.setEnabled(False)
         self.forget_button.setEnabled(False)
 
-    def _set_spaces(self, spaces: list[dict[str, Any]]) -> None:
+    def _set_spaces(self, spaces: list[dict[str, Any]], *, authoritative: bool = True) -> None:
+        previous_selection = str(self.space_selector.currentData() or "")
         self.spaces = spaces
-        if spaces:
+        if authoritative:
             self.profile = self.store.ensure_space_drive_letters(
                 self.profile,
                 [str(item.get("id")) for item in spaces if item.get("id")],
@@ -1407,10 +1418,14 @@ class ClientWindow(QMainWindow):
             if selected_space and self.profile.last_space_id != selected_space:
                 self.profile.last_space_id = selected_space
                 self.store.save(self.profile)
-            self.current_directory = ""
+            if selected_space != previous_selection:
+                self.current_directory = ""
             self._update_space_actions()
             self.refresh_entries()
         else:
+            self._entries_generation += 1
+            self._entries_pending = None
+            self.current_directory = ""
             self._update_space_actions()
             self._render_entries([])
 
@@ -1442,18 +1457,51 @@ class ClientWindow(QMainWindow):
             return
         space_id = str(self.space_selector.currentData())
         directory = self.current_directory
+        profile_id = self.profile.profile_id
+        request_key = (profile_id, space_id, directory)
+        if self._entries_pending == request_key:
+            return
+        self._entries_pending = request_key
+        self._entries_generation += 1
+        generation = self._entries_generation
+
+        def still_current() -> bool:
+            return (
+                generation == self._entries_generation
+                and profile_id == self.profile.profile_id
+                and space_id == str(self.space_selector.currentData() or "")
+                and directory == self.current_directory
+            )
+
+        def loaded(result: object) -> None:
+            if generation == self._entries_generation and self._entries_pending == request_key:
+                self._entries_pending = None
+            if still_current():
+                self._render_entries(result)
+
+        def failed(message: str) -> None:
+            if generation == self._entries_generation and self._entries_pending == request_key:
+                self._entries_pending = None
+            if still_current():
+                self._files_error("Не удалось обновить файлы", message)
+
+        if self.path_label.text() != "/" + directory:
+            self._render_entries([])
         self.path_label.setText("/" + directory)
         self.up_button.setEnabled(bool(directory))
         self._start_task(
             self.api.list_entries,
-            self._render_entries,
-            lambda message: self._files_error("Не удалось обновить файлы", message),
+            loaded,
+            failed,
             space_id,
             directory,
         )
 
     def _render_entries(self, result: object) -> None:
+        selected_name = (self.selected_entry() or {}).get("name")
         self.entries = result if isinstance(result, list) else []
+        self.files_table.clearSelection()
+        self.files_table.setCurrentCell(-1, -1)
         self.files_empty.setVisible(not self.entries)
         self.files_table.setRowCount(len(self.entries))
         for row, entry in enumerate(self.entries):
@@ -1466,6 +1514,8 @@ class ClientWindow(QMainWindow):
             self.files_table.setItem(row, 1, QTableWidgetItem(kind))
             self.files_table.setItem(row, 2, QTableWidgetItem(size))
             self.files_table.setItem(row, 3, QTableWidgetItem(modified))
+            if entry.get("name") == selected_name:
+                self.files_table.selectRow(row)
 
     def selected_entry(self) -> dict[str, Any] | None:
         row = self.files_table.currentRow()

@@ -1907,6 +1907,13 @@ class StorageService:
             ).fetchone()
         if row is None:
             raise NotFoundError("share not found")
+        try:
+            owner = self.repository.get_user(row["owner_user_id"])
+            self.repository.require_space_permission(row["space_id"], owner.id, capability="share")
+            if not owner.enabled:
+                raise NotFoundError("share not found")
+        except (NotFoundError, PermissionDeniedError) as exc:
+            raise NotFoundError("share not found") from exc
         return PublicShareRecord(token=token, **dict(row))
 
     def public_share_overview(self, token: str) -> dict[str, Any]:
@@ -2142,14 +2149,25 @@ class StorageService:
         now = utc_text()
         with self.database.transaction() as connection:
             quota = connection.execute(
-                "SELECT quota_bytes FROM spaces WHERE id = ?", (space_id,)
+                "SELECT quota_bytes, enabled, archived_at FROM spaces WHERE id = ?", (space_id,)
             ).fetchone()
             if quota is None:
                 raise NotFoundError("space not found")
+            if not quota["enabled"] or quota["archived_at"]:
+                raise PermissionDeniedError("space is disabled or archived")
             existing = connection.execute(
                 "SELECT * FROM files WHERE space_id = ? AND logical_path = ?",
                 (space_id, logical_path),
             ).fetchone()
+            grant = connection.execute(
+                "SELECT sm.can_read, sm.can_upload, sm.can_modify, u.enabled "
+                "FROM space_members sm JOIN users u ON u.id = sm.user_id "
+                "WHERE sm.space_id = ? AND sm.user_id = ?", (space_id, user_id),
+            ).fetchone()
+            if not grant or not grant["enabled"] or not grant["can_read"] or not grant["can_upload"]:
+                raise PermissionDeniedError("space does not allow upload for this user")
+            if existing and existing["deleted_at"] is None and not grant["can_modify"]:
+                raise PermissionDeniedError("space does not allow modify for this user")
             used = connection.execute(
                 """
                 SELECT COALESCE(sum(size_bytes), 0) AS total

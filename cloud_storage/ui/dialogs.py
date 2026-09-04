@@ -721,7 +721,10 @@ class CreateUserDialog(QDialog):
         form.addRow("", self.admin)
         layout.addLayout(form)
         self.space_permissions: dict[str, dict[str, QCheckBox]] = {}
-        shared_spaces = [item for item in (spaces or []) if item.get("kind") == "shared"]
+        shared_spaces = [
+            item for item in (spaces or [])
+            if item.get("kind") == "shared" and not item.get("archived_at")
+        ]
         if shared_spaces:
             spaces_title = QLabel("Доступ к общим пространствам")
             spaces_title.setStyleSheet("font-weight: 700; font-size: 16px;")
@@ -882,6 +885,12 @@ class UserEditDialog(QDialog):
         spaces_content = QWidget()
         spaces_layout = QVBoxLayout(spaces_content)
         for space in spaces:
+            if space.get("archived_at"):
+                continue
+            if space.get("owner_user_id") == user.get("id"):
+                own = QLabel(f"Личное пространство: {space.get('name', 'Мои файлы')} · полный доступ владельца")
+                own.setWordWrap(True)
+                spaces_layout.addWidget(own)
             if space.get("kind") != "shared":
                 continue
             space_id = str(space.get("id"))

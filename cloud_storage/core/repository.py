@@ -627,45 +627,54 @@ class CoreRepository:
         device_name: str,
         platform: str,
         remote_address: str | None,
+        user_id: str = "",
     ) -> PairingResult:
-        """Create an approved passwordless account for a newly paired device."""
+        """Attach a device to the signed target, or explicitly create a new person."""
         device_name, platform = self._validate_device_identity(device_name, platform)
         token = self.credentials.generate_device_token()
         token_hash = self.credentials.device_token_hash(token)
-        user_id = str(uuid.uuid4())
+        existing_user_id = user_id
+        user_id = user_id or str(uuid.uuid4())
         device_id = str(uuid.uuid4())
         space_id = str(uuid.uuid4())
         username = f"device_{device_id.replace('-', '')[:16]}"
         created = utc_text()
         quota_bytes = 100 * 1024**3
         with self.database.transaction() as connection:
-            connection.execute(
-                """
-                INSERT INTO users(
-                    id, username, display_name, email, password_hash, password_version,
-                    role, quota_bytes, enabled, created_at
-                ) VALUES(?, ?, ?, '', NULL, 0, 'member', ?, 1, ?)
-                """,
-                (user_id, username, device_name, quota_bytes, created),
-            )
-            connection.execute(
-                """
-                INSERT INTO spaces(
-                    id, owner_user_id, name, kind, quota_bytes,
-                    primary_storage_root_id, fallback_storage_root_id, created_at
-                ) VALUES(?, ?, 'Мои файлы', 'personal', ?, NULL, NULL, ?)
-                """,
-                (space_id, user_id, quota_bytes, created),
-            )
-            connection.execute(
-                """
-                INSERT INTO space_members(
-                    space_id, user_id, permission, can_read, can_upload,
-                    can_modify, can_delete, can_share
-                ) VALUES(?, ?, 'owner', 1, 1, 1, 1, 1)
-                """,
-                (space_id, user_id),
-            )
+            if existing_user_id:
+                user = connection.execute(
+                    "SELECT enabled FROM users WHERE id = ?", (user_id,)
+                ).fetchone()
+                if user is None or not user["enabled"]:
+                    raise InvalidCredential("Пользователь не найден или отключён")
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO users(
+                        id, username, display_name, email, password_hash, password_version,
+                        role, quota_bytes, enabled, created_at
+                    ) VALUES(?, ?, ?, '', NULL, 0, 'member', ?, 1, ?)
+                    """,
+                    (user_id, username, device_name, quota_bytes, created),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO spaces(
+                        id, owner_user_id, name, kind, quota_bytes,
+                        primary_storage_root_id, fallback_storage_root_id, created_at
+                    ) VALUES(?, ?, 'Мои файлы', 'personal', ?, NULL, NULL, ?)
+                    """,
+                    (space_id, user_id, quota_bytes, created),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO space_members(
+                        space_id, user_id, permission, can_read, can_upload,
+                        can_modify, can_delete, can_share
+                    ) VALUES(?, ?, 'owner', 1, 1, 1, 1, 1)
+                    """,
+                    (space_id, user_id),
+                )
             connection.execute(
                 """
                 INSERT INTO devices(
@@ -887,8 +896,8 @@ class CoreRepository:
             name: bool(value.get(name, False))
             for name in ("read", "upload", "modify", "delete", "share")
         }
-        if any(capabilities.values()):
-            capabilities["read"] = True
+        if not capabilities["read"]:
+            capabilities = dict.fromkeys(capabilities, False)
         return capabilities
 
     def create_shared_space(
@@ -1051,15 +1060,37 @@ class CoreRepository:
                 detail=f"Обновлены права пользователя {user_id}",
             )
 
-    def list_spaces_admin(self) -> list[dict[str, Any]]:
+    def set_space_archived(self, space_id: str, archived: bool) -> None:
+        """Remove a logical drive from clients without deleting physical objects."""
+        with self.database.transaction() as connection:
+            changed = connection.execute(
+                "UPDATE spaces SET archived_at = ?, enabled = ? WHERE id = ?",
+                (utc_text() if archived else None, int(not archived), space_id),
+            )
+            if changed.rowcount != 1:
+                raise NotFoundError("space not found")
+            if archived:
+                connection.execute(
+                    "UPDATE file_shares SET revoked_at = ? WHERE space_id = ? AND revoked_at IS NULL",
+                    (utc_text(), space_id),
+                )
+            self._audit_tx(
+                connection, actor_type="manager", actor_id=None,
+                action="space.archived" if archived else "space.restored",
+                target_type="space", target_id=space_id,
+                detail="Виртуальный диск убран в архив" if archived else "Виртуальный диск восстановлен",
+            )
+
+    def list_spaces_admin(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
             spaces = connection.execute(
                 """
                 SELECT id, owner_user_id, name, kind, quota_bytes,
                        primary_storage_root_id, fallback_storage_root_id,
-                       enabled, created_at
-                FROM spaces ORDER BY CASE kind WHEN 'personal' THEN 0 ELSE 1 END, name
-                """
+                       enabled, created_at, archived_at
+                FROM spaces WHERE archived_at IS NULL OR ?
+                ORDER BY CASE kind WHEN 'personal' THEN 0 ELSE 1 END, name
+                """, (int(include_archived),)
             ).fetchall()
             members = connection.execute(
                 """
@@ -1094,6 +1125,7 @@ class CoreRepository:
                 "primary_storage_root_id": row["primary_storage_root_id"],
                 "fallback_storage_root_id": row["fallback_storage_root_id"],
                 "enabled": bool(row["enabled"]),
+                "archived_at": row["archived_at"],
                 "created_at": row["created_at"],
                 "members": grouped.get(str(row["id"]), []),
             }
@@ -1110,7 +1142,7 @@ class CoreRepository:
                        s.fallback_storage_root_id, s.enabled, s.created_at
                 FROM spaces s
                 JOIN space_members sm ON sm.space_id = s.id
-                WHERE sm.user_id = ? AND s.enabled = 1 AND sm.can_read = 1
+                WHERE sm.user_id = ? AND s.enabled = 1 AND sm.can_read = 1 AND s.archived_at IS NULL
                 ORDER BY CASE s.kind WHEN 'personal' THEN 0 ELSE 1 END, s.name
                 """,
                 (user_id,),
@@ -1128,7 +1160,7 @@ class CoreRepository:
                            s.fallback_storage_root_id, s.enabled, s.created_at
                     FROM spaces s
                     JOIN space_members sm ON sm.space_id = s.id
-                    WHERE s.id = ? AND sm.user_id = ?
+                    WHERE s.id = ? AND sm.user_id = ? AND s.archived_at IS NULL
                     """,
                     (space_id, user_id),
                 ).fetchone()

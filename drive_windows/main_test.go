@@ -11,8 +11,80 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"unicode/utf16"
+
+	"github.com/winfsp/go-winfsp"
 )
+
+func TestRealVolumeQuotaAndLabel(t *testing.T) {
+	cloud := newCloudFileSystem(nil, "space", t.TempDir())
+	cloud.volume = space{Name: "Фото QA", QuotaBytes: 3 << 30, UsedBytes: 1200}
+	b := &synchronousBehaviour{cloud: cloud}
+	var info winfsp.FSP_FSCTL_VOLUME_INFO
+	if err := b.GetVolumeInfo(nil, &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.TotalSize != 3<<30 || info.FreeSize != (3<<30)-1200 {
+		t.Fatalf("incorrect quota: %+v", info)
+	}
+	if string(utf16.Decode(info.VolumeLabel[:info.VolumeLabelLength/2])) != "Фото QA" {
+		t.Fatal("incorrect label")
+	}
+	cloud.volume.UsedBytes = 10 << 30
+	b.GetVolumeInfo(nil, &info)
+	if info.FreeSize != 0 {
+		t.Fatal("negative free bytes wrapped")
+	}
+	cloud.volume.QuotaBytes = -1
+	b.GetVolumeInfo(nil, &info)
+	if info.TotalSize != 0 || info.FreeSize != 0 {
+		t.Fatal("negative quota wrapped")
+	}
+}
+
+func TestVolumeRefreshUsesOwnSpaceAndRevocation(t *testing.T) {
+	var mode atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/spaces" {
+			t.Errorf("unexpected route %s", r.URL.Path)
+		}
+		switch mode.Load() {
+		case 1:
+			json.NewEncoder(w).Encode([]space{})
+		case 2:
+			w.WriteHeader(http.StatusForbidden)
+		case 3:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			json.NewEncoder(w).Encode([]space{{ID: "a", QuotaBytes: 3 << 30}, {ID: "b", QuotaBytes: 5 << 30}})
+		}
+	}))
+	defer server.Close()
+	api, _ := newAPIClient(profile{ServerURL: server.URL}, "token", "")
+	first := newCloudFileSystem(api, "a", t.TempDir())
+	second := newCloudFileSystem(api, "b", t.TempDir())
+	if err := first.refreshVolume(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.refreshVolume(); err != nil {
+		t.Fatal(err)
+	}
+	if first.volume.QuotaBytes != 3<<30 || second.volume.QuotaBytes != 5<<30 {
+		t.Fatal("space quotas mixed")
+	}
+	mode.Store(3)
+	if second.refreshVolume() == nil || second.volume.QuotaBytes != 5<<30 {
+		t.Fatal("network outage erased cached quota")
+	}
+	for _, revoked := range []int32{1, 2} {
+		mode.Store(revoked)
+		if !errors.Is(first.refreshVolume(), os.ErrPermission) {
+			t.Fatal("revocation was not detected")
+		}
+	}
+}
 
 func TestResolveNestedCaseAndRejectAmbiguity(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

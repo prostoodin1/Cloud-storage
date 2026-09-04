@@ -506,7 +506,9 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         runtime.config.server_name, "dynamic-server-id"
     )[:32]
 
-    def current_dynamic_pairing() -> dict[str, Any]:
+    def current_dynamic_pairing(user_id: str = "") -> dict[str, Any]:
+        if user_id and not runtime.repository.get_user(user_id).enabled:
+            raise InvalidCredential("Пользователь отключён")
         now = int(time.time())
         expires_at = ((now // 300) + 1) * 300
         nonce = runtime.repository.credentials.fingerprint(
@@ -550,12 +552,14 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             nonce=nonce,
             signing_key=runtime.repository.credentials.hmac_secret,
             alternate_addresses=addresses[1:],
+            user_id=user_id,
         )
         return {
             "code": code,
             "server_id": dynamic_server_id,
             "expires_at": expires_at,
             "seconds_remaining": max(0, expires_at - now),
+            "user_id": user_id,
         }
     browser = BrowserAccess(runtime)
     bearer = HTTPBearer(auto_error=False)
@@ -1984,8 +1988,18 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         tags=["manager"],
         dependencies=[Depends(require_manager)],
     )
-    def list_admin_spaces() -> list[dict[str, Any]]:
-        return runtime.repository.list_spaces_admin()
+    def list_admin_spaces(include_archived: bool = False) -> list[dict[str, Any]]:
+        return runtime.repository.list_spaces_admin(include_archived=include_archived)
+
+    @app.delete("/v1/admin/spaces/{space_id}", tags=["manager"], dependencies=[Depends(require_manager)])
+    def archive_admin_space(space_id: str) -> dict[str, bool]:
+        runtime.repository.set_space_archived(space_id, True)
+        return {"archived": True, "files_preserved": True}
+
+    @app.post("/v1/admin/spaces/{space_id}/restore", tags=["manager"], dependencies=[Depends(require_manager)])
+    def restore_admin_space(space_id: str) -> dict[str, bool]:
+        runtime.repository.set_space_archived(space_id, False)
+        return {"restored": True}
 
     @app.post(
         "/v1/admin/spaces",
@@ -2449,8 +2463,8 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         tags=["manager"],
         dependencies=[Depends(require_manager)],
     )
-    def dynamic_pairing_code() -> dict[str, Any]:
-        return current_dynamic_pairing()
+    def dynamic_pairing_code(user_id: str = "") -> dict[str, Any]:
+        return current_dynamic_pairing(user_id)
 
     @app.post("/v1/pairing/redeem", tags=["pairing"], status_code=status.HTTP_201_CREATED)
     def redeem_invitation(body: RedeemInvitationRequest, request: Request) -> dict[str, Any]:
@@ -2459,18 +2473,19 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         if not limiter.allow(remote):
             raise HTTPException(status_code=429, detail="too many pairing attempts")
         if body.code.strip().upper().startswith("CS3."):
-            current = current_dynamic_pairing()
             verified = verify_dynamic_pairing_code(
                 body.code,
                 signing_key=runtime.repository.credentials.hmac_secret,
                 expected_server_id=dynamic_server_id,
             )
+            current = current_dynamic_pairing(verified.user_id)
             if not secrets.compare_digest(verified.raw_code, current["code"]):
                 raise InvalidCredential("dynamic pairing code is invalid or expired")
             result = runtime.repository.redeem_dynamic_pairing(
                 device_name=body.device_name,
                 platform=body.platform,
                 remote_address=remote,
+                user_id=verified.user_id,
             )
             message = "Подключение выполнено"
         else:
@@ -2601,7 +2616,15 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
 
     @app.get("/v1/spaces", tags=["files"])
     def list_spaces(device: DeviceRecord = Depends(require_device)):  # noqa: B008
-        return [asdict(item) for item in runtime.repository.list_spaces_for_user(device.user_id)]
+        result = []
+        for item in runtime.repository.list_spaces_for_user(device.user_id):
+            used = runtime.storage.space_usage(item.id)
+            result.append({
+                **asdict(item),
+                "used_bytes": used,
+                "free_bytes": max(0, item.quota_bytes - used),
+            })
+        return result
 
     @app.get("/v1/spaces/{space_id}/entries", tags=["files"])
     def list_entries(

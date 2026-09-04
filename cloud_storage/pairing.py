@@ -51,6 +51,7 @@ class DynamicPairingCode:
     expires_at: int
     nonce: str
     alternate_addresses: tuple[str, ...] = ()
+    user_id: str = ""
 
     @property
     def addresses(self) -> tuple[str, ...]:
@@ -66,6 +67,7 @@ def build_dynamic_pairing_code(
     nonce: str,
     signing_key: bytes,
     alternate_addresses: list[str] | tuple[str, ...] = (),
+    user_id: str = "",
 ) -> str:
     locator = _validated_invitation("SERVER00", server_url, certificate_fingerprint, "")
     alternatives = []
@@ -82,6 +84,10 @@ def build_dynamic_pairing_code(
         "exp": int(expires_at),
         "n": nonce,
     }
+    if user_id:
+        if not re.fullmatch(r"[a-f0-9-]{36}", user_id):
+            raise ValueError("invalid pairing user")
+        payload["u"] = user_id
     if not re.fullmatch(r"[a-f0-9]{16,64}", server_id) or not re.fullmatch(
         r"[A-Za-z0-9_-]{16,64}", nonce
     ):
@@ -110,8 +116,14 @@ def parse_dynamic_pairing_code(value: str) -> DynamicPairingCode | None:
         payload = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("invalid dynamic pairing code") from exc
-    if not isinstance(payload, dict) or set(payload) != {"v", "sid", "s", "f", "a", "exp", "n"}:
+    if not isinstance(payload, dict) or set(payload) not in (
+        {"v", "sid", "s", "f", "a", "exp", "n"},
+        {"v", "sid", "s", "f", "a", "exp", "n", "u"},
+    ):
         raise ValueError("invalid dynamic pairing code")
+    user_id = payload.get("u", "")
+    if not isinstance(user_id, str) or (user_id and not re.fullmatch(r"[a-f0-9-]{36}", user_id)):
+        raise ValueError("invalid pairing user")
     if payload["v"] != 3 or not isinstance(payload["exp"], int):
         raise ValueError("invalid dynamic pairing code")
     server_id, nonce = str(payload["sid"]), str(payload["n"])
@@ -139,6 +151,7 @@ def parse_dynamic_pairing_code(value: str) -> DynamicPairingCode | None:
         payload["exp"],
         nonce,
         alternatives,
+        user_id,
     )
 
 

@@ -184,6 +184,7 @@ class MainWindow(QMainWindow):
         self._nav_buttons: list[QPushButton] = []
         self._nav_pages: list[QWidget] = []
         self._health_task: _CoreHealthTask | None = None
+        self._pairing_user_id = ""
 
         self.setWindowTitle(f"Cloud Storage Server Manager · {__version__}")
         self.setMinimumSize(1040, 700)
@@ -333,6 +334,7 @@ class MainWindow(QMainWindow):
         self.connection_page.panel.reset_password_requested.connect(self.reset_user_password)
         self.connection_page.panel.email_access_requested.connect(self.send_user_access_email)
         self.connection_page.panel.refresh_button.clicked.connect(self.refresh_core)
+        self.connection_page.panel.dynamic_target_requested.connect(self.select_pairing_user)
         self.disks_page.disk_selected.connect(self.open_disk)
         self.disks_page.disk_action_requested.connect(self.run_disk_action)
         self.disks_page.refresh_requested.connect(self.refresh_disks)
@@ -341,6 +343,8 @@ class MainWindow(QMainWindow):
         self.disks_page.ignore_unconfigured_requested.connect(self.ignore_unconfigured)
         self.disks_page.create_space_requested.connect(self.create_space)
         self.disks_page.edit_space_requested.connect(self.edit_space)
+        self.disks_page.edit_personal_requested.connect(self.edit_user)
+        self.disks_page.archive_space_requested.connect(self.archive_space)
         self.receive_page.refresh_requested.connect(self.refresh_core)
         self.receive_page.retry_requested.connect(self.retry_transfer)
         self.receive_page.configure_cache_requested.connect(
@@ -373,6 +377,7 @@ class MainWindow(QMainWindow):
         self.settings_page.core_start_requested.connect(self.start_core)
         self.settings_page.core_stop_requested.connect(self.stop_core)
         self.settings_page.core_refresh_requested.connect(self.refresh_core)
+        self.settings_page.dynamic_target_requested.connect(self.select_pairing_user)
         self.settings_page.add_user_requested.connect(self.add_user)
         self.settings_page.invitation_requested.connect(self.create_invitation)
         self.settings_page.reset_password_requested.connect(self.reset_user_password)
@@ -583,10 +588,17 @@ class MainWindow(QMainWindow):
 
     def _refresh_pages(self) -> None:
         events = self.audit.recent()
+        if self._pairing_user_id and not any(
+            user.get("id") == self._pairing_user_id and user.get("enabled", True)
+            for user in self.core_users
+        ):
+            self._pairing_user_id = ""
         dynamic_pairing: dict[str, object] = {}
         if self.core_health is not None:
             try:
-                dynamic_pairing = self.core_client.dynamic_pairing_code()
+                dynamic_pairing = self.core_client.dynamic_pairing_code(self._pairing_user_id)
+                if self._pairing_user_id and dynamic_pairing.get("user_id") != self._pairing_user_id:
+                    dynamic_pairing = {"error": "Для кода выбранного пользователя обновите ядро сервера."}
             except (CoreApiError, CoreUnavailable):
                 dynamic_pairing = {}
         users_for_ui = [
@@ -1908,6 +1920,32 @@ class MainWindow(QMainWindow):
             "Если zrok2 уже включён, интернет-вход запускается автоматически. Иначе включите его "
             "в настройках и сохраните их. Профиль аккаунта zrok2 сохранён в каталоге Core.",
         )
+
+    def select_pairing_user(self, user_id: str) -> None:
+        self._pairing_user_id = user_id
+        self._refresh_pages()
+
+    def archive_space(self, space_id: str, archived: bool) -> None:
+        space = next((item for item in self.core_spaces if item.get("id") == space_id), None)
+        if space is None:
+            return
+        if archived:
+            answer = QMessageBox.question(
+                self, "Удалить виртуальный диск из списка?",
+                f"«{space.get('name', '')}» будет отключён у всех пользователей и перемещён "
+                "в архив. Общие ссылки будут отозваны. Файлы сохранятся на сервере; "
+                "диск можно восстановить кнопкой «Архив». Физический накопитель не удаляется.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            self.core_client.archive_space(space_id, archived)
+        except (CoreApiError, CoreUnavailable) as exc:
+            QMessageBox.warning(self, "Диск не изменён", self._core_error_text(exc))
+            return
+        self.refresh_core()
 
     def export_support_bundle(self) -> None:
         if not self.core_health:

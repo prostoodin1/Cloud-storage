@@ -201,7 +201,7 @@ class ClientSettingsStore:
         return result
 
     def ensure_space_drive_letters(
-        self, profile: ClientProfile, space_ids: list[str]
+        self, profile: ClientProfile, space_ids: list[str], *, make_active: bool = True
     ) -> ClientProfile:
         all_profiles = self.list_profiles()
         used = {
@@ -220,7 +220,7 @@ class ClientSettingsStore:
             normalized[space_id] = letter
             used.add(letter)
         profile.drive_letters = normalized
-        self.save(profile)
+        self.save(profile, make_active=make_active)
         return profile
 
     def _write_document(

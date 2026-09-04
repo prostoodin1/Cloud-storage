@@ -24,6 +24,7 @@ from cloud_storage.ui.widgets import clear_layout, make_header
 
 
 class ConnectionCodePanel(QFrame):
+    dynamic_target_requested = Signal(str)
     generation_requested = Signal(str, str, str)
     create_user_requested = Signal()
     edit_user_requested = Signal(str)
@@ -161,6 +162,9 @@ class ConnectionCodePanel(QFrame):
         dynamic_layout = QVBoxLayout(dynamic_card)
         dynamic_title = QLabel("Динамический код подключения")
         dynamic_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        self.dynamic_target = QComboBox()
+        self.dynamic_target.addItem("Новый человек — новое личное пространство", "")
+        self.dynamic_target.currentIndexChanged.connect(self._change_dynamic_target)
         self.dynamic_code = QLineEdit()
         self.dynamic_code.setReadOnly(True)
         self.dynamic_code.setPlaceholderText("Запустите Core и включите локальный HTTPS")
@@ -177,6 +181,8 @@ class ConnectionCodePanel(QFrame):
         dynamic_actions.addWidget(self.dynamic_countdown, 1)
         dynamic_actions.addWidget(self.copy_dynamic_button)
         dynamic_layout.addWidget(dynamic_title)
+        dynamic_layout.addWidget(QLabel("Кому предоставить доступ этим кодом"))
+        dynamic_layout.addWidget(self.dynamic_target)
         dynamic_layout.addWidget(self.dynamic_code)
         dynamic_layout.addLayout(dynamic_actions)
         self.web_address = QLineEdit()
@@ -184,14 +190,18 @@ class ConnectionCodePanel(QFrame):
         self.web_address.setPlaceholderText("Адрес веб-клиента появится после запуска сети")
         self.web_open = QPushButton("Открыть файлы в браузере")
         self.web_copy = QPushButton("Копировать адрес сайта")
+        self.web_status = QLabel()
+        self.web_status.setWordWrap(True)
+        self.web_status.setProperty("muted", True)
         self.web_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.web_address.text())))
         self.web_copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.web_address.text()))
         web_actions = QHBoxLayout()
         web_actions.addWidget(self.web_open)
         web_actions.addWidget(self.web_copy)
         dynamic_layout.addWidget(self.web_address)
+        dynamic_layout.addWidget(self.web_status)
         dynamic_layout.addLayout(web_actions)
-        web_hint = QLabel("В браузере введите этот же динамический код. Для доступа из другой сети нужен запущенный zrok2 или публичный HTTPS. Локальный адрес работает только в вашей сети.")
+        web_hint = QLabel("Чтобы в браузере и Client были одни файлы, выберите выше существующего человека и выдайте ему этот код. Новый человек получает отдельное пустое пространство. Для другой сети нужен zrok2 или публичный HTTPS.")
         web_hint.setWordWrap(True)
         web_hint.setProperty("muted", True)
         dynamic_layout.addWidget(web_hint)
@@ -200,6 +210,7 @@ class ConnectionCodePanel(QFrame):
         layout.insertWidget(2, dynamic_card)
         self._dynamic_expires_at = 0
         self._dynamic_refresh_requested = False
+        self._dynamic_error = ""
         self._dynamic_timer = QTimer(self)
         self._dynamic_timer.setInterval(1000)
         self._dynamic_timer.timeout.connect(self._update_dynamic_countdown)
@@ -214,6 +225,10 @@ class ConnectionCodePanel(QFrame):
         self.scope.currentIndexChanged.connect(self._render_endpoint)
         self.set_data(None, [], {})
 
+    def _change_dynamic_target(self) -> None:
+        self.set_dynamic_code({})
+        self.dynamic_target_requested.emit(str(self.dynamic_target.currentData() or ""))
+
     def set_data(
         self,
         health: dict | None,
@@ -224,12 +239,24 @@ class ConnectionCodePanel(QFrame):
         selected_id = selected.get("id")
         self._health = health
         self._tunnels = tunnels or {}
-        zrok = (health or {}).get("zrok") or {}
+        target_id = str(self.dynamic_target.currentData() or "")
+        self.dynamic_target.blockSignals(True)
+        self.dynamic_target.clear()
+        self.dynamic_target.addItem("Новый человек — новое личное пространство", "")
+        for person in users:
+            if person.get("enabled", True):
+                self.dynamic_target.addItem(
+                    str(person.get("display_name") or person.get("username")), str(person["id"])
+                )
+        self.dynamic_target.setCurrentIndex(max(0, self.dynamic_target.findData(target_id)))
+        self.dynamic_target.blockSignals(False)
+        zrok = {**((health or {}).get("zrok") or {}), **(self._tunnels.get("zrok") or {})}
         remote = (health or {}).get("remote") or {}
         lan = (health or {}).get("lan") or {}
         web_url = str(zrok.get("public_url") or "") if zrok.get("state") == "online" else ""
         if not web_url and remote.get("enabled"):
             web_url = str(remote.get("public_url") or "")
+        public_site = bool(web_url)
         if not web_url:
             web_url = next(iter(lan.get("endpoints") or []), "")
         if not isinstance(web_url, str) or not web_url.startswith("https://"):
@@ -237,6 +264,13 @@ class ConnectionCodePanel(QFrame):
         self.web_address.setText(web_url)
         self.web_open.setEnabled(bool(web_url))
         self.web_copy.setEnabled(bool(web_url))
+        self.web_status.setText(
+            "Интернет-адрес сайта настроен. Войдите кодом выбранного выше человека."
+            if web_url and public_site
+            else "Только локальная сеть: интернет-вход выключен. Для внешней сети настройте zrok2 или публичный HTTPS."
+            if web_url
+            else "Адрес сайта недоступен: запустите Core и настройте сетевой вход."
+        )
         self.user.blockSignals(True)
         self.user.clear()
         for user in users:
@@ -469,7 +503,14 @@ class ConnectionCodePanel(QFrame):
 
     def set_dynamic_code(self, value: dict | None) -> None:
         value = value or {}
+        if "user_id" in value:
+            self.dynamic_target.blockSignals(True)
+            self.dynamic_target.setCurrentIndex(
+                max(0, self.dynamic_target.findData(str(value["user_id"])))
+            )
+            self.dynamic_target.blockSignals(False)
         self.dynamic_code.setText(str(value.get("code") or ""))
+        self._dynamic_error = str(value.get("error") or "")
         self._dynamic_expires_at = int(value.get("expires_at") or 0)
         self._dynamic_refresh_requested = False
         self.copy_dynamic_button.setEnabled(bool(self.dynamic_code.text()))
@@ -478,7 +519,7 @@ class ConnectionCodePanel(QFrame):
     def _update_dynamic_countdown(self) -> None:
         remaining = max(0, self._dynamic_expires_at - int(time.time()))
         if not self.dynamic_code.text():
-            self.dynamic_countdown.setText("Код недоступен")
+            self.dynamic_countdown.setText(getattr(self, "_dynamic_error", "") or "Код недоступен")
             return
         minutes, seconds = divmod(remaining, 60)
         self.dynamic_countdown.setText(f"Сменится через {minutes:02d}:{seconds:02d}")

@@ -55,11 +55,13 @@ type profile struct {
 }
 
 type space struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	CanUpload bool   `json:"can_upload"`
-	CanModify bool   `json:"can_modify"`
-	CanDelete bool   `json:"can_delete"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	CanUpload  bool   `json:"can_upload"`
+	CanModify  bool   `json:"can_modify"`
+	CanDelete  bool   `json:"can_delete"`
+	QuotaBytes int64  `json:"quota_bytes"`
+	UsedBytes  int64  `json:"used_bytes"`
 }
 
 type entry struct {
@@ -143,7 +145,13 @@ func (a *apiClient) request(method, route string, body io.Reader, contentType st
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(method, target, body)
+	ctx := context.Background()
+	if route == "/v1/spaces" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, err
 	}
@@ -351,6 +359,23 @@ type cloudFileSystem struct {
 	cacheHashes map[string]string
 	mu          sync.Mutex
 	syncError   string
+	volume      space
+}
+
+func (c *cloudFileSystem) refreshVolume() error {
+	spaces, err := c.api.listSpaces()
+	if err != nil {
+		return err
+	}
+	for _, available := range spaces {
+		if available.ID == c.spaceID {
+			c.mu.Lock()
+			c.volume = available
+			c.mu.Unlock()
+			return nil
+		}
+	}
+	return os.ErrPermission
 }
 
 func newCloudFileSystem(api *apiClient, spaceID, cacheRoot string) *cloudFileSystem {
@@ -923,6 +948,9 @@ func run() error {
 		return err
 	}
 	cloud := newCloudFileSystem(api, spaceID, cacheRoot)
+	if err := cloud.refreshVolume(); err != nil {
+		return err
+	}
 	behaviour, err := gofs.NewOptions(
 		cloud,
 		gofs.WithCaseInsensitive(true),
@@ -939,7 +967,7 @@ func run() error {
 	}
 	defer mounted.Unmount()
 	rootPath, rootErr := windows.UTF16PtrFromString(letter + ":\\")
-	volumeLabel, labelErr := windows.UTF16PtrFromString("Личный диск")
+	volumeLabel, labelErr := windows.UTF16PtrFromString(cloud.volume.Name)
 	if rootErr == nil && labelErr == nil {
 		_ = windows.SetVolumeLabel(rootPath, volumeLabel)
 	}
@@ -959,6 +987,11 @@ func run() error {
 		case <-ticker.C:
 			if !parentAlive(*parentPID) {
 				_ = os.Remove(statusPath)
+				return nil
+			}
+			if err := cloud.refreshVolume(); errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrNotExist) {
+				baseStatus.State, baseStatus.Detail = "revoked", "Доступ к пространству отозван"
+				writeStatus(statusPath, baseStatus)
 				return nil
 			}
 			cloud.mu.Lock()

@@ -705,6 +705,13 @@ class Database:
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(20, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
+            space_columns = {row[1] for row in connection.execute("PRAGMA table_info(spaces)")}
+            if "archived_at" not in space_columns:
+                connection.execute("ALTER TABLE spaces ADD COLUMN archived_at TEXT")
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(21, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
             connection.commit()
 
     @staticmethod

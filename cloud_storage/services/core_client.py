@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -564,7 +565,13 @@ class CoreClient:
         )
 
     def list_spaces_admin(self) -> list[dict[str, Any]]:
-        return self._manager_request("/v1/admin/spaces")
+        return self._manager_request("/v1/admin/spaces?include_archived=true")
+
+    def archive_space(self, space_id: str, archived: bool = True) -> dict[str, bool]:
+        return self._manager_request(
+            f"/v1/admin/spaces/{space_id}" + ("" if archived else "/restore"),
+            method="DELETE" if archived else "POST",
+        )
 
     def create_space(self, values: dict[str, Any]) -> dict[str, Any]:
         return self._manager_request("/v1/admin/spaces", method="POST", payload=values)
@@ -597,8 +604,9 @@ class CoreClient:
             payload={"user_id": user_id, "ttl_seconds": ttl_seconds},
         )
 
-    def dynamic_pairing_code(self) -> dict[str, Any]:
-        return self._manager_request("/v1/admin/dynamic-pairing-code")
+    def dynamic_pairing_code(self, user_id: str = "") -> dict[str, Any]:
+        query = "?" + urllib.parse.urlencode({"user_id": user_id}) if user_id else ""
+        return self._manager_request("/v1/admin/dynamic-pairing-code" + query)
 
     def cancel_invitation(self, invitation_id: str) -> bool:
         result = self._manager_request(f"/v1/admin/invitations/{invitation_id}", method="DELETE")

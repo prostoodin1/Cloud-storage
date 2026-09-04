@@ -1,14 +1,14 @@
 "use strict";
 const $ = id => document.getElementById(id);
-let csrf = "", spaces = [], current = null, directory = "", previewURL = null;
+let csrf = "", spaces = [], current = null, directory = "", previewURL = null, navigation = 0;
 function status(message, error = false) { $("status").textContent = message; $("status").classList.toggle("error", error); }
-function loginView() { $("login").hidden = false; $("workspace").hidden = true; $("logout").hidden = true; $("entries").replaceChildren(); closePreview(); csrf = ""; }
+function loginView() { navigation++; current=null; directory=""; $("login").hidden = false; $("workspace").hidden = true; $("logout").hidden = true; $("entries").replaceChildren(); closePreview(); csrf = ""; }
 const translations = {"remote pairing is disabled by the administrator":"В Manager отключён вход через интернет. Разрешите первичное подключение устройств.","dynamic pairing code is invalid or expired":"Код недействителен или истёк. Скопируйте новый код из Manager.","too many pairing attempts":"Слишком много попыток. Подождите перед повторным входом.","server is in emergency read-only mode":"Сервер работает в режиме только чтения.","storage roots are not configured":"Администратор ещё не настроил диски хранения."};
 async function api(url, options = {}) {
   const response = await fetch(url, {credentials:"same-origin", cache:"no-store", ...options, headers:{"X-CSRF-Token":csrf, "skip_zrok_interstitial":"1", ...options.headers}});
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
-    if (response.status === 401) loginView();
+    if (response.status === 401 || (response.status === 403 && ["/v1/spaces","/v1/web/session"].includes(url))) loginView();
     let detail = typeof data.detail === "string" ? data.detail : `Ошибка сервера (${response.status})`;
     throw new Error(translations[detail] || detail);
   }
@@ -31,19 +31,24 @@ function validName(name) { if(!name || !name.trim() || /[\\/\x00-\x1f]/.test(nam
 async function loadSpaces() {
   spaces=await (await api("/v1/spaces")).json();
   $("login").hidden=true;$("workspace").hidden=false;$("logout").hidden=false;
-  $("spaces").replaceChildren();
-  for(const space of spaces) $("spaces").append(button(space.name,()=>selectSpace(space)));
-  if(!spaces.length){current=null;$("entries").replaceChildren();$("empty").hidden=false;$("empty").textContent="Нет доступных пространств. Обратитесь к администратору.";$("upload").disabled=$("new-folder").disabled=true;status("Подключение установлено");return;}
+  renderSpaces();
+  if(!spaces.length){current=null;directory="";$("space-name").textContent="Нет доступных пространств";$("quota").textContent="";$("breadcrumbs").textContent="";$("up").disabled=true;$("entries").replaceChildren();$("empty").hidden=false;$("empty").textContent="Нет доступных пространств. Обратитесь к администратору.";$("upload").disabled=$("new-folder").disabled=true;status("Подключение установлено");return;}
   const selected=spaces.find(s=>current && s.id===current.id)||spaces[0];await selectSpace(selected);
 }
-async function selectSpace(space) {current=space;directory="";$("space-name").textContent=space.name;$("quota").textContent=`Квота ${bytes(space.quota_bytes)}`;[...$("spaces").children].forEach((b,i)=>b.classList.toggle("active",spaces[i].id===space.id));await refresh();}
+function renderSpaces() {$("spaces").replaceChildren();for(const space of spaces) $("spaces").append(button(space.name,()=>selectSpace(space),space.id===current?.id?"active":""));}
+async function selectSpace(space) {if(!current||current.id!==space.id){directory="";$("entries").replaceChildren();}current=space;$("space-name").textContent=space.name;[...$("spaces").children].forEach((b,i)=>b.classList.toggle("active",spaces[i].id===space.id));await refresh();}
 async function refresh() {
   if(!current)return; status("Обновляем список файлов…");
+  const requestId=++navigation, spaceId=current.id, requestedDirectory=directory;
   const all=await (await api("/v1/spaces")).json();
-  const available=all.find(s=>s.id===current.id);
+  if(requestId!==navigation||!current||spaceId!==current.id||requestedDirectory!==directory)return;
+  spaces=all;renderSpaces();
+  const available=all.find(s=>s.id===spaceId);
   if(!available){current=null;await loadSpaces();return;}
   current=available;
-  const entries=await (await api(`${base()}/entries?directory=${encodeURIComponent(directory)}`)).json();
+  const entries=await (await api(`/v1/spaces/${encodeURIComponent(spaceId)}/entries?directory=${encodeURIComponent(requestedDirectory)}`)).json();
+  if(requestId!==navigation||!current||spaceId!==current.id||requestedDirectory!==directory)return;
+  $("quota").textContent=`Занято ${bytes(current.used_bytes||0)} из ${bytes(current.quota_bytes)} · свободно ${bytes(current.free_bytes ?? current.quota_bytes)}`;
   $("entries").replaceChildren();$("up").disabled=!directory;$("upload").disabled=!current.can_upload;$("new-folder").disabled=!current.can_upload;
   $("breadcrumbs").textContent=`${current.name} / ${directory || "Корень"}`;
   entries.sort((a,b)=>(a.type===b.type?a.name.localeCompare(b.name):a.type==="directory"?-1:1));

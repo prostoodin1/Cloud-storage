@@ -337,6 +337,8 @@ class DashboardPage(QWidget):
 
 
 class DisksPage(QWidget):
+    archive_space_requested = Signal(str, bool)
+    edit_personal_requested = Signal(str)
     disk_selected = Signal(str)
     disk_action_requested = Signal(str, str)
     refresh_requested = Signal()
@@ -357,7 +359,7 @@ class DisksPage(QWidget):
         self.layout.addWidget(
             make_header(
                 "Диски",
-                "Реальные накопители системы. Beta 0.2 не форматирует и не переносит данные.",
+                "Физические накопители и логические пространства пользователей.",
                 ("Обновить", self.refresh_requested.emit),
             )
         )
@@ -376,6 +378,10 @@ class DisksPage(QWidget):
         self.create_space_button.clicked.connect(self.create_space_requested)
         self.create_space_button.setVisible(False)
         view_controls.addWidget(self.create_space_button)
+        self.archive_toggle = QPushButton("Архив")
+        self.archive_toggle.setCheckable(True)
+        self.archive_toggle.toggled.connect(lambda: self._set_view(self._view))
+        view_controls.addWidget(self.archive_toggle)
         view_controls.addStretch()
         self.layout.addLayout(view_controls)
         self._view = "physical"
@@ -464,25 +470,37 @@ class DisksPage(QWidget):
         self.physical_view_button.setChecked(self._view == "physical")
         self.roles_view_button.setChecked(self._view == "roles")
         self.create_space_button.setVisible(self._view == "roles")
+        self.archive_toggle.setVisible(self._view == "roles")
         self.empty.setVisible(not disks)
         if self._view == "physical":
+            self.empty.setText("Накопители не обнаружены. Подключите диск и нажмите «Обновить».")
             for index, disk in enumerate(disks):
                 card = DiskCard(disk, settings.configuration_for(disk.id))
                 card.selected.connect(self.disk_selected)
                 card.action_requested.connect(self.disk_action_requested)
                 self.cards.addWidget(card, index // 2, index % 2)
             return
-        visible_spaces = [item for item in self._spaces if item.get("kind") in {"shared", "personal"}]
+        visible_spaces = [item for item in self._spaces if item.get("kind") in {"shared", "personal"}
+                          and bool(item.get("archived_at")) == self.archive_toggle.isChecked()]
         self.empty.setVisible(not visible_spaces)
         self.empty.setText(
-            "Логических пространств пока нет. Нажмите «Добавить пространство»."
+            "Архив пуст. Удалённые виртуальные диски можно восстановить здесь."
+            if self.archive_toggle.isChecked()
+            else "Логических пространств пока нет. Нажмите «Добавить пространство»."
         )
         roots = {str(item.get("id")): item for item in self._storage_roots}
         for index, space in enumerate(visible_spaces):
             card = QFrame()
             card.setProperty("card", True)
             card_layout = QVBoxLayout(card)
-            heading = QLabel(str(space.get("name") or "Пространство"))
+            members = space.get("members") or []
+            owner_id = str(space.get("owner_user_id") or "")
+            owner = next((member for member in members if member.get("user_id") == owner_id), {})
+            title = str(space.get("name") or "Пространство")
+            if owner:
+                title += " · " + str(owner.get("display_name") or owner.get("username") or "")
+            heading = QLabel(title)
+            heading.setWordWrap(True)
             heading.setStyleSheet("font-size: 16px; font-weight: 700;")
             primary = roots.get(str(space.get("primary_storage_root_id") or ""), {})
             fallback = roots.get(str(space.get("fallback_storage_root_id") or ""), {})
@@ -498,17 +516,26 @@ class DisksPage(QWidget):
             detail.setProperty("muted", True)
             card_layout.addWidget(heading)
             card_layout.addWidget(detail)
-            edit = QPushButton("Настроить пространство")
-            edit.setEnabled(space.get("kind") == "shared")
+            edit = QPushButton("Настроить владельца и квоту" if owner_id else "Настроить пространство")
+            edit.setVisible(not space.get("archived_at"))
             space_id = str(space.get("id") or "")
-            edit.clicked.connect(
-                lambda _checked=False, value=space_id: self.edit_space_requested.emit(value)
-            )
+            if owner_id:
+                edit.clicked.connect(lambda _checked=False, value=owner_id: self.edit_personal_requested.emit(value))
+            else:
+                edit.clicked.connect(lambda _checked=False, value=space_id: self.edit_space_requested.emit(value))
             card_layout.addWidget(edit)
+            remove = QPushButton("Восстановить диск" if space.get("archived_at") else "Удалить виртуальный диск")
+            should_archive = not bool(space.get("archived_at"))
+            remove.clicked.connect(
+                lambda _checked=False, value=space_id, archived=should_archive:
+                self.archive_space_requested.emit(value, archived)
+            )
+            card_layout.addWidget(remove)
             self.cards.addWidget(card, index // 2, index % 2)
 
 
 class SettingsPage(QWidget):
+    dynamic_target_requested = Signal(str)
     save_requested = Signal(dict)
     advanced_mode_changed = Signal(bool)
     refresh_requested = Signal()
@@ -2086,6 +2113,7 @@ class SettingsPage(QWidget):
             layout.addWidget(mode_card)
         elif name == "Подключение":
             self.connection_panel = ConnectionCodePanel()
+            self.connection_panel.dynamic_target_requested.connect(self.dynamic_target_requested)
             self.connection_panel.generation_requested.connect(
                 self.connection_generation_requested
             )

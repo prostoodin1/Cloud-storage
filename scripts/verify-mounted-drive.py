@@ -72,6 +72,8 @@ def main():
         pair = manager._json_request("/v1/pairing/redeem", method="POST", payload={"code": code, "device_name": "Drive QA", "platform": "Windows"})
         client = ClientApi(base, token=pair["device_token"])
         space = client.list_spaces()[0]["id"]
+        user = pair["device"]["user_id"]
+        manager._json_request(f"/v1/admin/users/{user}", method="PATCH", payload={"display_name": "Quota QA", "quota_gib": 3})
         profile = ClientProfile(server_url=base, device_id=pair["device"]["id"], device_status="trusted", last_space_id=space)
         data = run / "client"
         ClientSettingsStore(data).save(profile)
@@ -82,6 +84,22 @@ def main():
         while not root.exists() and time.monotonic() < deadline and process.poll() is None:
             time.sleep(.1)
         check("mounted", root.exists())
+
+        def capacity():
+            available, total, free = ctypes.c_ulonglong(), ctypes.c_ulonglong(), ctypes.c_ulonglong()
+            if not ctypes.windll.kernel32.GetDiskFreeSpaceExW(str(root), ctypes.byref(available), ctypes.byref(total), ctypes.byref(free)):
+                raise ctypes.WinError()
+            return total.value, available.value
+
+        def wait_capacity(total, free):
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline:
+                if capacity() == (total, free):
+                    return True
+                time.sleep(.2)
+            return False
+
+        check("configured_quota_not_8tb", capacity() == (3 * 1024**3, 3 * 1024**3))
         directory = root / "Mixed Folder"
         directory.mkdir()
         payload = b"Cloud Storage mounted drive regression\n" * 8192
@@ -90,6 +108,9 @@ def main():
         check("immediately_visible_after_close", test.exists())
         check("immediate_read_hash", hashlib.sha256(test.read_bytes()).digest() == hashlib.sha256(payload).digest())
         check("nested_case_insensitive_read", (root / "MIXED FOLDER" / "mixed-FILE.TXT").read_bytes() == payload)
+        check("free_space_after_upload", wait_capacity(3 * 1024**3, 3 * 1024**3 - len(payload)))
+        manager._json_request(f"/v1/admin/users/{user}", method="PATCH", payload={"display_name": "Quota QA", "quota_gib": 5})
+        check("live_quota_change", wait_capacity(5 * 1024**3, 5 * 1024**3 - len(payload)))
         renamed = directory / "Renamed.txt"
         test.rename(renamed)
         check("rename", renamed.exists() and not test.exists())
@@ -102,6 +123,15 @@ def main():
         directory.rmdir()
         check("delete_directory", not directory.exists())
         check("server_empty", client.list_entries(space) == [])
+        check("free_space_after_delete", wait_capacity(5 * 1024**3, 5 * 1024**3))
+        (root / "Preserved.txt").write_bytes(b"Preserved after archive")
+        manager._json_request(f"/v1/admin/spaces/{space}", method="DELETE")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and (ctypes.windll.kernel32.GetLogicalDrives() & bit or process.poll() is None):
+            time.sleep(.2)
+        check("revoked_drive_unmounted", not ctypes.windll.kernel32.GetLogicalDrives() & bit and process.poll() is not None)
+        manager._json_request(f"/v1/admin/spaces/{space}/restore", method="POST")
+        check("archive_restore_keeps_file", client.list_entries(space)[0]["name"] == "Preserved.txt")
     except Exception as exc:
         results.append({"error": str(exc)})
         raise

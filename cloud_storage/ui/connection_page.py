@@ -4,8 +4,8 @@ import time
 from datetime import datetime
 
 import qrcode
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QPixmap
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -179,6 +179,22 @@ class ConnectionCodePanel(QFrame):
         dynamic_layout.addWidget(dynamic_title)
         dynamic_layout.addWidget(self.dynamic_code)
         dynamic_layout.addLayout(dynamic_actions)
+        self.web_address = QLineEdit()
+        self.web_address.setReadOnly(True)
+        self.web_address.setPlaceholderText("Адрес веб-клиента появится после запуска сети")
+        self.web_open = QPushButton("Открыть файлы в браузере")
+        self.web_copy = QPushButton("Копировать адрес сайта")
+        self.web_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.web_address.text())))
+        self.web_copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.web_address.text()))
+        web_actions = QHBoxLayout()
+        web_actions.addWidget(self.web_open)
+        web_actions.addWidget(self.web_copy)
+        dynamic_layout.addWidget(self.web_address)
+        dynamic_layout.addLayout(web_actions)
+        web_hint = QLabel("В браузере введите этот же динамический код. Для доступа из другой сети нужен запущенный zrok2 или публичный HTTPS. Локальный адрес работает только в вашей сети.")
+        web_hint.setWordWrap(True)
+        web_hint.setProperty("muted", True)
+        dynamic_layout.addWidget(web_hint)
         layout.addWidget(dynamic_card)
         # The one-time code is the primary action and must stay above the user list.
         layout.insertWidget(2, dynamic_card)
@@ -208,6 +224,19 @@ class ConnectionCodePanel(QFrame):
         selected_id = selected.get("id")
         self._health = health
         self._tunnels = tunnels or {}
+        zrok = (health or {}).get("zrok") or {}
+        remote = (health or {}).get("remote") or {}
+        lan = (health or {}).get("lan") or {}
+        web_url = str(zrok.get("public_url") or "") if zrok.get("state") == "online" else ""
+        if not web_url and remote.get("enabled"):
+            web_url = str(remote.get("public_url") or "")
+        if not web_url:
+            web_url = next(iter(lan.get("endpoints") or []), "")
+        if not isinstance(web_url, str) or not web_url.startswith("https://"):
+            web_url = ""
+        self.web_address.setText(web_url)
+        self.web_open.setEnabled(bool(web_url))
+        self.web_copy.setEnabled(bool(web_url))
         self.user.blockSignals(True)
         self.user.clear()
         for user in users:

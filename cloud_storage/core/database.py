@@ -679,6 +679,32 @@ class Database:
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(18, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
+            device_columns = {row[1] for row in connection.execute("PRAGMA table_info(devices)")}
+            if "pairing_method" not in device_columns:
+                connection.execute(
+                    "ALTER TABLE devices ADD COLUMN pairing_method TEXT NOT NULL DEFAULT 'legacy' "
+                    "CHECK(pairing_method IN ('legacy', 'dynamic'))"
+                )
+                # Never infer passwordless authorization from an absent password.
+                connection.execute(
+                    "UPDATE devices SET pairing_method = 'dynamic' WHERE id IN ("
+                    "SELECT actor_id FROM audit_events WHERE actor_type = 'device' "
+                    "AND action = 'device.dynamic_pairing.completed')"
+                )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(19, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS web_sessions ("
+                "token_hash TEXT PRIMARY KEY, "
+                "device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE, "
+                "expires_at INTEGER NOT NULL)"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(20, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
             connection.commit()
 
     @staticmethod

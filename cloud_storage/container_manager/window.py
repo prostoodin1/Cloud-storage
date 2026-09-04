@@ -51,7 +51,12 @@ class _Task(QRunnable):
 
 
 class ContainerManagerWindow(QMainWindow):
-    def __init__(self, client: CoreClient | None = None) -> None:
+    def __init__(
+        self,
+        client: CoreClient | None = None,
+        *,
+        smoke_test: bool = False,
+    ) -> None:
         super().__init__()
         self.client = client or CoreClient.from_environment()
         self._cells: dict[str, dict[str, Any]] = {}
@@ -60,7 +65,8 @@ class ContainerManagerWindow(QMainWindow):
         self.setMinimumSize(1040, 700)
         self.resize(1280, 800)
         self._build_ui()
-        self.refresh()
+        if not smoke_test:
+            self.refresh()
 
     def activate(self) -> None:
         self.showNormal()

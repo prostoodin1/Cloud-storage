@@ -35,10 +35,11 @@ def main() -> int:
     if not instance.acquire():
         return 0
     apply_theme(app)
-    window = ClientWindow()
+    smoke_test = "--smoke-test" in sys.argv
+    window = ClientWindow(smoke_test=smoke_test)
     instance.set_activation_handler(lambda: _activate(window))
     app.aboutToQuit.connect(instance.close)
-    if "--smoke-test" in sys.argv:
+    if smoke_test:
         window.reconnect_timer.stop()
         QTimer.singleShot(250, app.quit)
         return app.exec()

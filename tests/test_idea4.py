@@ -513,7 +513,8 @@ def test_zrok_browser_policy_can_block_all_browser_access(tmp_path: Path) -> Non
     assert changed.status_code == 200
 
     internet = TestClient(_app, base_url="http://127.0.0.1:8768")
-    denied = internet.get("/v1/health")
+    assert internet.get("/v1/health").status_code == 200
+    denied = internet.get("/")
     assert denied.status_code == 403
     assert "administrator policy" in denied.json()["detail"]
 

@@ -112,7 +112,8 @@ def test_lan_listener_hides_manager_routes_in_asgi_scope(tmp_path) -> None:
         documentation = client.get("/docs")
 
     assert root.status_code == 200
-    assert root.json()["status"] == "ok"
+    assert "text/html" in root.headers["content-type"]
+    assert "Введите код подключения" in root.text
     assert health.status_code == 200
     assert health.json()["lan"]["enabled"] is True
     assert manager.status_code == 404
@@ -420,6 +421,7 @@ def test_zrok2_share_command_uses_public_namespace_and_keeps_v1_compatibility(
         "share",
         "public",
         "--headless",
+        "--force-local",
         "127.0.0.1:8768",
         "-n",
         "public:home-cloud",
@@ -443,6 +445,7 @@ def test_zrok2_ephemeral_share_uses_loopback_backend(tmp_path) -> None:
         "share",
         "public",
         "--headless",
+        "--force-local",
         "127.0.0.1:8768",
     ]
 

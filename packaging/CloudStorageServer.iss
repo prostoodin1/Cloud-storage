@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.9.20"
+#define AppVersion "0.9.21"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
 #define BuildRoot "..\dist"
@@ -87,25 +87,44 @@ begin
     SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
 end;
 
-procedure BackupServerData;
+function BackupServerData: String;
 var
   DataPath, BackupPath, Stamp: String;
 begin
+  Result := '';
   DataPath := ExpandConstant('{commonappdata}\CloudStorage');
   if not FileExists(DataPath + '\core.db') then
     Exit;
   Stamp := GetDateTimeString('yyyymmdd-hhnnss', '-', ':');
   BackupPath := DataPath + '\pre-update-' + Stamp;
-  ForceDirectories(BackupPath);
-  CopyFile(DataPath + '\core.db', BackupPath + '\core.db', False);
+  if not ForceDirectories(BackupPath) then begin
+    Result := 'Не удалось создать резервную копию. Обновление остановлено: ' + BackupPath;
+    Exit;
+  end;
+  if not CopyFile(DataPath + '\core.db', BackupPath + '\core.db', False) then begin
+    Result := 'Не удалось скопировать базу. Обновление остановлено; проверьте место и права доступа.';
+    Exit;
+  end;
   if FileExists(DataPath + '\core-config.json') then
-    CopyFile(DataPath + '\core-config.json', BackupPath + '\core-config.json', False);
+    if not CopyFile(DataPath + '\core-config.json', BackupPath + '\core-config.json', False) then begin
+      Result := 'Не удалось сохранить настройки сервера. Обновление остановлено.';
+      Exit;
+    end;
   if FileExists(DataPath + '\core-secrets.json') then
-    CopyFile(DataPath + '\core-secrets.json', BackupPath + '\core-secrets.json', False);
+    if not CopyFile(DataPath + '\core-secrets.json', BackupPath + '\core-secrets.json', False) then begin
+      Result := 'Не удалось сохранить ключи сервера. Обновление остановлено.';
+      Exit;
+    end;
   if FileExists(DataPath + '\core.db-wal') then
-    CopyFile(DataPath + '\core.db-wal', BackupPath + '\core.db-wal', False);
+    if not CopyFile(DataPath + '\core.db-wal', BackupPath + '\core.db-wal', False) then begin
+      Result := 'Не удалось сохранить журнал базы. Обновление остановлено.';
+      Exit;
+    end;
   if FileExists(DataPath + '\core.db-shm') then
-    CopyFile(DataPath + '\core.db-shm', BackupPath + '\core.db-shm', False);
+    if not CopyFile(DataPath + '\core.db-shm', BackupPath + '\core.db-shm', False) then begin
+      Result := 'Не удалось сохранить состояние базы. Обновление остановлено.';
+      Exit;
+    end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -118,7 +137,7 @@ begin
   { The native Go supervisor validates process identity and no longer trusts
     stale numeric PID files from 0.9.x. Remove the legacy lock after stopping. }
   DeleteFile(ExpandConstant('{commonappdata}\CloudStorage\core.pid'));
-  BackupServerData;
+  Result := BackupServerData;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

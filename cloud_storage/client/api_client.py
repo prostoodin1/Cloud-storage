@@ -69,8 +69,8 @@ class ClientApi:
             raise ValueError("Повреждены данные защиты сервера в приглашении")
         self._parsed = urllib.parse.urlsplit(self.server_url)
 
-    def health(self) -> dict[str, Any]:
-        return self._json_request("/v1/health", timeout=2.0)
+    def health(self, *, timeout: float = 8.0) -> dict[str, Any]:
+        return self._json_request("/v1/health", timeout=timeout)
 
     def redeem_invitation(
         self,
@@ -381,7 +381,8 @@ class ClientApi:
             connection.close()
 
     def _headers(self) -> dict[str, str]:
-        headers = {"Accept": "application/json"}
+        # Public zrok frontends may otherwise return an HTML consent page to an API client.
+        headers = {"Accept": "application/json", "skip_zrok_interstitial": "1"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         if self.remote_session:

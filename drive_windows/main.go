@@ -55,8 +55,11 @@ type profile struct {
 }
 
 type space struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CanUpload bool   `json:"can_upload"`
+	CanModify bool   `json:"can_modify"`
+	CanDelete bool   `json:"can_delete"`
 }
 
 type entry struct {
@@ -145,6 +148,7 @@ func (a *apiClient) request(method, route string, body io.Reader, contentType st
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("skip_zrok_interstitial", "1")
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	if a.remoteSession != "" {
 		req.Header.Set("X-Cloud-Remote-Session", a.remoteSession)
@@ -229,6 +233,7 @@ func (a *apiClient) download(spaceID, logicalPath, expectedHash string, destinat
 	if err != nil {
 		return err
 	}
+	req.Header.Set("skip_zrok_interstitial", "1")
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	if a.remoteSession != "" {
 		req.Header.Set("X-Cloud-Remote-Session", a.remoteSession)
@@ -285,6 +290,7 @@ func (a *apiClient) upload(spaceID, logicalPath, source string) error {
 	}
 	req.ContentLength = stat.Size()
 	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("skip_zrok_interstitial", "1")
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	if a.remoteSession != "" {
 		req.Header.Set("X-Cloud-Remote-Session", a.remoteSession)
@@ -344,31 +350,90 @@ type cloudFileSystem struct {
 	cacheRoot   string
 	cacheHashes map[string]string
 	mu          sync.Mutex
+	syncError   string
 }
 
 func newCloudFileSystem(api *apiClient, spaceID, cacheRoot string) *cloudFileSystem {
 	return &cloudFileSystem{api: api, spaceID: spaceID, cacheRoot: cacheRoot, cacheHashes: map[string]string{}}
 }
 
-func (c *cloudFileSystem) OpenFile(name string, flags int, perm os.FileMode) (gofs.File, error) {
+// WinFSP locks canonicalize names. Resolve every component against the server,
+// which deliberately keeps case-sensitive object paths. Never guess on collisions.
+func (c *cloudFileSystem) resolve(name string, allowMissingLeaf bool) (string, os.FileInfo, error) {
 	logical, err := normalizeName(name)
+	if err != nil {
+		return "", nil, err
+	}
+	if logical == "" {
+		return "", &remoteInfo{name: "", directory: true, modified: time.Now()}, nil
+	}
+	parts := strings.Split(logical, "/")
+	canonical := ""
+	var info os.FileInfo
+	for i, component := range parts {
+		entries, err := c.api.listEntries(c.spaceID, canonical)
+		if err != nil {
+			return "", nil, err
+		}
+		var found *entry
+		for j := range entries {
+			if strings.EqualFold(entries[j].Name, component) {
+				if found != nil {
+					return "", nil, os.ErrExist
+				}
+				found = &entries[j]
+			}
+		}
+		if found == nil {
+			if allowMissingLeaf && i == len(parts)-1 {
+				return path.Join(canonical, component), nil, nil
+			}
+			return "", nil, os.ErrNotExist
+		}
+		canonical = path.Join(canonical, found.Name)
+		info = infoFromEntry(*found)
+		if i < len(parts)-1 && !info.IsDir() {
+			return "", nil, syscall.ENOTDIR
+		}
+	}
+	return canonical, info, nil
+}
+
+func (c *cloudFileSystem) requireCapability(capability string) error {
+	spaces, err := c.api.listSpaces()
+	if err != nil {
+		return err
+	}
+	for _, space := range spaces {
+		if space.ID == c.spaceID && ((capability == "upload" && space.CanUpload) ||
+			(capability == "modify" && space.CanModify) || (capability == "delete" && space.CanDelete)) {
+			return nil
+		}
+	}
+	return os.ErrPermission
+}
+
+func (c *cloudFileSystem) OpenFile(name string, flags int, perm os.FileMode) (gofs.File, error) {
+	logical, info, err := c.resolve(name, flags&os.O_CREATE != 0)
 	if err != nil {
 		return nil, err
 	}
-	info, statErr := c.Stat(logical)
-	if statErr == nil && info.IsDir() {
+	if info != nil && info.IsDir() {
 		entries, err := c.api.listEntries(c.spaceID, logical)
 		if err != nil {
 			return nil, err
 		}
 		return newDirectoryHandle(info, entries), nil
 	}
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return nil, statErr
-	}
 	writable := flags&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND) != 0
-	if statErr != nil && flags&os.O_CREATE == 0 {
-		return nil, statErr
+	if writable {
+		capability := "modify"
+		if info == nil {
+			capability = "upload"
+		}
+		if err := c.requireCapability(capability); err != nil {
+			return nil, err
+		}
 	}
 	local, err := c.cachePath(logical)
 	if err != nil {
@@ -377,7 +442,7 @@ func (c *cloudFileSystem) OpenFile(name string, flags int, perm os.FileMode) (go
 	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
 		return nil, err
 	}
-	if statErr == nil && info.Mode().IsRegular() && flags&os.O_TRUNC == 0 {
+	if info != nil && info.Mode().IsRegular() && flags&os.O_TRUNC == 0 {
 		remote := info.(*remoteInfo)
 		if err := c.ensureCached(logical, remote, local); err != nil {
 			return nil, err
@@ -387,49 +452,47 @@ func (c *cloudFileSystem) OpenFile(name string, flags int, perm os.FileMode) (go
 	if err != nil {
 		return nil, err
 	}
-	return &trackedFile{File: handle, owner: c, logicalPath: logical, dirty: writable}, nil
+	return &trackedFile{File: handle, owner: c, logicalPath: logical, dirty: info == nil || flags&os.O_TRUNC != 0}, nil
 }
 
 func (c *cloudFileSystem) Mkdir(name string, _ os.FileMode) error {
-	logical, err := normalizeName(name)
+	logical, info, err := c.resolve(name, true)
 	if err != nil || logical == "" {
+		if err != nil {
+			return err
+		}
 		return syscall.EINVAL
+	}
+	if info != nil {
+		return os.ErrExist
+	}
+	if err := c.requireCapability("upload"); err != nil {
+		return err
 	}
 	return c.api.createDirectory(c.spaceID, logical)
 }
 
 func (c *cloudFileSystem) Stat(name string) (os.FileInfo, error) {
-	logical, err := normalizeName(name)
-	if err != nil {
-		return nil, err
-	}
-	if logical == "" {
-		return &remoteInfo{name: "", directory: true, modified: time.Now()}, nil
-	}
-	parent, base := path.Split(logical)
-	entries, err := c.api.listEntries(c.spaceID, strings.TrimSuffix(parent, "/"))
-	if err != nil {
-		return nil, err
-	}
-	for _, candidate := range entries {
-		if strings.EqualFold(candidate.Name, base) {
-			return infoFromEntry(candidate), nil
-		}
-	}
-	return nil, os.ErrNotExist
+	_, info, err := c.resolve(name, false)
+	return info, err
 }
 
 func (c *cloudFileSystem) Rename(source, target string) error {
-	sourcePath, err := normalizeName(source)
+	sourcePath, info, err := c.resolve(source, false)
 	if err != nil {
 		return err
 	}
-	targetPath, err := normalizeName(target)
+	targetName, err := normalizeName(target)
 	if err != nil {
 		return err
 	}
-	info, err := c.Stat(sourcePath)
+	parent, basename := path.Split(targetName)
+	canonicalParent, _, err := c.resolve(strings.TrimSuffix(parent, "/"), false)
 	if err != nil {
+		return err
+	}
+	targetPath := path.Join(canonicalParent, basename)
+	if err := c.requireCapability("modify"); err != nil {
 		return err
 	}
 	kind := "file"
@@ -450,12 +513,11 @@ func (c *cloudFileSystem) Rename(source, target string) error {
 }
 
 func (c *cloudFileSystem) Remove(name string) error {
-	logical, err := normalizeName(name)
+	logical, info, err := c.resolve(name, false)
 	if err != nil {
 		return err
 	}
-	info, err := c.Stat(logical)
-	if err != nil {
+	if err := c.requireCapability("delete"); err != nil {
 		return err
 	}
 	kind := "file"
@@ -501,6 +563,9 @@ func (c *cloudFileSystem) ensureCached(logical string, info *remoteInfo, local s
 
 func (c *cloudFileSystem) upload(logical, local string) error {
 	if err := c.api.upload(c.spaceID, logical, local); err != nil {
+		c.mu.Lock()
+		c.syncError = "Не удалось сохранить файл на сервере. Локальная копия осталась в кэше."
+		c.mu.Unlock()
 		return err
 	}
 	c.mu.Lock()
@@ -519,28 +584,66 @@ type trackedFile struct {
 }
 
 func (t *trackedFile) Write(payload []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.dirty = true
 	return t.File.Write(payload)
 }
 
 func (t *trackedFile) WriteAt(payload []byte, offset int64) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.dirty = true
 	return t.File.WriteAt(payload, offset)
 }
 
 func (t *trackedFile) Truncate(size int64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.dirty = true
 	return t.File.Truncate(size)
+}
+
+// Implement FileWriteEx rather than gofs' fallback, whose constrained write
+// slices past the provided buffer when a write crosses EOF.
+func (t *trackedFile) Append(payload []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, err := t.File.Seek(0, io.SeekEnd); err != nil {
+		return 0, err
+	}
+	t.dirty = true
+	return t.File.Write(payload)
+}
+
+func (t *trackedFile) ConstrainedWriteAt(payload []byte, offset int64) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if offset < 0 {
+		return 0, syscall.EINVAL
+	}
+	info, err := t.File.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if offset >= info.Size() {
+		return 0, nil
+	}
+	if int64(len(payload)) > info.Size()-offset {
+		payload = payload[:info.Size()-offset]
+	}
+	t.dirty = true
+	return t.File.WriteAt(payload, offset)
 }
 
 func (t *trackedFile) Sync() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if err := t.File.Sync(); err != nil {
-		return err
-	}
 	if !t.dirty {
 		return nil
+	}
+	if err := t.File.Sync(); err != nil {
+		return err
 	}
 	if err := t.owner.upload(t.logicalPath, t.File.Name()); err != nil {
 		return err
@@ -555,12 +658,12 @@ func (t *trackedFile) Close() error {
 	if t.closed {
 		return nil
 	}
-	if err := t.File.Sync(); err != nil {
-		_ = t.File.Close()
-		t.closed = true
-		return err
-	}
 	if t.dirty {
+		if err := t.File.Sync(); err != nil {
+			_ = t.File.Close()
+			t.closed = true
+			return err
+		}
 		if err := t.owner.upload(t.logicalPath, t.File.Name()); err != nil {
 			_ = t.File.Close()
 			t.closed = true
@@ -627,6 +730,9 @@ func (d *directoryHandle) Close() error                       { return nil }
 func (d *directoryHandle) Stat() (os.FileInfo, error)         { return d.info, nil }
 func (d *directoryHandle) Readdir(count int) ([]os.FileInfo, error) {
 	if d.index >= len(d.entries) {
+		if count <= 0 {
+			return []os.FileInfo{}, nil
+		}
 		return nil, io.EOF
 	}
 	end := len(d.entries)
@@ -825,7 +931,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	mounted, err := winfsp.Mount(behaviour, letter+":")
+	mounted, err := winfsp.Mount(&synchronousBehaviour{bridgeBehaviour: behaviour.(bridgeBehaviour), cloud: cloud}, letter+":")
 	if err != nil {
 		baseStatus.State, baseStatus.Detail = "error", "WinFsp: "+err.Error()
 		writeStatus(statusPath, baseStatus)
@@ -855,6 +961,11 @@ func run() error {
 				_ = os.Remove(statusPath)
 				return nil
 			}
+			cloud.mu.Lock()
+			if cloud.syncError != "" {
+				baseStatus.State, baseStatus.Detail = "error", cloud.syncError
+			}
+			cloud.mu.Unlock()
 			writeStatus(statusPath, baseStatus)
 		}
 	}

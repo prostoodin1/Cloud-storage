@@ -1,7 +1,9 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
-$python = if (Test-Path -LiteralPath $venvPython) {
+$python = if ($env:CLOUD_STORAGE_PYTHON) {
+    (Resolve-Path -LiteralPath $env:CLOUD_STORAGE_PYTHON).Path
+} elseif (Test-Path -LiteralPath $venvPython) {
     $venvPython
 } else {
     (Get-Command python -ErrorAction Stop).Source
@@ -37,14 +39,14 @@ $bootstrapDist = Join-Path $releaseRoot 'installer-dist'
 $bootstrapWork = Join-Path $releaseRoot 'installer-build'
 $bootstrapSpec = Join-Path $releaseRoot 'installer-spec'
 New-Item -ItemType Directory -Path $bootstrapDist, $bootstrapWork, $bootstrapSpec -Force | Out-Null
-& $python -m PyInstaller --noconfirm --clean --onefile --windowed `
+& $python (Join-Path $PSScriptRoot 'package-app.py') --noconfirm --clean --onefile --windowed `
     --name 'CloudStorage-Client-Installer-windows-x64' `
     --icon (Join-Path $projectRoot 'assets\cloud-storage.ico') `
     --distpath $bootstrapDist --workpath (Join-Path $bootstrapWork 'client') `
     --specpath $bootstrapSpec `
     (Join-Path $projectRoot 'cloud_storage\installer\client_main.py')
 if ($LASTEXITCODE -ne 0) { throw 'Stable client installer build failed.' }
-& $python -m PyInstaller --noconfirm --clean --onefile --windowed `
+& $python (Join-Path $PSScriptRoot 'package-app.py') --noconfirm --clean --onefile --windowed `
     --name 'CloudStorage-Server-Installer-windows-x64' `
     --icon (Join-Path $projectRoot 'assets\cloud-storage.ico') `
     --distpath $bootstrapDist --workpath (Join-Path $bootstrapWork 'server') `

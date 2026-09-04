@@ -5,7 +5,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -49,7 +49,7 @@ def installer_data_directory(product: str) -> Path:
 
 
 class InstallerWindow(QWidget):
-    def __init__(self, product: str) -> None:
+    def __init__(self, product: str, *, smoke_test: bool = False) -> None:
         super().__init__()
         if product not in {"client", "server"}:
             raise ValueError("unknown installer product")
@@ -63,7 +63,8 @@ class InstallerWindow(QWidget):
         self.setWindowIcon(create_app_icon())
         self.setMinimumSize(620, 470)
         self._build_ui()
-        self.refresh_versions()
+        if not smoke_test:
+            self.refresh_versions()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -195,6 +196,10 @@ class InstallerWindow(QWidget):
 def run_installer(product: str) -> int:
     app = QApplication(sys.argv)
     apply_theme(app)
-    window = InstallerWindow(product)
-    window.show()
+    smoke_test = "--smoke-test" in sys.argv
+    window = InstallerWindow(product, smoke_test=smoke_test)
+    if smoke_test:
+        QTimer.singleShot(250, app.quit)
+    else:
+        window.show()
     return app.exec()

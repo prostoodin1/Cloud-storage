@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.9.20",
+    [string]$Version = "0.9.21",
     [string]$MobileVersion = "0.9.14",
     [string]$Repository = "prostoodin1/Cloud-storage",
     [string]$OutputDirectory = "",
@@ -12,7 +12,7 @@ param(
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
+$python = if ($env:CLOUD_STORAGE_PYTHON) { (Resolve-Path -LiteralPath $env:CLOUD_STORAGE_PYTHON).Path } else { Join-Path $projectRoot ".venv\Scripts\python.exe" }
 $output = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $projectRoot "output" }
 $payloads = if ($PayloadDirectory) { $PayloadDirectory } else { Join-Path $projectRoot "outputs" }
 $key = if ($PrivateKey) { $PrivateKey } else { Join-Path (Split-Path $projectRoot -Parent) "private\cloud-storage-update-ed25519.pem" }
@@ -131,6 +131,11 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $temporary) {
-        Remove-Item -LiteralPath $temporary -Recurse -Force
+        $resolvedTemporary = (Resolve-Path -LiteralPath $temporary).Path
+        $expectedParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
+        if ((Split-Path -Parent $resolvedTemporary) -ne $expectedParent -or (Split-Path -Leaf $resolvedTemporary) -notmatch '^cloud-storage-release-[0-9a-f]{32}$') {
+            throw "Refusing to remove an unexpected release temporary directory"
+        }
+        Remove-Item -LiteralPath $resolvedTemporary -Recurse -Force
     }
 }

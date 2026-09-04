@@ -9,7 +9,7 @@ core = Analysis(
     [str(project_root / "cloud_storage" / "core" / "main.py")],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[],
+    datas=[(str(project_root / "cloud_storage" / "core" / "web_assets"), "cloud_storage/core/web_assets")],
     hiddenimports=["uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto"],
     hookspath=[],
     hooksconfig={},

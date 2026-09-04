@@ -78,6 +78,7 @@ class DeviceRecord:
     created_at: str
     approved_at: str | None
     last_seen_at: str | None
+    pairing_method: str = "legacy"
 
 
 @dataclass(frozen=True, slots=True)
@@ -668,8 +669,9 @@ class CoreRepository:
             connection.execute(
                 """
                 INSERT INTO devices(
-                    id, user_id, name, platform, token_hash, status, created_at, approved_at
-                ) VALUES(?, ?, ?, ?, ?, 'trusted', ?, ?)
+                    id, user_id, name, platform, token_hash, status, created_at, approved_at,
+                    pairing_method
+                ) VALUES(?, ?, ?, ?, ?, 'trusted', ?, ?, 'dynamic')
                 """,
                 (device_id, user_id, device_name, platform, token_hash, created, created),
             )
@@ -1277,7 +1279,8 @@ class CoreRepository:
     def _device_select() -> str:
         return """
             SELECT d.id, d.user_id, u.username, u.display_name AS user_display_name,
-                   d.name, d.platform, d.status, d.created_at, d.approved_at, d.last_seen_at
+                   d.name, d.platform, d.status, d.created_at, d.approved_at, d.last_seen_at,
+                   d.pairing_method
             FROM devices d JOIN users u ON u.id = d.user_id
         """
 
@@ -1299,6 +1302,7 @@ class CoreRepository:
             created_at=row["created_at"],
             approved_at=row["approved_at"],
             last_seen_at=row["last_seen_at"],
+            pairing_method=row["pairing_method"],
         )
 
     @staticmethod

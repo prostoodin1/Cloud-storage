@@ -998,12 +998,18 @@ class SettingsPage(QWidget):
                 "Установка zrok2…" if zrok.get("installing") else "Установить zrok2 автоматически"
             )
         if self.zrok_enable_button is not None:
-            self.zrok_enable_button.setEnabled(online and bool(zrok.get("installed")))
+            self.zrok_enable_button.setEnabled(
+                online and bool(zrok.get("installed")) and not zrok.get("enabling")
+                and not zrok.get("installing")
+            )
         if self.zrok_status_label is not None:
             state = str(zrok.get("state", "disabled"))
             labels = {
                 "online": "Подключён к интернету",
                 "starting": "Запускается",
+                "checking": "Проверяем ответ Core через интернет",
+                "unreachable": "Туннель запущен, но Core через интернет недоступен",
+                "account_required": "Подключите аккаунт zrok2",
                 "not_installed": "zrok не установлен",
                 "installing": "Устанавливается",
                 "installed": "Установлен — подключите аккаунт",
@@ -1021,8 +1027,12 @@ class SettingsPage(QWidget):
             detail = (
                 f"Публичный адрес: {public_url}\n"
                 f"Локальный шлюз: {zrok.get('listener', f'http://127.0.0.1:{self._current_settings.zrok_port}')}\n"
-                "Защита: логин + пароль + токен подтверждённого устройства · Manager API скрыт"
+                "Защита: динамический код при первом входе, затем токен устройства · Manager API скрыт"
             )
+            if not self._current_settings.remote_pairing_enabled:
+                detail += "\nПервое подключение через интернет запрещено: включите погашение кодов через удалённый вход."
+            if not zrok.get("share_name"):
+                detail += "\nБез постоянного публичного имени адрес меняется после перезапуска zrok2 — клиенту потребуется новый код."
             if error:
                 detail += f"\nДиагностика: {error}"
             self.zrok_details_label.setText(detail)

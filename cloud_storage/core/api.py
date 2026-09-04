@@ -62,6 +62,7 @@ from cloud_storage.core.storage import (
 from cloud_storage.core.support import SupportBundleService
 from cloud_storage.core.tls import TlsIdentity, lan_endpoints, load_or_create_tls_identity
 from cloud_storage.core.tunnels import TunnelProviderRegistry
+from cloud_storage.core.web import BrowserAccess
 from cloud_storage.pairing import build_dynamic_pairing_code, verify_dynamic_pairing_code
 
 
@@ -556,6 +557,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "expires_at": expires_at,
             "seconds_remaining": max(0, expires_at - now),
         }
+    browser = BrowserAccess(runtime)
     bearer = HTTPBearer(auto_error=False)
     pairing_limiter = SlidingWindowLimiter(limit=10, window_seconds=300)
     remote_pairing_limiter = SlidingWindowLimiter(limit=5, window_seconds=900)
@@ -584,6 +586,11 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         if path in {
             "/",
             "/v1/health",
+            "/v1/web/pair",
+            "/v1/web/session",
+            "/v1/web/logout",
+            "/web/assets/app.css",
+            "/web/assets/app.js",
             "/v1/auth/device-login",
             "/v1/auth/google-device-login",
             "/v1/pairing/redeem",
@@ -636,6 +643,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         )
         external_request = remote_request or zrok_request
         request.state.remote_request = remote_request
+        request.state.lan_request = lan_request
         request.state.zrok_request = zrok_request
         request.state.external_request = external_request
         remote_address = request.client.host if request.client else "unknown"
@@ -658,7 +666,9 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         }
         browser_policy = runtime.control.settings()["browser_access"] if zrok_request else "all"
         zrok_policy_denied = zrok_request and (
-            browser_policy == "nobody"
+            (browser_policy == "nobody" and (
+                request.url.path == "/" or request.url.path.startswith(("/web/", "/v1/web/", "/v1/public/shares/"))
+            ))
             or (browser_policy == "approved" and request.url.path.startswith("/v1/public/shares/"))
         )
         if invalid_local_host:
@@ -679,7 +689,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             )
         elif (
             external_request
-            and request.url.path == "/v1/pairing/redeem"
+            and request.url.path in {"/v1/pairing/redeem", "/v1/web/pair"}
             and not runtime.config.remote_pairing_enabled
         ):
             response = JSONResponse(
@@ -705,7 +715,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                 )
             )
             and not re.fullmatch(r"/v1/mobile/admin/storage/[^/]+/write", request.url.path)
-            and request.url.path != "/v1/admin/shutdown"
+            and request.url.path not in {"/v1/admin/shutdown", "/v1/web/logout"}
             and not request.url.path.endswith("/revoke")
         ):
             response = JSONResponse(
@@ -720,6 +730,13 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+        if request.url.path == "/" or request.url.path.startswith("/web/assets/"):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'none'; script-src 'self'; style-src 'self'; "
+                "connect-src 'self'; img-src 'self' blob:; base-uri 'none'; "
+                "form-action 'self'; frame-ancestors 'none'"
+            )
+        response.headers["Referrer-Policy"] = "no-referrer"
         if external_request:
             important = request.method != "GET" or response.status_code >= 400
             if important or remote_audit_limiter.allow(remote_address):
@@ -759,11 +776,13 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         remote_session: Annotated[str | None, Header(alias="X-Cloud-Remote-Session")] = None,
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),  # noqa: B008
     ) -> DeviceRecord:
-        if credentials is None or credentials.scheme.casefold() != "bearer":
+        if credentials is None:
+            return browser.authenticate(request)
+        if credentials.scheme.casefold() != "bearer":
             raise HTTPException(status_code=401, detail="device authorization required")
         try:
             device = runtime.repository.authenticate_device(credentials.credentials)
-            if request.state.external_request:
+            if request.state.external_request and device.pairing_method != "dynamic":
                 runtime.repository.credentials.verify_remote_session(
                     remote_session or "",
                     user_id=device.user_id,
@@ -844,15 +863,6 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             )
         return JSONResponse(status_code=409, content={"code": "conflict", "detail": str(exc)})
 
-    @app.get("/", tags=["system"])
-    def root_status() -> dict[str, str]:
-        return {
-            "service": "Cloud Storage Server",
-            "status": "ok",
-            "version": __version__,
-            "health": "/v1/health",
-        }
-
     @app.exception_handler(InvalidCredential)
     @app.exception_handler(InvalidLogicalPath)
     @app.exception_handler(InvalidStorageRoot)
@@ -903,6 +913,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         zrok = {
             "enabled": zrok_status["enabled"],
             "provider": "zrok",
+            "probe_id": runtime.tunnels.providers["zrok"].health_probe_id,
             "state": zrok_status["state"],
             "installed": zrok_status["installed"],
             "process_running": zrok_status["process_running"],
@@ -1005,7 +1016,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             action="tunnel.provider.account.enabled",
             target_type="tunnel_provider",
             target_id=provider_id,
-            detail=f"Аккаунт tunnel-provider {provider_id} подключён; токен не сохранён",
+            detail=f"Аккаунт tunnel-provider {provider_id} подключён; профиль хранится в каталоге Core",
         )
         return result
 
@@ -2444,7 +2455,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     @app.post("/v1/pairing/redeem", tags=["pairing"], status_code=status.HTTP_201_CREATED)
     def redeem_invitation(body: RedeemInvitationRequest, request: Request) -> dict[str, Any]:
         remote = request.client.host if request.client else "unknown"
-        limiter = remote_pairing_limiter if request.state.remote_request else pairing_limiter
+        limiter = remote_pairing_limiter if request.state.external_request else pairing_limiter
         if not limiter.allow(remote):
             raise HTTPException(status_code=429, detail="too many pairing attempts")
         if body.code.strip().upper().startswith("CS3."):
@@ -2876,4 +2887,5 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         record = runtime.storage.soft_delete(space_id, device.user_id, logical_path)
         return {"deleted": True, "file": runtime.storage.to_dict(record)}
 
+    browser.register(app, redeem_invitation, RedeemInvitationRequest)
     return app

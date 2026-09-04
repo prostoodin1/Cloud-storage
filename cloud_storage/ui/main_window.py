@@ -85,11 +85,34 @@ class _CoreHealthTask(QRunnable):
             self.signals.finished.emit()
 
 
+class _TunnelEnableSignals(QObject):
+    completed = Signal(str, str)
+
+
+class _TunnelEnableTask(QRunnable):
+    def __init__(self, client: CoreClient, provider_id: str, token: str) -> None:
+        super().__init__()
+        self.client, self.provider_id, self.token = client, provider_id, token
+        self.signals = _TunnelEnableSignals()
+
+    def run(self) -> None:
+        error = ""
+        try:
+            self.client.enable_tunnel(self.provider_id, self.token)
+        except (CoreApiError, CoreUnavailable, ValueError) as exc:
+            error = str(exc).replace(self.token, "[скрыто]")
+        finally:
+            self.token = ""
+        self.signals.completed.emit(self.provider_id, error)
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
         store: SettingsStore | None = None,
         disk_service: DiskService | None = None,
+        *,
+        smoke_test: bool = False,
     ) -> None:
         super().__init__()
         custom_store = store is not None
@@ -171,8 +194,9 @@ class MainWindow(QMainWindow):
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._poll_core_health)
-        self._reset_refresh_timer()
-        QTimer.singleShot(0, self.refresh_disks)
+        if not smoke_test:
+            self._reset_refresh_timer()
+            QTimer.singleShot(0, self.refresh_disks)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -1855,25 +1879,34 @@ class MainWindow(QMainWindow):
         self.refresh_core()
 
     def enable_tunnel(self, provider_id: str) -> None:
+        if getattr(self, "_tunnel_enable_task", None) is not None:
+            return
         token, accepted = QInputDialog.getText(
             self,
             "Подключить аккаунт zrok2",
-            "Вставьте enable-токен из аккаунта zrok. Он будет передан zrok2 один раз и не сохранится:",
+            "Вставьте enable-токен аккаунта zrok2. zrok2 сохранит свой профиль в каталоге Core для автозапуска:",
             QLineEdit.EchoMode.Password,
         )
         if not accepted or not token.strip():
             return
-        try:
-            self.core_client.enable_tunnel(provider_id, token.strip())
-        except (CoreApiError, CoreUnavailable, ValueError) as exc:
-            QMessageBox.warning(self, "Аккаунт не подключён", self._core_error_text(exc))
+        task = _TunnelEnableTask(self.core_client, provider_id, token.strip())
+        task.signals.completed.connect(self._tunnel_enable_complete)
+        self._tunnel_enable_task = task
+        QThreadPool.globalInstance().start(task)
+
+    def _tunnel_enable_complete(self, provider_id: str, error: str) -> None:
+        self._tunnel_enable_task = None
+        self.refresh_core()
+        if error:
+            QMessageBox.warning(self, "Аккаунт не подключён", error)
             return
         self.audit.record("core.tunnel.enabled", f"Подключён аккаунт {provider_id}")
         self.refresh_core()
         QMessageBox.information(
             self,
             "Аккаунт подключён",
-            "Теперь включите zrok2 в настройках и сохраните их. Токен подключения не сохранён.",
+            "Если zrok2 уже включён, интернет-вход запускается автоматически. Иначе включите его "
+            "в настройках и сохраните их. Профиль аккаунта zrok2 сохранён в каталоге Core.",
         )
 
     def export_support_bundle(self) -> None:

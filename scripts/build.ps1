@@ -1,7 +1,9 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
-$python = if (Test-Path -LiteralPath $venvPython) {
+$python = if ($env:CLOUD_STORAGE_PYTHON) {
+    (Resolve-Path -LiteralPath $env:CLOUD_STORAGE_PYTHON).Path
+} elseif (Test-Path -LiteralPath $venvPython) {
     $venvPython
 } else {
     (Get-Command python -ErrorAction Stop).Source
@@ -13,15 +15,15 @@ $workRoot = if ($env:CLOUD_STORAGE_BUILD_WORK) { $env:CLOUD_STORAGE_BUILD_WORK }
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
 & $python (Join-Path $projectRoot 'scripts\generate_icon.py')
 if ($LASTEXITCODE -ne 0) { throw 'Icon generation failed.' }
-& $python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageServer.spec')
+& $python (Join-Path $PSScriptRoot 'package-app.py') --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageServer.spec')
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
-& $python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageContainerManager.spec')
+& $python (Join-Path $PSScriptRoot 'package-app.py') --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageContainerManager.spec')
 if ($LASTEXITCODE -ne 0) { throw 'Container Manager build failed.' }
-& $python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageLegacyCore.spec')
+& $python (Join-Path $PSScriptRoot 'package-app.py') --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageLegacyCore.spec')
 if ($LASTEXITCODE -ne 0) { throw 'Compatibility Core build failed.' }
 & (Join-Path $PSScriptRoot 'build-core-go.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Native Go Core build failed.' }
-& $python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageClient.spec')
+& $python (Join-Path $PSScriptRoot 'package-app.py') --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageClient.spec')
 if ($LASTEXITCODE -ne 0) { throw 'Desktop Client build failed.' }
 
 Write-Host "Build ready: $distRoot"

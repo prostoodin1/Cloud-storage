@@ -8,6 +8,8 @@ import tarfile
 import urllib.request
 from pathlib import Path
 
+from cloud_storage.updates import UpdateService
+
 ZROK2_VERSION = "2.0.4"
 
 _ASSETS = {
@@ -48,14 +50,18 @@ def download_zrok2(data_directory: Path) -> Path:
         raise RuntimeError("automatic zrok2 installation is not available on this platform") from exc
     url = f"https://github.com/openziti/zrok/releases/download/v{ZROK2_VERSION}/{asset}"
     request = urllib.request.Request(url, headers={"User-Agent": "Cloud-Storage-Server"})
-    with urllib.request.urlopen(request, timeout=90.0) as response:
+    with UpdateService._open_verified(request, timeout=90.0) as response:
         archive = response.read(150 * 1024**2 + 1)
     if len(archive) > 150 * 1024**2:
         raise RuntimeError("zrok2 package is unexpectedly large")
     if hashlib.sha256(archive).hexdigest() != expected_sha256:
         raise RuntimeError("zrok2 package checksum does not match the official release")
     executable_name = "zrok2.exe" if os.name == "nt" else "zrok2"
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as package:
+    try:
+        package = tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz")
+    except tarfile.TarError as exc:
+        raise RuntimeError("zrok2 package is not a valid archive") from exc
+    with package:
         members = [
             member
             for member in package.getmembers()

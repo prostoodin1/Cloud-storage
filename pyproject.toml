@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloud-storage-server"
-version = "0.9.20"
+version = "0.9.21"
 description = "Safe cross-platform home cloud server control application"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -39,6 +39,9 @@ cloud-storage-containers = "cloud_storage.container_manager.main:main"
 
 [tool.setuptools.packages.find]
 include = ["cloud_storage*"]
+
+[tool.setuptools.package-data]
+"cloud_storage.core" = ["web_assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

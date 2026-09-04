@@ -113,7 +113,12 @@ class BackgroundTask(QRunnable):
 
 
 class ClientWindow(QMainWindow):
-    def __init__(self, store: ClientSettingsStore | None = None) -> None:
+    def __init__(
+        self,
+        store: ClientSettingsStore | None = None,
+        *,
+        smoke_test: bool = False,
+    ) -> None:
         super().__init__()
         self.store = store or ClientSettingsStore()
         self.profile: ClientProfile = self.store.load()
@@ -153,7 +158,8 @@ class ClientWindow(QMainWindow):
         self.resize(1320, 820)
         self._build_ui()
         apply_context_tooltips(self)
-        self._setup_tray()
+        if not smoke_test:
+            self._setup_tray()
         self._load_profile()
         self._refresh_transfer_cards()
         self._render_offline_records(self.offline_store.list())
@@ -161,17 +167,20 @@ class ClientWindow(QMainWindow):
         self.reconnect_timer = QTimer(self)
         self.reconnect_timer.setInterval(3_000)
         self.reconnect_timer.timeout.connect(self.refresh_all_connections)
-        self.reconnect_timer.start()
+        if not smoke_test:
+            self.reconnect_timer.start()
         self.transfer_timer = QTimer(self)
         self.transfer_timer.setInterval(500)
         self.transfer_timer.timeout.connect(self._transfer_tick)
-        self.transfer_timer.start()
+        if not smoke_test:
+            self.transfer_timer.start()
         self.drive_timer = QTimer(self)
         self.drive_timer.setInterval(5_000)
         self.drive_timer.timeout.connect(self._reconcile_drives)
-        self.drive_timer.start()
-        QTimer.singleShot(100, self.refresh_all_connections)
-        QTimer.singleShot(250, self._reconcile_drives)
+        if not smoke_test:
+            self.drive_timer.start()
+            QTimer.singleShot(100, self.refresh_all_connections)
+            QTimer.singleShot(250, self._reconcile_drives)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -858,8 +867,7 @@ class ClientWindow(QMainWindow):
         if invitation is not None:
             if invitation.server_url:
                 self.server_url.setText(invitation.server_url)
-            if invitation.certificate_fingerprint:
-                self.fingerprint.setText(invitation.certificate_fingerprint)
+            self.fingerprint.setText(invitation.certificate_fingerprint)
             if invitation.username:
                 self.username.setText(invitation.username)
             raw_code = invitation.code
@@ -997,9 +1005,7 @@ class ClientWindow(QMainWindow):
             return
         self.token = token
         selected_url = str(payload.get("server_url") or self.server_url.text()).rstrip("/")
-        selected_fingerprint = str(
-            payload.get("fingerprint") or self.fingerprint.text()
-        ).strip()
+        selected_fingerprint = str(payload.get("fingerprint", self.fingerprint.text())).strip()
         self.server_url.setText(selected_url)
         self.fingerprint.setText(selected_fingerprint)
         self.profile.server_url = selected_url

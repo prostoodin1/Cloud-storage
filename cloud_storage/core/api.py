@@ -514,9 +514,11 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         nonce = runtime.repository.credentials.fingerprint(
             f"{dynamic_server_id}:{expires_at}", "dynamic-pairing-nonce"
         )[:24]
+        # A code copied to another computer must prefer a verified public
+        # endpoint. LAN addresses remain fallbacks for machines on the same
+        # network, but must not make an otherwise working internet code look
+        # local-only.
         addresses: list[str] = []
-        if runtime.config.lan_enabled:
-            addresses.extend(lan_endpoints(runtime.config))
         zrok_status = runtime.tunnels.status("zrok")
         zrok_url = str(zrok_status.get("public_url") or "").rstrip("/")
         if (
@@ -533,6 +535,8 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             and remote_url.startswith("https://")
         ):
             addresses.append(remote_url)
+        if runtime.config.lan_enabled:
+            addresses.extend(lan_endpoints(runtime.config))
         addresses = list(dict.fromkeys(item for item in addresses if item))
         if not addresses:
             raise HTTPException(

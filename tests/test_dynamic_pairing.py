@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from cloud_storage.core.api import create_app
 from cloud_storage.core.config import CoreConfig
+from cloud_storage.core.tunnels import ZrokTunnelService
 from cloud_storage.pairing import (
     build_dynamic_pairing_code,
     parse_dynamic_pairing_code,
@@ -125,3 +126,34 @@ def test_dynamic_pairing_creates_approved_device_and_persistent_token(tmp_path) 
             },
         )
         assert rejected.status_code == 422
+
+
+def test_dynamic_code_prefers_verified_internet_address(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(ZrokTunnelService, "start", lambda self: None)
+    app = create_app(
+        CoreConfig(
+            data_directory=tmp_path,
+            lan_enabled=True,
+            lan_port=18766,
+            zrok_enabled=True,
+            zrok_port=18768,
+            remote_pairing_enabled=True,
+        )
+    )
+    tunnel = app.state.runtime.tunnels.providers["zrok"]
+    tunnel._state = "online"
+    tunnel._public_url = "https://public.example.test"
+    manager_headers = {
+        "Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"
+    }
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/admin/dynamic-pairing-code", headers=manager_headers
+        )
+
+    assert response.status_code == 200
+    code = parse_dynamic_pairing_code(response.json()["code"])
+    assert code is not None
+    assert code.server_url == "https://public.example.test"
+    assert any(address.startswith("https://") for address in code.alternate_addresses)

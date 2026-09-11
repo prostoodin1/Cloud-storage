@@ -22,15 +22,15 @@ def test_installer_version_choice_reaches_interactive_setup(product, monkeypatch
     launch = Mock()
     window.service.launch_installer = launch
     package = UpdatePackage("https://example.com/setup.exe", "a" * 64, 10, "setup.exe")
-    latest = UpdateInfo(product, "0.9.23", "stable", "2026-09-11", "Latest", package)
-    previous = UpdateInfo(product, "0.9.22", "stable", "2026-09-04", "Previous", package)
+    latest = UpdateInfo(product, "0.9.24", "stable", "2026-09-11", "Latest", package)
+    previous = UpdateInfo(product, "0.9.23", "stable", "2026-09-11", "Previous", package)
     try:
         window._versions_loaded([latest, previous])
         assert window._selected() == latest
         window.mode.setCurrentIndex(window.mode.findData("specific"))
-        window.version.setCurrentIndex(window.version.findData("0.9.22"))
+        window.version.setCurrentIndex(window.version.findData("0.9.23"))
         assert window._selected() == previous
-        assert "0.9.22" in window.install.text()
+        assert "0.9.23" in window.install.text()
         path = Path(tmp_path / "setup.exe")
         window._downloaded((previous, path))
         launch.assert_called_once_with(path, previous, interactive=True)

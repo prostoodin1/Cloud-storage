@@ -912,9 +912,13 @@ class ClientWindow(QMainWindow):
                 except (ClientApiError, ClientConnectionError, ValueError) as exc:
                     errors.append(str(exc))
                     continue
-                result = candidate_api.redeem_invitation(
-                    code, None, device_name, platform.system()
-                )
+                try:
+                    result = candidate_api.redeem_invitation(
+                        code, None, device_name, platform.system()
+                    )
+                except (ClientApiError, ClientConnectionError, ValueError) as exc:
+                    errors.append(str(exc))
+                    continue
                 return {
                     "health": health,
                     "pairing": result,
@@ -923,8 +927,9 @@ class ClientWindow(QMainWindow):
                     "fingerprint": candidate_fingerprint,
                 }
             raise ClientConnectionError(
-                "Сервер недоступен ни по одному адресу из ссылки. "
-                "Для интернета включите zrok, для локальной сети проверьте, что телефон и сервер в одной Wi-Fi сети."
+                "Подключение не принято ни по одному адресу из кода. "
+                "Для интернета сначала дождитесь рабочего публичного адреса в Server Manager; "
+                "для локальной сети проверьте, что оба компьютера находятся в одной сети."
             )
 
         self._start_task(

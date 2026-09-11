@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.9.22"
+#define AppVersion "0.9.23"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
 #define BuildRoot "..\dist"
@@ -37,7 +37,7 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Создать ярлык Server Manager на рабочем столе"; GroupDescription: "Дополнительные ярлыки:"; Flags: checkedonce
+Name: "desktopicon"; Description: "Создать ярлык Server Manager на рабочем столе"; GroupDescription: "Ярлыки (выберите нужное):"; Flags: unchecked
 Name: "privatefirewall"; Description: "Разрешить клиентский HTTPS и обнаружение только из локальной подсети"; GroupDescription: "Сеть Windows:"; Flags: checkedonce
 
 [Dirs]

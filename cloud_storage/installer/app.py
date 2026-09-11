@@ -180,7 +180,10 @@ class InstallerWindow(QWidget):
         info, path = value  # type: ignore[misc]
         self.status.setText("Пакет проверен. Запускаем установку с правами администратора…")
         try:
-            self.service.launch_installer(path, info)
+            # The permanent bootstrap installer must show the Setup task page so
+            # the user can explicitly choose desktop shortcuts and autostart.
+            # In-app automatic updates keep using the quiet launch mode.
+            self.service.launch_installer(path, info, interactive=True)
         except (OSError, UpdateError) as exc:
             self._failed(str(exc))
             return

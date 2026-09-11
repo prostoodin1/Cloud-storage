@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Client"
-#define AppVersion "0.9.22"
+#define AppVersion "0.9.23"
 #define AppPublisher "Cloud Storage"
 #define AppExeName "CloudStorageClient.exe"
 #define WinFspMsi "winfsp-2.1.25156.msi"
@@ -39,7 +39,7 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Дополнительные ярлыки:"; Flags: unchecked
+Name: "desktopicon"; Description: "Создать ярлык Cloud Storage Client на рабочем столе"; GroupDescription: "Ярлыки (выберите нужное):"; Flags: unchecked
 Name: "autostart"; Description: "Запускать клиент и подключать диски после входа в Windows"; GroupDescription: "Интеграция с Windows:"; Flags: checkedonce
 
 [Files]

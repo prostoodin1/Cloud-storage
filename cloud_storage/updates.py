@@ -365,7 +365,13 @@ class UpdateService:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def launch_installer(self, installer: Path, info: UpdateInfo) -> None:
+    def launch_installer(
+        self,
+        installer: Path,
+        info: UpdateInfo,
+        *,
+        interactive: bool = False,
+    ) -> None:
         installer = installer.resolve(strict=True)
         if (
             info.product != self.product
@@ -378,14 +384,10 @@ class UpdateService:
         if size_bytes != info.package.size_bytes or sha256 != info.package.sha256:
             raise UpdateError("установщик изменён после скачивания; запуск отменён")
         log_path = self.download_directory / f"install-{self.product}.log"
-        arguments = [
-            str(installer),
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/CLOSEAPPLICATIONS",
-            f"/LOG={log_path}",
-        ]
+        arguments = [str(installer)]
+        if not interactive:
+            arguments.extend(("/VERYSILENT", "/SUPPRESSMSGBOXES"))
+        arguments.extend(("/NORESTART", "/CLOSEAPPLICATIONS", f"/LOG={log_path}"))
         try:
             if os.name == "nt":
                 _launch_elevated_windows(arguments)

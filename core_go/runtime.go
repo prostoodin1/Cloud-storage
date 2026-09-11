@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-const coreVersion = "0.9.22"
+const coreVersion = "0.9.23"
 
 type coreRuntime struct {
 	config coreConfig
@@ -107,6 +107,16 @@ func (runtime *coreRuntime) proxyServer(cancel context.CancelFunc) *http.Server 
 	target, _ := url.Parse(fmt.Sprintf("http://%s:%d", runtime.config.InternalHost, runtime.config.InternalPort))
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.ModifyResponse = func(response *http.Response) error {
+		if response.Request.Method == http.MethodPost && response.Request.URL.Path == "/v1/admin/shutdown" && response.StatusCode == http.StatusOK {
+			// Only the authenticated Core may accept shutdown. A rejected
+			// request or proxy error must never stop the native supervisor.
+			runtime.stop.Store(true)
+			go func() {
+				time.Sleep(750 * time.Millisecond)
+				runtime.requestStop()
+				cancel()
+			}()
+		}
 		if response.Request.URL.Path != "/v1/health" || response.StatusCode != http.StatusOK {
 			return nil
 		}
@@ -138,17 +148,6 @@ func (runtime *coreRuntime) proxyServer(cancel context.CancelFunc) *http.Server 
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("X-Cloud-Storage-Runtime", "go/"+coreVersion)
 		proxy.ServeHTTP(writer, request)
-		if request.Method == http.MethodPost && request.URL.Path == "/v1/admin/shutdown" {
-			// The compatibility endpoint schedules its own graceful Uvicorn
-			// shutdown after returning. Give it a short window to flush SQLite
-			// and logs before the supervisor context terminates the process.
-			runtime.stop.Store(true)
-			go func() {
-				time.Sleep(750 * time.Millisecond)
-				runtime.requestStop()
-				cancel()
-			}()
-		}
 	})
 	return &http.Server{
 		Addr:              runtime.config.PublicAddress,

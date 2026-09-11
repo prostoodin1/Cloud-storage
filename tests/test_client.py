@@ -59,6 +59,20 @@ def test_client_profile_and_device_token_are_persisted(tmp_path) -> None:
     assert session_vault.load() is None
 
 
+def test_space_drive_letter_survives_profile_save_and_restart(tmp_path) -> None:
+    store = ClientSettingsStore(tmp_path)
+    profile = store.load()
+    profile.drive_letter = "S"
+    profile.drive_letters = {"personal": "S", "shared": "T"}
+    store.save(profile)
+    restarted = ClientSettingsStore(tmp_path)
+    assert restarted.load().drive_letters == {"personal": "S", "shared": "T"}
+    for _ in range(3):
+        loaded = restarted.load()
+        restarted.ensure_space_drive_letters(loaded, ["personal", "shared"])
+    assert restarted.load().drive_letters == {"personal": "S", "shared": "T"}
+
+
 def test_multiple_server_profiles_have_independent_tokens(tmp_path) -> None:
     store = ClientSettingsStore(tmp_path)
     first = store.load()

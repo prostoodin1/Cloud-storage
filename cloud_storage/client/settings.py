@@ -182,7 +182,11 @@ class ClientSettingsStore:
             if not re.fullmatch(r"[D-Z]", letter) or letter in drive_letters:
                 letter = _next_drive_letter(drive_letters)
             profile.drive_letter = letter
-            drive_letters.add(letter)
+            # The legacy single-drive preference is only a fallback. Reserving
+            # it alongside per-space mappings makes the same profile collide
+            # with itself and shifts the user's saved letters on every load.
+            if not profile.drive_letters:
+                drive_letters.add(letter)
             normalized_space_letters: dict[str, str] = {}
             for space_id, raw_letter in profile.drive_letters.items():
                 space_id = re.sub(r"[^a-zA-Z0-9_-]", "", space_id)[:100]

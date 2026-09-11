@@ -8,8 +8,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from cloud_storage.client.api_client import ClientApi
 from cloud_storage import __version__
+from cloud_storage.client.api_client import ClientApi
 from cloud_storage.core.config import CoreConfig
 from cloud_storage.core.main import CoreServerGroup
 

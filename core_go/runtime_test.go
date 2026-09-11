@@ -4,10 +4,41 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestShutdownRequiresSuccessfulCoreAuthorization(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable, http.StatusOK} {
+		t.Run(itoa(status), func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer backend.Close()
+			address := backend.Listener.Addr().(*net.TCPAddr)
+			runtime := &coreRuntime{config: coreConfig{InternalHost: "127.0.0.1", InternalPort: address.Port}}
+			var cancelled atomic.Bool
+			proxy := runtime.proxyServer(func() { cancelled.Store(true) })
+			response := httptest.NewRecorder()
+			proxy.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/admin/shutdown", nil))
+			if response.Code != status {
+				t.Fatalf("status %d, want %d", response.Code, status)
+			}
+			if runtime.stop.Load() != (status == http.StatusOK) {
+				t.Errorf("shutdown scheduled=%v after backend status %d", runtime.stop.Load(), status)
+			}
+			time.Sleep(900 * time.Millisecond)
+			if cancelled.Load() != (status == http.StatusOK) {
+				t.Errorf("supervisor cancelled=%v after backend status %d", cancelled.Load(), status)
+			}
+		})
+	}
+}
 
 func TestFilteredEnvironmentReplacesCoreValues(t *testing.T) {
 	values := filteredEnvironment([]string{"PATH=x", "CLOUD_STORAGE_CORE_PORT=8765", "cloud_storage_core_host=localhost"}, "CLOUD_STORAGE_CORE_PORT", "CLOUD_STORAGE_CORE_HOST")

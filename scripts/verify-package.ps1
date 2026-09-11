@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory=$true)][string]$Dist,
   [string]$InstallerDirectory = '',
-  [string]$ExpectedVersion = '0.9.22'
+  [string]$ExpectedVersion = '0.9.23',
+  [switch]$NativeCore
 )
 $ErrorActionPreference = 'Stop'
 $releaseDist = (Resolve-Path -LiteralPath $Dist).Path
@@ -72,7 +73,8 @@ $checks['go_core_binary'] = ($coreSmoke.WaitForExit(10000) -and $coreSmoke.ExitC
 $compatibilityPath = Join-Path $releaseDist 'CloudStorageLegacyCore\CloudStorageLegacyCore.exe'
 $coreOut = Join-Path $qaRoot 'core-stdout.txt'
 $coreErr = Join-Path $qaRoot 'core-stderr.txt'
-$coreProcess = Start-Process -FilePath $compatibilityPath -WindowStyle Hidden -RedirectStandardOutput $coreOut -RedirectStandardError $coreErr -PassThru
+$runtimePath = if ($NativeCore) { $corePath } else { $compatibilityPath }
+$coreProcess = Start-Process -FilePath $runtimePath -WindowStyle Hidden -RedirectStandardOutput $coreOut -RedirectStandardError $coreErr -PassThru
 try {
   $deadline = (Get-Date).AddSeconds(30)
   do {
@@ -84,6 +86,13 @@ try {
   if (-not $checks['packaged_core_api']) {
     $detail = if (Test-Path $coreErr) { (Get-Content -LiteralPath $coreErr -Raw) } else { '' }
     throw "Packaged Core did not become healthy (exited=$($coreProcess.HasExited), code=$(if ($coreProcess.HasExited) {$coreProcess.ExitCode} else {'running'})): $detail"
+  }
+  if ($NativeCore) {
+    $checks['native_supervisor'] = ($health.runtime -eq 'go')
+    $denied = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$qaBaseUrl/v1/admin/shutdown" -SkipHttpErrorCheck
+    Start-Sleep -Milliseconds 1200
+    $stillAlive = Invoke-RestMethod -Uri "$qaBaseUrl/v1/health" -TimeoutSec 5
+    $checks['unauthorized_shutdown_rejected'] = ($denied.StatusCode -eq 401 -and $stillAlive.runtime -eq 'go' -and -not $coreProcess.HasExited)
   }
   $root = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/" -TimeoutSec 5
   $asset = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/web/assets/app.js" -TimeoutSec 5
@@ -99,26 +108,63 @@ try {
   $spaceId = $spaces[0].id
   $checks['packaged_quota'] = ($spaces[0].quota_bytes -eq 3GB)
   $payloadText = 'Packaged Cloud Storage round-trip QA'
-  Invoke-RestMethod -Method Put -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/qa.txt" -Headers $deviceHeaders -ContentType 'text/plain' -Body $payloadText | Out-Null
-  $downloaded = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/qa.txt" -Headers $deviceHeaders
+  Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/spaces/$spaceId/directories" -Headers $deviceHeaders -ContentType 'application/json' -Body (@{logical_path='Client-folder'} | ConvertTo-Json) | Out-Null
+  Invoke-RestMethod -Method Put -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Headers $deviceHeaders -ContentType 'text/plain' -Body $payloadText | Out-Null
+  $downloaded = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Headers $deviceHeaders
   $checks['packaged_file_roundtrip'] = ($downloaded.Content -ceq $payloadText)
+  $clientEntries = @(Invoke-RestMethod -Uri "$qaBaseUrl/v1/spaces/$spaceId/entries?directory=Client-folder" -Headers $deviceHeaders)
+  $checks['packaged_client_folder'] = ($clientEntries.Count -eq 1 -and $clientEntries[0].name -eq 'qa.txt')
   $spaces = @(Invoke-RestMethod -Uri "$qaBaseUrl/v1/spaces" -Headers $deviceHeaders)
   $checks['packaged_usage'] = ($spaces[0].used_bytes -eq $payloadText.Length -and $spaces[0].free_bytes -eq (3GB - $payloadText.Length))
   $existingCode = Invoke-RestMethod -Uri "$qaBaseUrl/v1/admin/dynamic-pairing-code?user_id=$userId" -Headers $managerHeaders
   $web = Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/web/pair" -ContentType 'application/json' -Headers @{Origin=$qaBaseUrl} -Body (@{code=$existingCode.code} | ConvertTo-Json) -SessionVariable qaBrowser
   $webSpaces = @(Invoke-RestMethod -Uri "$qaBaseUrl/v1/spaces" -WebSession $qaBrowser)
   $checks['packaged_browser_same_person'] = ($web.device.user_id -eq $userId -and $webSpaces[0].id -eq $spaceId)
+  $csrfHeaders = @{Origin=$qaBaseUrl; 'X-CSRF-Token'=$web.csrf}
+  Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/spaces/$spaceId/directories" -WebSession $qaBrowser -Headers $csrfHeaders -ContentType 'application/json' -Body (@{logical_path='Browser-folder'} | ConvertTo-Json) | Out-Null
+  $browserPayload = 'Browser upload and download QA'
+  Invoke-RestMethod -Method Put -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Browser-folder/browser.txt" -WebSession $qaBrowser -Headers $csrfHeaders -ContentType 'text/plain' -Body $browserPayload | Out-Null
+  $browserDownload = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Browser-folder/browser.txt" -WebSession $qaBrowser
+  $browserEntries = @(Invoke-RestMethod -Uri "$qaBaseUrl/v1/spaces/$spaceId/entries?directory=Browser-folder" -WebSession $qaBrowser)
+  $checks['packaged_browser_folder_upload'] = ($browserDownload.Content -ceq $browserPayload -and $browserEntries.Count -eq 1 -and $browserEntries[0].name -eq 'browser.txt')
+  $share = Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/shares" -WebSession $qaBrowser -Headers $csrfHeaders -ContentType 'application/json' -Body (@{space_id=$spaceId;logical_path='Browser-folder/browser.txt';kind='file'} | ConvertTo-Json)
+  $publicOverview = Invoke-RestMethod -Uri ($qaBaseUrl + $share.url_path)
+  $publicDownload = Invoke-WebRequest -UseBasicParsing -Uri ($qaBaseUrl + $share.url_path + '/download')
+  $checks['packaged_public_share'] = ($publicOverview.name -eq 'browser.txt' -and $publicDownload.Content -ceq $browserPayload)
+  Invoke-RestMethod -Method Delete -Uri "$qaBaseUrl/v1/shares/$($share.id)" -WebSession $qaBrowser -Headers $csrfHeaders | Out-Null
+  $diagnostics = Invoke-RestMethod -Uri "$qaBaseUrl/v1/admin/diagnostics" -Headers $managerHeaders
+  $checks['packaged_diagnostics'] = ($null -ne $diagnostics)
   Invoke-RestMethod -Method Delete -Uri "$qaBaseUrl/v1/admin/spaces/$spaceId" -Headers $managerHeaders | Out-Null
   $afterArchive = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/v1/spaces" -Headers $deviceHeaders
   $checks['packaged_archive_hidden'] = ($afterArchive.Content.Trim() -eq '[]')
   Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/admin/spaces/$spaceId/restore" -Headers $managerHeaders | Out-Null
-  $restored = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/qa.txt" -Headers $deviceHeaders
+  $restored = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Headers $deviceHeaders
   $checks['packaged_archive_restore'] = ($restored.Content -ceq $payloadText)
+  $anotherCode = Invoke-RestMethod -Uri "$qaBaseUrl/v1/admin/dynamic-pairing-code" -Headers $managerHeaders
+  $stranger = Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/pairing/redeem" -ContentType 'application/json' -Body (@{code=$anotherCode.code;device_name='Other QA person';platform='Windows'} | ConvertTo-Json)
+  $strangerRead = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Headers @{Authorization=('Bearer ' + $stranger.device_token)} -SkipHttpErrorCheck
+  $checks['personal_space_isolation'] = ($strangerRead.StatusCode -eq 404)
   Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/admin/shutdown" -Headers @{Authorization=('Bearer ' + $secrets.manager_token)} | Out-Null
   if (-not $coreProcess.WaitForExit(10000)) { throw 'Packaged Core did not stop after authenticated shutdown' }
   $checks['clean_shutdown'] = ($coreProcess.ExitCode -eq 0)
+  Start-Sleep -Milliseconds 500
+  $coreProcess = Start-Process -FilePath $runtimePath -WindowStyle Hidden -RedirectStandardOutput $coreOut -RedirectStandardError $coreErr -PassThru
+  $health = $null
+  $deadline = (Get-Date).AddSeconds(30)
+  do {
+    Start-Sleep -Milliseconds 200
+    try { $health = Invoke-RestMethod -Uri "$qaBaseUrl/v1/health" -TimeoutSec 2 } catch { $health = $null }
+  } until ($health -or $coreProcess.HasExited -or (Get-Date) -ge $deadline)
+  if (-not $health) { throw 'Core did not restart' }
+  $afterRestart = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Headers $deviceHeaders
+  $browserAfterRestart = Invoke-RestMethod -Uri "$qaBaseUrl/v1/spaces" -WebSession $qaBrowser
+  $checks['restart_preserves_tokens_files_and_browser_session'] = ($afterRestart.Content -ceq $payloadText -and $browserAfterRestart[0].id -eq $spaceId)
+  Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/admin/shutdown" -Headers $managerHeaders | Out-Null
+  if (-not $coreProcess.WaitForExit(10000)) { throw 'Restarted Core did not stop' }
 } finally {
   if (-not $coreProcess.HasExited) { $coreProcess.Kill(); $coreProcess.WaitForExit() }
 }
 $checks | ConvertTo-Json
+$checks | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $qaRoot 'results.json') -Encoding utf8
+Write-Output "REPORT $(Join-Path $qaRoot 'results.json')"
 if ($checks.Values -contains $false) { exit 1 }

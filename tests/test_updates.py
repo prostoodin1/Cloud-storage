@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -146,10 +147,53 @@ def test_update_installer_is_reverified_immediately_before_launch(
         )
     service.launch_installer(installer, info)
     assert launched and launched[0][0] == str(installer.resolve())
+    assert "/VERYSILENT" in launched[0]
 
     installer.write_bytes(b"modified!")
     with pytest.raises(UpdateError, match="изменён"):
         service.launch_installer(installer, info)
+
+
+def test_permanent_installer_can_open_interactive_setup(tmp_path, monkeypatch) -> None:
+    payload = b"interactive installer"
+    raw, public_key = signed_manifest(payload)
+    info = parse_signed_manifest(raw, expected_product="client", public_key=public_key)
+    service = UpdateService(
+        "client",
+        tmp_path,
+        feed_url="https://updates.example/client.json",
+        public_key=public_key,
+    )
+    service.download_directory.mkdir(parents=True)
+    installer = service.download_directory / info.package.filename
+    installer.write_bytes(payload)
+    launched: list[list[str]] = []
+    if os.name == "nt":
+        monkeypatch.setattr(
+            "cloud_storage.updates._launch_elevated_windows",
+            lambda arguments: launched.append(arguments),
+        )
+    else:
+        monkeypatch.setattr(
+            "cloud_storage.updates.subprocess.Popen",
+            lambda arguments, **_kwargs: launched.append(arguments),
+        )
+
+    service.launch_installer(installer, info, interactive=True)
+
+    assert launched
+    assert "/VERYSILENT" not in launched[0]
+    assert "/SUPPRESSMSGBOXES" not in launched[0]
+    assert "/NORESTART" in launched[0]
+
+
+def test_both_setup_packages_offer_an_optional_desktop_shortcut() -> None:
+    project = Path(__file__).resolve().parents[1]
+    for name in ("CloudStorageClient.iss", "CloudStorageServer.iss"):
+        source = (project / "packaging" / name).read_text(encoding="utf-8")
+        assert 'Name: "desktopicon"' in source
+        assert 'Tasks: desktopicon' in source
+        assert 'Flags: unchecked' in source
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ShellExecute API")

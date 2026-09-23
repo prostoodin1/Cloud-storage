@@ -12,7 +12,8 @@ import uvicorn
 from fastapi.testclient import TestClient
 from PySide6.QtWidgets import QApplication
 
-from cloud_storage.client.api_client import ClientApi
+from cloud_storage.client.api_client import ClientApi, ClientApiError, ClientConnectionError
+from cloud_storage.client.discovery import DiscoveredServer
 from cloud_storage.client.settings import (
     ClientProfile,
     ClientSettingsStore,
@@ -145,6 +146,103 @@ def test_desktop_client_window_smoke(tmp_path) -> None:
     assert window.server_selector.count() == 2
     assert window.profile.profile_id != "default"
     window.close()
+
+
+def test_client_recovers_changed_lan_address_by_pinned_server_identity(
+    tmp_path, monkeypatch
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = ClientSettingsStore(tmp_path)
+    profile = store.load()
+    profile.server_url = "https://192.168.1.10:8766"
+    profile.certificate_fingerprint = "ab" * 32
+    profile.device_status = "offline"
+    store.save(profile)
+    DeviceTokenVault(tmp_path).store("csd_" + "x" * 64)
+    window = ClientWindow(store=store, smoke_test=True)
+    tasks = []
+    monkeypatch.setattr(window, "_start_task", lambda *args: tasks.append(args))
+    monkeypatch.setattr(window, "_set_spaces", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_reconcile_drives", lambda: None)
+
+    class FakeApi:
+        def __init__(self, server_url, **_kwargs):
+            self.server_url = server_url
+
+        def health(self):
+            if self.server_url.endswith(".10:8766"):
+                raise ClientConnectionError("old DHCP address")
+            return {"status": "ok"}
+
+        def pairing_status(self):
+            return {"status": "trusted"}
+
+        def list_spaces(self):
+            return []
+
+    monkeypatch.setattr("cloud_storage.client.window.ClientApi", FakeApi)
+    monkeypatch.setattr(
+        "cloud_storage.client.window.discover_servers",
+        lambda timeout: [
+            DiscoveredServer(
+                "Home",
+                "https://192.168.1.42:8766",
+                "ab" * 32,
+                ("ab" * 32)[:16],
+            )
+        ],
+    )
+    try:
+        window.refresh_connection()
+        task = tasks.pop()
+        task[1](task[0]())
+        assert store.load().server_url == "https://192.168.1.42:8766"
+        assert store.load().device_status == "trusted"
+        assert window.sidebar_state.text() == "ПОДКЛЮЧЕНО"
+        assert DeviceTokenVault(tmp_path).load() is not None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_client_distinguishes_invalid_device_token_from_offline(
+    tmp_path, monkeypatch
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = ClientSettingsStore(tmp_path)
+    profile = store.load()
+    profile.server_url = "https://192.168.1.42:8766"
+    profile.certificate_fingerprint = "cd" * 32
+    store.save(profile)
+    DeviceTokenVault(tmp_path).store("csd_" + "y" * 64)
+    window = ClientWindow(store=store, smoke_test=True)
+    tasks = []
+    monkeypatch.setattr(window, "_start_task", lambda *args: tasks.append(args))
+    monkeypatch.setattr(window, "_set_spaces", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_reconcile_drives", lambda: None)
+
+    class FakeApi:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def health(self):
+            return {"status": "ok"}
+
+        def pairing_status(self):
+            raise ClientApiError(403, "device token is invalid")
+
+    monkeypatch.setattr("cloud_storage.client.window.ClientApi", FakeApi)
+    try:
+        window.refresh_connection()
+        task = tasks.pop()
+        task[1](task[0]())
+        assert store.load().device_status == "reconnect_required"
+        assert DeviceTokenVault(tmp_path).load() is None
+        assert window.sidebar_state.text() == "НУЖНО ПОДКЛЮЧЕНИЕ"
+        assert "заново" in window.connection_title.text().casefold()
+    finally:
+        window.close()
+        app.processEvents()
 
 
 def test_client_api_pairing_and_file_round_trip(tmp_path) -> None:

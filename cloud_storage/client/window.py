@@ -1112,28 +1112,72 @@ class ClientWindow(QMainWindow):
         self._profile_checks_running.add(profile_id)
         if profile_id == self.profile.profile_id:
             self._connection_check_running = True
-        try:
-            api = ClientApi(
-                profile.server_url,
-                token=token,
-                certificate_fingerprint=profile.certificate_fingerprint,
-                remote_session=session,
-            )
-        except ValueError:
-            self._profile_checks_running.discard(profile_id)
-            if profile_id == self.profile.profile_id:
-                self._connection_check_running = False
-            return
 
         def check() -> dict[str, Any]:
-            api.health()
-            status = api.pairing_status()
-            spaces = (
-                api.list_spaces()
-                if status.get("status") == "trusted"
-                else []
+            candidates: list[tuple[str, str, bool]] = [
+                (profile.server_url, profile.certificate_fingerprint, False)
+            ]
+            errors: list[str] = []
+            discovery_attempted = False
+            while candidates:
+                server_url, fingerprint, recovered_address = candidates.pop(0)
+                try:
+                    api = ClientApi(
+                        server_url,
+                        token=token,
+                        certificate_fingerprint=fingerprint,
+                        remote_session=session,
+                    )
+                    api.health()
+                    try:
+                        status = api.pairing_status()
+                    except ClientApiError as exc:
+                        if exc.status_code in {401, 403}:
+                            return {
+                                "status": {"status": "reconnect_required"},
+                                "spaces": [],
+                                "profile_id": profile_id,
+                                "server_url": server_url,
+                                "fingerprint": fingerprint,
+                                "recovered_address": recovered_address,
+                                "authorization_error": exc.detail,
+                            }
+                        raise
+                    spaces = api.list_spaces() if status.get("status") == "trusted" else []
+                    return {
+                        "status": status,
+                        "spaces": spaces,
+                        "profile_id": profile_id,
+                        "api": api,
+                        "server_url": server_url,
+                        "fingerprint": fingerprint,
+                        "recovered_address": recovered_address,
+                    }
+                except (ClientApiError, ClientConnectionError, OSError, ValueError) as exc:
+                    errors.append(str(exc))
+                if not discovery_attempted:
+                    discovery_attempted = True
+                    try:
+                        discovered = discover_servers(timeout=2.0)
+                    except OSError as exc:
+                        errors.append(str(exc))
+                        discovered = []
+                    expected_fingerprint = profile.certificate_fingerprint.replace(
+                        ":", ""
+                    ).casefold()
+                    if not expected_fingerprint:
+                        discovered = []
+                    for server in discovered:
+                        if server.fingerprint != expected_fingerprint:
+                            continue
+                        if server.url.rstrip("/") == profile.server_url.rstrip("/"):
+                            continue
+                        candidates.append((server.url, server.fingerprint, True))
+            raise ClientConnectionError(
+                errors[-1]
+                if errors
+                else "Сервер не найден в локальной сети и сохранённый адрес недоступен."
             )
-            return {"status": status, "spaces": spaces, "profile_id": profile_id, "api": api}
 
         self._start_task(
             check,
@@ -1273,6 +1317,15 @@ class ClientWindow(QMainWindow):
         if profile is None:
             return
         status = str(payload.get("status", {}).get("status", "disconnected"))
+        recovered_url = str(payload.get("server_url") or "").rstrip("/")
+        recovered_fingerprint = str(payload.get("fingerprint") or "").strip()
+        if recovered_url:
+            profile.server_url = recovered_url
+        if recovered_fingerprint:
+            profile.certificate_fingerprint = recovered_fingerprint
+        if status == "reconnect_required":
+            DeviceTokenVault(self.store.data_directory, profile_id).clear()
+            RemoteSessionVault(self.store.data_directory, profile_id).clear()
         profile.device_status = status
         self.store.save(profile, make_active=False)
         if profile_id != self.profile.profile_id:
@@ -1286,8 +1339,30 @@ class ClientWindow(QMainWindow):
             self._reconcile_drives()
             return
         self._connection_check_running = False
+        self.profile.server_url = profile.server_url
+        self.profile.certificate_fingerprint = profile.certificate_fingerprint
         self.profile.device_status = status
         self.api = payload.get("api") if status == "trusted" else None
+        if status == "reconnect_required":
+            self.token = None
+            self.remote_session = None
+            self.server_url.setText(self.profile.server_url)
+            self.fingerprint.setText(self.profile.certificate_fingerprint)
+            self.status_button.setEnabled(False)
+            self.forget_button.setEnabled(False)
+            self.remote_login_button.setEnabled(False)
+            self.audit.record(
+                "client.authorization_expired",
+                str(payload.get("authorization_error") or "device authorization expired"),
+                severity="warning",
+            )
+        elif payload.get("recovered_address"):
+            self.server_url.setText(self.profile.server_url)
+            self.fingerprint.setText(self.profile.certificate_fingerprint)
+            self.audit.record(
+                "client.address_recovered",
+                f"Новый адрес сервера найден автоматически: {self.profile.server_url}",
+            )
         self._set_connection_state(status)
         if status == "trusted":
             self._set_spaces(payload.get("spaces", []))
@@ -1320,6 +1395,7 @@ class ClientWindow(QMainWindow):
             self.api = None
             self._set_spaces([], authoritative=False)
             self._connection_refresh_failed(message)
+            self.audit.record("client.connection_failed", message, severity="warning")
         self._refresh_server_selector()
         self._reconcile_drives()
 
@@ -1358,6 +1434,17 @@ class ClientWindow(QMainWindow):
             self.connection_detail.setText(detail or "Клиент повторит подключение автоматически.")
             self.sidebar_state.setText("ОФЛАЙН")
             self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #f5bd4f;")
+            self.sidebar_server.setText(self.profile.server_name or "Сохранённый сервер")
+            self.nav_buttons[1].setEnabled(False)
+        elif state == "reconnect_required":
+            self.connection_title.setText("Нужно подключить устройство заново")
+            self.connection_detail.setText(
+                detail
+                or "Сервер доступен, но сохранённый доступ больше недействителен. "
+                "Введите новый пятиминутный код из Server Manager."
+            )
+            self.sidebar_state.setText("НУЖНО ПОДКЛЮЧЕНИЕ")
+            self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #f05a62;")
             self.sidebar_server.setText(self.profile.server_name or "Сохранённый сервер")
             self.nav_buttons[1].setEnabled(False)
         else:

@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory=$true)][string]$Dist,
-  [string]$ExpectedVersion = '0.10.2'
+  [string]$ExpectedVersion = '0.10.3'
 )
 $ErrorActionPreference = 'Stop'
 $releaseDist = (Resolve-Path -LiteralPath $Dist).Path

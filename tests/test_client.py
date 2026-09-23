@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 from cloud_storage.client.api_client import ClientApi, ClientApiError, ClientConnectionError
 from cloud_storage.client.discovery import DiscoveredServer
+from cloud_storage.client.drive import DriveManager
 from cloud_storage.client.settings import (
     ClientProfile,
     ClientSettingsStore,
@@ -72,6 +73,12 @@ def test_space_drive_letter_survives_profile_save_and_restart(tmp_path) -> None:
         loaded = restarted.load()
         restarted.ensure_space_drive_letters(loaded, ["personal", "shared"])
     assert restarted.load().drive_letters == {"personal": "S", "shared": "T"}
+
+
+def test_virtual_drive_uses_persistent_cloud_storage_icon() -> None:
+    icon = DriveManager._icon_path()
+    assert icon.is_file()
+    assert icon.name.casefold() in {"cloud-storage.ico", "python.exe"}
 
 
 def test_multiple_server_profiles_have_independent_tokens(tmp_path) -> None:

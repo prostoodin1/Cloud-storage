@@ -31,6 +31,7 @@ import (
 	"github.com/winfsp/go-winfsp"
 	"github.com/winfsp/go-winfsp/gofs"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 const (
@@ -820,7 +821,36 @@ var (
 	cryptUnprotectData = crypt32.NewProc("CryptUnprotectData")
 	kernel32           = windows.NewLazySystemDLL("kernel32.dll")
 	localFree          = kernel32.NewProc("LocalFree")
+	shell32            = windows.NewLazySystemDLL("shell32.dll")
+	shChangeNotify     = shell32.NewProc("SHChangeNotify")
 )
+
+func installExplorerDriveIcon(letter, iconPath string) (func(), error) {
+	if !regexp.MustCompile(`^[D-Z]$`).MatchString(letter) || iconPath == "" {
+		return func() {}, errors.New("invalid Explorer drive identity")
+	}
+	base := `Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\` + letter
+	key, _, err := registry.CreateKey(registry.CURRENT_USER, base+`\DefaultIcon`, registry.SET_VALUE)
+	if err != nil {
+		return func() {}, err
+	}
+	err = key.SetStringValue("", iconPath+",0")
+	key.Close()
+	if err != nil {
+		return func() {}, err
+	}
+	notifyExplorerIcons()
+	return func() {
+		_ = registry.DeleteKey(registry.CURRENT_USER, base+`\DefaultIcon`)
+		_ = registry.DeleteKey(registry.CURRENT_USER, base)
+		notifyExplorerIcons()
+	}, nil
+}
+
+func notifyExplorerIcons() {
+	// SHCNE_ASSOCCHANGED + SHCNF_IDLIST asks Explorer to reload drive icons.
+	shChangeNotify.Call(0x08000000, 0, 0, 0)
+}
 
 func readProtectedToken(filename, prefix string) (string, error) {
 	payload, err := os.ReadFile(filename)
@@ -883,6 +913,7 @@ func run() error {
 	mountpoint := flag.String("mount", "S:", "drive letter mount point")
 	dataDir := flag.String("data-dir", "", "Cloud Storage Client data directory")
 	parentPID := flag.Int("parent-pid", 0, "parent client process identifier")
+	iconPath := flag.String("icon", "", "Cloud Storage icon shown by Windows Explorer")
 	smokeTest := flag.Bool("smoke-test", false, "validate the executable and exit")
 	flag.Parse()
 	if *smokeTest {
@@ -912,6 +943,10 @@ func run() error {
 	letter := strings.ToUpper(strings.TrimSuffix(*mountpoint, ":"))
 	if !regexp.MustCompile(`^[D-Z]$`).MatchString(letter) || *dataDir == "" {
 		return errors.New("invalid drive mount configuration")
+	}
+	removeExplorerIcon, iconErr := installExplorerDriveIcon(letter, *iconPath)
+	if iconErr == nil {
+		defer removeExplorerIcon()
 	}
 	statusPath := filepath.Join(*dataDir, "drives", *profileID+"-"+*spaceFlag+".json")
 	baseStatus := statusDocument{ProfileID: *profileID, SpaceID: *spaceFlag, DriveLetter: letter}

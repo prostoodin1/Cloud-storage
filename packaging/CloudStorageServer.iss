@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.10.2"
+#define AppVersion "0.10.3"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
 #define BuildRoot "..\dist"

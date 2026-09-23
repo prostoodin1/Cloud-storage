@@ -143,6 +143,8 @@ class DriveManager:
             str(self.data_directory),
             "--parent-pid",
             str(os.getpid()),
+            "--icon",
+            str(self._icon_path()),
         ]
         arguments: dict[str, object] = {
             "stdin": subprocess.DEVNULL,
@@ -168,6 +170,22 @@ class DriveManager:
         else:
             candidates = [Path(__file__).resolve().parents[2] / "dist" / name]
         return next((path for path in candidates if path.is_file()), None)
+
+    @staticmethod
+    def _icon_path() -> Path:
+        if getattr(sys, "frozen", False):
+            executable = Path(sys.executable).resolve()
+            candidates = [
+                executable.parent / "_internal" / "assets" / "cloud-storage.ico",
+                executable.parent / "assets" / "cloud-storage.ico",
+                executable,
+            ]
+        else:
+            candidates = [
+                Path(__file__).resolve().parents[2] / "assets" / "cloud-storage.ico",
+                Path(sys.executable).resolve(),
+            ]
+        return next((path for path in candidates if path.is_file()), candidates[-1])
 
 
 def wait_for_drive(letter: str, timeout_seconds: float = 5.0) -> bool:

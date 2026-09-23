@@ -21,8 +21,8 @@ const windowsServiceName = "CloudStorageServerCore"
 
 type instanceLock struct{ handle windows.Handle }
 
-func acquireSingleInstance() (*instanceLock, error) {
-	name, err := windows.UTF16PtrFromString(`Global\CloudStorageCoreV2`)
+func acquireSingleInstance(key string) (*instanceLock, error) {
+	name, err := windows.UTF16PtrFromString(`Global\CloudStorageCoreV3-` + key)
 	if err != nil {
 		return nil, err
 	}

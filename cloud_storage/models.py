@@ -133,6 +133,10 @@ class AppSettings:
     zrok_port: int = 8768
     zrok_executable: str = "zrok2"
     zrok_share_name: str = ""
+    cloudflare_enabled: bool = False
+    cloudflare_port: int = 8769
+    cloudflare_executable: str = "cloudflared"
+    cloudflare_public_url: str = ""
     known_disk_ids: list[str] = field(default_factory=list)
     ignored_disk_ids: list[str] = field(default_factory=list)
     removed_disk_ids: list[str] = field(default_factory=list)
@@ -187,6 +191,20 @@ class AppSettings:
                 else "zrok2"
             )
         result.zrok_share_name = str(value.get("zrok_share_name", "")).strip()[:63]
+        result.cloudflare_enabled = bool(value.get("cloudflare_enabled", False))
+        cloudflare_port = int(value.get("cloudflare_port", 8769))
+        used_ports.add(result.zrok_port)
+        result.cloudflare_port = (
+            cloudflare_port
+            if 1024 <= cloudflare_port <= 65535 and cloudflare_port not in used_ports
+            else 8769
+        )
+        result.cloudflare_executable = str(
+            value.get("cloudflare_executable", "cloudflared")
+        ).strip()[:2048] or "cloudflared"
+        result.cloudflare_public_url = str(
+            value.get("cloudflare_public_url", "")
+        ).strip().rstrip("/")[:2048]
         result.known_disk_ids = [str(item) for item in value.get("known_disk_ids", [])]
         result.ignored_disk_ids = [str(item) for item in value.get("ignored_disk_ids", [])]
         result.removed_disk_ids = [str(item) for item in value.get("removed_disk_ids", [])]
@@ -232,6 +250,10 @@ class AppSettings:
             "zrok_port": self.zrok_port,
             "zrok_executable": self.zrok_executable,
             "zrok_share_name": self.zrok_share_name,
+            "cloudflare_enabled": self.cloudflare_enabled,
+            "cloudflare_port": self.cloudflare_port,
+            "cloudflare_executable": self.cloudflare_executable,
+            "cloudflare_public_url": self.cloudflare_public_url,
             "known_disk_ids": self.known_disk_ids,
             "ignored_disk_ids": self.ignored_disk_ids,
             "removed_disk_ids": self.removed_disk_ids,

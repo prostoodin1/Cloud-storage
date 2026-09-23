@@ -14,9 +14,9 @@ import (
 
 type instanceLock struct{ path string }
 
-func acquireSingleInstance() (*instanceLock, error) {
+func acquireSingleInstance(key string) (*instanceLock, error) {
 	directory := os.TempDir()
-	path := filepath.Join(directory, "cloud-storage-core-v2.lock")
+	path := filepath.Join(directory, "cloud-storage-core-v3-"+key+".lock")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, errors.New("Cloud Storage Core is already running")

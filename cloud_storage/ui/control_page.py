@@ -69,7 +69,7 @@ class ControlCenterPage(QWidget):
         layout.setSpacing(14)
         header = make_header(
             "Система",
-            "Idea 4: режимы, питание, сеть, Docker, SSH, автоматизации и контейнеры.",
+            "Состояние Core, сеть, настройки интерфейса и журналы.",
         )
         layout.addWidget(header)
         top = QHBoxLayout()
@@ -89,13 +89,7 @@ class ControlCenterPage(QWidget):
         self._tab_indexes: dict[str, int] = {}
         self._add_tab("system", self._build_profile_tab(), "Система")
         self._add_tab("interface", self._build_interface_tab(), "Интерфейс")
-        self.tabs.addTab(self._build_power_tab(), "Питание")
         self.tabs.addTab(self._build_network_tab(), "Сеть")
-        self.tabs.addTab(self._build_automation_tab(), "Авто")
-        self.tabs.addTab(self._build_report_tab(), "Отчёты")
-        self._add_tab("docker", self._build_docker_tab(), "Docker")
-        self._add_tab("ssh", self._build_ssh_tab(), "SSH")
-        self.tabs.addTab(self._build_cell_tab(), "Контейнеры")
         layout.addWidget(self.tabs, 1)
         self._connect_settings_tracking()
         self._set_save_buttons_visible(False)
@@ -539,46 +533,6 @@ class ControlCenterPage(QWidget):
         self._select(self.security_mode, settings.get("security", {}).get("mode"))
         self._select(self.storage_strategy, settings.get("storage_strategy"))
         self._select(self.browser_access, settings.get("browser_access"))
-        power = settings.get("power", {})
-        self.idle_sleep.setChecked(bool(power.get("idle_sleep_enabled")))
-        self.allow_os_sleep.setChecked(bool(power.get("allow_os_sleep")))
-        self.allow_os_shutdown.setChecked(bool(power.get("allow_os_shutdown")))
-        self.idle_minutes.setValue(int(power.get("idle_minutes", 20)))
-        self.power_notify.setChecked(bool(power.get("notify_on_outage", True)))
-        self.power_threshold.setValue(int(power.get("notify_below_minutes", 20)))
-        power_status = data.get("power", {})
-        self.power_status.setText(
-            f"Источник: {power_status.get('source', 'unknown')} · "
-            f"заряд: {power_status.get('percent', '—')}% · "
-            f"осталось: {power_status.get('minutes_left', '—')} мин · "
-            f"простой: {power_status.get('idle_seconds', 0)} с"
-        )
-        network = data.get("network", {})
-        self.local_address.setText(str(network.get("local_address", "")))
-        integrations = settings.get("integrations", {})
-        telegram = integrations.get("telegram", {})
-        self.telegram_enabled.setChecked(bool(telegram.get("enabled")))
-        self.telegram_chat.setText(str(telegram.get("chat_id", "")))
-        email = integrations.get("email", {})
-        self.email_enabled.setChecked(bool(email.get("enabled")))
-        self.email_host.setText(str(email.get("host", "")))
-        self.email_port.setValue(int(email.get("port", 587)))
-        self.email_user.setText(str(email.get("username", "")))
-        self.email_sender.setText(str(email.get("sender", "")))
-        self.email_recipient.setText(str(email.get("recipient", "")))
-        self.gmail_mode.setChecked(str(email.get("auth_mode", "password")) == "gmail_oauth")
-        self.gmail_client_id.setText(str(email.get("gmail_client_id", "")))
-        self.gmail_status.setText(
-            "Google подключён" if email.get("gmail_configured") else "Google ещё не подключён"
-        )
-        self._gmail_refresh_token = ""
-        webhook = integrations.get("webhook", {})
-        self.webhook_enabled.setChecked(bool(webhook.get("enabled")))
-        self.webhook_url.setText(str(webhook.get("url", "")))
-        self._render_templates(data.get("automation_templates", []))
-        self._render_reports(data.get("reports", {}).get("schedules", []))
-        self._render_cells(data.get("cells", []), data.get("sandbox", {}))
-        self._render_host_tools(data.get("host_tools", {}))
         self._update_profile_description()
         self._loading_settings = False
         self._saved_settings_payload = self._settings_payload()
@@ -677,49 +631,12 @@ class ControlCenterPage(QWidget):
             self.ssh_username.setText(str(ssh.get("username")))
 
     def _settings_payload(self) -> dict:
-        secrets = {}
-        if self.telegram_token.text():
-            secrets["telegram_bot_token"] = self.telegram_token.text()
-        if self.email_password.text():
-            secrets["smtp_password"] = self.email_password.text()
-        if self._gmail_refresh_token:
-            secrets["gmail_refresh_token"] = self._gmail_refresh_token
         return {
             "profile": self.profile.currentData(),
             "interface_mode": self.interface_mode.currentData(),
             "storage_strategy": self.storage_strategy.currentData(),
             "browser_access": self.browser_access.currentData(),
             "security": {"mode": self.security_mode.currentData()},
-            "power": {
-                "idle_sleep_enabled": self.idle_sleep.isChecked(),
-                "allow_os_sleep": self.allow_os_sleep.isChecked(),
-                "allow_os_shutdown": self.allow_os_shutdown.isChecked(),
-                "idle_minutes": self.idle_minutes.value(),
-                "notify_on_outage": self.power_notify.isChecked(),
-                "notify_below_minutes": self.power_threshold.value(),
-            },
-            "integrations": {
-                "telegram": {
-                    "enabled": self.telegram_enabled.isChecked(),
-                    "chat_id": self.telegram_chat.text().strip(),
-                },
-                "email": {
-                    "enabled": self.email_enabled.isChecked(),
-                    "host": self.email_host.text().strip(),
-                    "port": self.email_port.value(),
-                    "username": self.email_user.text().strip(),
-                    "sender": self.email_sender.text().strip(),
-                    "recipient": self.email_recipient.text().strip(),
-                    "starttls": True,
-                    "auth_mode": "gmail_oauth" if self.gmail_mode.isChecked() else "password",
-                    "gmail_client_id": self.gmail_client_id.text().strip(),
-                },
-                "webhook": {
-                    "enabled": self.webhook_enabled.isChecked(),
-                    "url": self.webhook_url.text().strip(),
-                },
-            },
-            "secrets": secrets,
         }
 
     def _emit_settings(self) -> None:
@@ -738,31 +655,6 @@ class ControlCenterPage(QWidget):
             self.browser_access,
         ):
             combo.currentIndexChanged.connect(self._settings_changed)
-        for checkbox in (
-            self.idle_sleep,
-            self.allow_os_sleep,
-            self.allow_os_shutdown,
-            self.power_notify,
-            self.telegram_enabled,
-            self.email_enabled,
-            self.gmail_mode,
-            self.webhook_enabled,
-        ):
-            checkbox.toggled.connect(self._settings_changed)
-        for spinbox in (self.idle_minutes, self.power_threshold, self.email_port):
-            spinbox.valueChanged.connect(self._settings_changed)
-        for line_edit in (
-            self.telegram_chat,
-            self.telegram_token,
-            self.email_host,
-            self.email_user,
-            self.email_password,
-            self.email_sender,
-            self.email_recipient,
-            self.gmail_client_id,
-            self.webhook_url,
-        ):
-            line_edit.textChanged.connect(self._settings_changed)
 
     def _settings_changed(self, *_args: object) -> None:
         if self._loading_settings:

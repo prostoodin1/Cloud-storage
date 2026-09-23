@@ -13,6 +13,16 @@ import (
 	"time"
 )
 
+func TestSingleInstanceKeyIsStablePerDataDirectory(t *testing.T) {
+	first := singleInstanceKey(filepath.Join("data", "server"))
+	if first != singleInstanceKey(filepath.Join("data", ".", "server")) {
+		t.Fatal("equivalent data directories produced different Core lock keys")
+	}
+	if first == singleInstanceKey(filepath.Join("data", "other")) {
+		t.Fatal("different data directories must not share a Core lock")
+	}
+}
+
 func TestShutdownRequiresSuccessfulCoreAuthorization(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable, http.StatusOK} {
 		t.Run(itoa(status), func(t *testing.T) {

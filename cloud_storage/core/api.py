@@ -481,15 +481,13 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         runtime.diagnostics.start_monitor()
-        runtime.backup_automation.start_scheduler()
-        runtime.automation.start_scheduler()
+        # Scheduled backups and user-defined automation are parked in the 0.10
+        # stable line; recovery of interrupted jobs remains enabled at startup.
         runtime.control.start()
         try:
             yield
         finally:
             runtime.control.stop()
-            runtime.automation.stop_scheduler()
-            runtime.backup_automation.stop_scheduler()
             runtime.diagnostics.stop_monitor()
 
     app = FastAPI(
@@ -503,7 +501,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     app.state.restart_callback = None
 
     dynamic_server_id = runtime.repository.credentials.fingerprint(
-        runtime.config.server_name, "dynamic-server-id"
+        "cloud-storage-server", "dynamic-server-id"
     )[:32]
 
     def current_dynamic_pairing(user_id: str = "") -> dict[str, Any]:
@@ -519,6 +517,15 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         # network, but must not make an otherwise working internet code look
         # local-only.
         addresses: list[str] = []
+        cloudflare_status = runtime.tunnels.status("cloudflare")
+        cloudflare_url = str(cloudflare_status.get("public_url") or "").rstrip("/")
+        if (
+            runtime.config.cloudflare_enabled
+            and runtime.config.remote_pairing_enabled
+            and cloudflare_status.get("state") == "online"
+            and cloudflare_url.startswith("https://")
+        ):
+            addresses.append(cloudflare_url)
         zrok_status = runtime.tunnels.status("zrok")
         zrok_url = str(zrok_status.get("public_url") or "").rstrip("/")
         if (
@@ -545,7 +552,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             )
         fingerprint = (
             runtime.tls_identity.fingerprint
-            if runtime.tls_identity and addresses[0] != zrok_url
+            if runtime.tls_identity and addresses[0] not in {zrok_url, cloudflare_url}
             else ""
         )
         code = build_dynamic_pairing_code(
@@ -582,6 +589,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             if runtime.config.lan_enabled
             or runtime.config.remote_enabled
             or runtime.config.zrok_enabled
+            or runtime.config.cloudflare_enabled
             else ["127.0.0.1", "localhost", "[::1]", "testserver"]
         ),
     )
@@ -649,10 +657,14 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         zrok_request = is_listener_request(
             request, runtime.config.zrok_port, runtime.config.zrok_enabled
         )
-        external_request = remote_request or zrok_request
+        cloudflare_request = is_listener_request(
+            request, runtime.config.cloudflare_port, runtime.config.cloudflare_enabled
+        )
+        external_request = remote_request or zrok_request or cloudflare_request
         request.state.remote_request = remote_request
         request.state.lan_request = lan_request
         request.state.zrok_request = zrok_request
+        request.state.cloudflare_request = cloudflare_request
         request.state.external_request = external_request
         remote_address = request.client.host if request.client else "unknown"
         local_host = (request.url.hostname or "").casefold()
@@ -672,8 +684,8 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "/redoc",
             "/openapi.json",
         }
-        browser_policy = runtime.control.settings()["browser_access"] if zrok_request else "all"
-        zrok_policy_denied = zrok_request and (
+        browser_policy = runtime.control.settings()["browser_access"] if external_request else "all"
+        zrok_policy_denied = external_request and (
             (browser_policy == "nobody" and (
                 request.url.path == "/" or request.url.path.startswith(("/web/", "/v1/web/", "/v1/public/shares/"))
             ))
@@ -750,7 +762,11 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             if important or remote_audit_limiter.allow(remote_address):
                 try:
                     runtime.repository.record_audit(
-                        actor_type="zrok_client" if zrok_request else "remote_client",
+                        actor_type=(
+                            "cloudflare_client"
+                            if cloudflare_request
+                            else "zrok_client" if zrok_request else "remote_client"
+                        ),
                         actor_id=None,
                         action=(
                             "remote.access.allowed"
@@ -760,7 +776,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                         target_type="api_route",
                         target_id=request.url.path[:1024],
                         detail=(
-                            f"{'zrok' if zrok_request else 'direct'} "
+                            f"{'cloudflare' if cloudflare_request else 'zrok' if zrok_request else 'direct'} "
                             f"{request.method} {request.url.path} -> {response.status_code}"
                         ),
                         remote_address=remote_address,
@@ -933,6 +949,22 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "manager_api_exposed": False,
             "automatic_router_changes": False,
         }
+        cloudflare_status = runtime.tunnels.status("cloudflare")
+        cloudflare = {
+            "enabled": cloudflare_status["enabled"],
+            "provider": "cloudflare",
+            "probe_id": runtime.tunnels.providers["cloudflare"].health_probe_id,
+            "state": cloudflare_status["state"],
+            "installed": cloudflare_status["installed"],
+            "process_running": cloudflare_status["process_running"],
+            "listener_port": runtime.config.cloudflare_port,
+            "public_url": cloudflare_status["public_url"],
+            "configured_public_url": cloudflare_status["configured_public_url"],
+            "pairing_enabled": runtime.config.remote_pairing_enabled,
+            "login_required": cloudflare_status["login_required"],
+            "manager_api_exposed": False,
+            "automatic_router_changes": False,
+        }
         google_client_id = str(
             runtime.control.settings().get("integrations", {}).get("email", {}).get(
                 "gmail_client_id", ""
@@ -950,6 +982,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "lan": lan,
             "remote": remote,
             "zrok": zrok,
+            "cloudflare": cloudflare,
             "google_oauth_client_id": google_client_id,
         }
 

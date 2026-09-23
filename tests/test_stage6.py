@@ -70,6 +70,7 @@ def test_builtin_integrations_and_notification_inbox_are_persistent(tmp_path) ->
     assert {item["id"] for item in overview.json()["plugins"]} == {
         "manager-inbox",
         "system-log",
+        "cloudflare",
         "zrok",
     }
     assert all(item["loads_python_code"] is False for item in overview.json()["plugins"])

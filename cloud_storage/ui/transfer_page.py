@@ -36,15 +36,15 @@ class TransfersPage(QWidget):
 
     def __init__(self, direction: str) -> None:
         super().__init__()
-        if direction not in {"inbound", "outbound"}:
+        if direction not in {"inbound", "outbound", "all"}:
             raise ValueError("unknown transfer direction")
         self.direction = direction
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 16, 24)
         root.setSpacing(16)
-        title = "Приём" if direction == "inbound" else "Отправка"
-        subtitle = (
+        title = "Передачи" if direction == "all" else "Приём" if direction == "inbound" else "Отправка"
+        subtitle = "Входящие загрузки и исходящие скачивания через одно файловое API." if direction == "all" else (
             "Файл полностью принимается на SSD, проверяется и затем переносится на основной HDD."
             if direction == "inbound"
             else "Файлы, которые Core сейчас передаёт клиентам, и история завершённых скачиваний."
@@ -100,11 +100,16 @@ class TransfersPage(QWidget):
         self.update_data({}, online=False)
 
     def update_data(self, overview: dict, *, online: bool) -> None:
-        jobs = list(overview.get(self.direction, [])) if online else []
+        inbound = list(overview.get("inbound", [])) if online else []
+        outbound = list(overview.get("outbound", [])) if online else []
+        if self.direction == "all":
+            jobs = [("inbound", item) for item in inbound] + [("outbound", item) for item in outbound]
+        else:
+            jobs = [(self.direction, item) for item in list(overview.get(self.direction, []))] if online else []
         active_statuses = {"receiving", "moving", "sending"}
-        active = sum(str(item.get("status")) in active_statuses for item in jobs)
-        completed = sum(str(item.get("status")) == "completed" for item in jobs)
-        failed = sum(str(item.get("status")) == "failed" for item in jobs)
+        active = sum(str(item.get("status")) in active_statuses for _, item in jobs)
+        completed = sum(str(item.get("status")) == "completed" for _, item in jobs)
+        failed = sum(str(item.get("status")) == "failed" for _, item in jobs)
         self.active_card.set_value(str(active), "Активных операций" if online else "Core выключен")
         self.completed_card.set_value(str(completed), "В последних 100 операциях")
         self.failed_card.set_value(str(failed), "Требуют внимания" if failed else "Ошибок нет")
@@ -142,18 +147,27 @@ class TransfersPage(QWidget):
             self.rows.addWidget(empty)
         elif not jobs:
             empty = QLabel(
-                "Входящих файлов пока нет."
+                "Передач пока нет."
+                if self.direction == "all"
+                else "Входящих файлов пока нет."
                 if self.direction == "inbound"
                 else "Исходящих скачиваний пока нет."
             )
             empty.setProperty("emptyState", True)
             self.rows.addWidget(empty)
         else:
-            for transfer in jobs:
-                self.rows.addWidget(self._make_transfer_card(transfer))
+            last_direction = ""
+            for direction, transfer in jobs:
+                if self.direction == "all" and direction != last_direction:
+                    heading = QLabel("Приём файлов" if direction == "inbound" else "Отправка файлов")
+                    heading.setObjectName("SectionTitle")
+                    self.rows.addWidget(heading)
+                    last_direction = direction
+                self.rows.addWidget(self._make_transfer_card(transfer, direction))
         self.rows.addStretch()
 
-    def _make_transfer_card(self, transfer: dict) -> QWidget:
+    def _make_transfer_card(self, transfer: dict, direction: str | None = None) -> QWidget:
+        direction = direction or self.direction
         card = QFrame()
         card.setProperty("card", True)
         if transfer.get("status") == "failed":
@@ -185,7 +199,7 @@ class TransfersPage(QWidget):
             detail_text = (
                 f"Перенос на HDD: {format_bytes(progress_bytes)} из {format_bytes(total)}"
             )
-        elif self.direction == "inbound":
+        elif direction == "inbound":
             detail_text = (
                 f"Принято: {format_bytes(int(transfer.get('network_bytes', 0)))} "
                 f"из {format_bytes(total)}"

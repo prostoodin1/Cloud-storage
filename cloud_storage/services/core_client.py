@@ -779,6 +779,13 @@ class CoreSupervisor:
         environment["CLOUD_STORAGE_ZROK_PORT"] = str(self.config.zrok_port)
         environment["CLOUD_STORAGE_ZROK_EXECUTABLE"] = self.config.zrok_executable
         environment["CLOUD_STORAGE_ZROK_SHARE_NAME"] = self.config.zrok_share_name
+        environment["CLOUD_STORAGE_CLOUDFLARE_ENABLED"] = (
+            "1" if self.config.cloudflare_enabled else "0"
+        )
+        environment["CLOUD_STORAGE_CLOUDFLARE_HOST"] = self.config.cloudflare_host
+        environment["CLOUD_STORAGE_CLOUDFLARE_PORT"] = str(self.config.cloudflare_port)
+        environment["CLOUD_STORAGE_CLOUDFLARE_EXECUTABLE"] = self.config.cloudflare_executable
+        environment["CLOUD_STORAGE_CLOUDFLARE_PUBLIC_URL"] = self.config.cloudflare_public_url
         environment["CLOUD_STORAGE_SERVER_NAME"] = self.config.server_name
         log_handle = self.config.log_path.open("ab")
         try:

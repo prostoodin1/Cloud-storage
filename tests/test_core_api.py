@@ -431,6 +431,14 @@ def test_tunnel_registry_is_builtin_and_restart_is_manager_only(tmp_path) -> Non
     assert overview.status_code == 200
     assert overview.json()["plugins"] == [
         {
+            "id": "cloudflare",
+            "name": "Cloudflare Tunnel",
+            "kind": "tunnel",
+            "built_in": True,
+            "loads_python_code": False,
+            "capabilities": ["status", "restart", "public_https", "token"],
+        },
+        {
             "id": "zrok",
             "name": "zrok",
             "kind": "tunnel",

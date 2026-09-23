@@ -103,13 +103,16 @@ class CoreServerGroup:
         self.lan_server: uvicorn.Server | None = None
         self.remote_server: uvicorn.Server | None = None
         self.zrok_server: uvicorn.Server | None = None
+        self.cloudflare_server: uvicorn.Server | None = None
         self.discovery: DiscoveryResponder | None = None
         self._lan_thread: threading.Thread | None = None
         self._remote_thread: threading.Thread | None = None
         self._zrok_thread: threading.Thread | None = None
+        self._cloudflare_thread: threading.Thread | None = None
         self._lan_error: BaseException | None = None
         self._remote_error: BaseException | None = None
         self._zrok_error: BaseException | None = None
+        self._cloudflare_error: BaseException | None = None
         identity = self.application.state.runtime.tls_identity
         if config.lan_enabled:
             if identity is None:
@@ -137,6 +140,12 @@ class CoreServerGroup:
         if config.zrok_enabled:
             self.zrok_server = uvicorn.Server(
                 self._uvicorn_config(config.zrok_host, config.zrok_port, secondary=True)
+            )
+        if config.cloudflare_enabled:
+            self.cloudflare_server = uvicorn.Server(
+                self._uvicorn_config(
+                    config.cloudflare_host, config.cloudflare_port, secondary=True
+                )
             )
         self.application.state.shutdown_callback = self.request_shutdown
         self.application.state.restart_callback = self.request_restart
@@ -173,6 +182,12 @@ class CoreServerGroup:
             (self.lan_server, "LAN HTTPS", "_lan_thread", self._run_lan),
             (self.remote_server, "remote HTTPS", "_remote_thread", self._run_remote),
             (self.zrok_server, "zrok backend", "_zrok_thread", self._run_zrok),
+            (
+                self.cloudflare_server,
+                "Cloudflare backend",
+                "_cloudflare_thread",
+                self._run_cloudflare,
+            ),
         ]
         for server, label, thread_attribute, runner in listeners:
             if server is None:
@@ -194,6 +209,7 @@ class CoreServerGroup:
                 self.lan_server: self._lan_error,
                 self.remote_server: self._remote_error,
                 self.zrok_server: self._zrok_error,
+                self.cloudflare_server: self._cloudflare_error,
             }.get(server)
             if error is not None or not server.started:
                 self.request_shutdown()
@@ -214,6 +230,8 @@ class CoreServerGroup:
                 self._remote_thread.join(timeout=5)
             if self._zrok_thread is not None:
                 self._zrok_thread.join(timeout=5)
+            if self._cloudflare_thread is not None:
+                self._cloudflare_thread.join(timeout=5)
 
     def request_shutdown(self, *, delay: bool = True) -> None:
         if delay:
@@ -225,6 +243,8 @@ class CoreServerGroup:
             self.remote_server.should_exit = True
         if self.zrok_server is not None:
             self.zrok_server.should_exit = True
+        if self.cloudflare_server is not None:
+            self.cloudflare_server.should_exit = True
         self.application.state.runtime.tunnels.stop_all()
 
     def request_restart(self) -> None:
@@ -251,6 +271,13 @@ class CoreServerGroup:
             self.zrok_server.run()
         except BaseException as exc:  # server thread boundary
             self._zrok_error = exc
+
+    def _run_cloudflare(self) -> None:
+        assert self.cloudflare_server is not None
+        try:
+            self.cloudflare_server.run()
+        except BaseException as exc:  # server thread boundary
+            self._cloudflare_error = exc
 
 
 def run_server(config: CoreConfig) -> int:
@@ -298,6 +325,11 @@ def main() -> int:
             zrok_port=base.zrok_port,
             zrok_executable=base.zrok_executable,
             zrok_share_name=base.zrok_share_name,
+            cloudflare_enabled=base.cloudflare_enabled,
+            cloudflare_host=base.cloudflare_host,
+            cloudflare_port=base.cloudflare_port,
+            cloudflare_executable=base.cloudflare_executable,
+            cloudflare_public_url=base.cloudflare_public_url,
             server_name=base.server_name,
             max_upload_bytes=base.max_upload_bytes,
             pairing_ttl_seconds=base.pairing_ttl_seconds,

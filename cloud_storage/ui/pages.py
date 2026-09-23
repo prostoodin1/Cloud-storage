@@ -592,16 +592,12 @@ class SettingsPage(QWidget):
         ("Сервер", False),
         ("Подключение", False),
         ("Система", False),
-        ("Docker", False),
-        ("SSH", False),
         ("Хранилище", False),
         ("Диски", False),
         ("Пользователи", False),
         ("Права доступа", True),
         ("Доверенные устройства", False),
         ("Подключение устройств", False),
-        ("Резервные копии", True),
-        ("Автоматизация", True),
         ("Сеть", True),
         ("Удалённый доступ", True),
         ("Безопасность", False),
@@ -694,17 +690,17 @@ class SettingsPage(QWidget):
         self.remote_details_label: QLabel | None = None
         self.remote_audit_rows: QVBoxLayout | None = None
         self.zrok_enabled = QCheckBox(
-            "Подключать сервер к интернету через zrok2 без открытия порта роутера"
+            "Подключать сервер к интернету через Cloudflare Tunnel"
         )
         self.zrok_port = QSpinBox()
         self.zrok_port.setRange(1024, 65535)
         self.zrok_port.setValue(8768)
-        self.zrok_executable = QLineEdit("zrok2")
-        self.zrok_executable.setPlaceholderText("zrok2 или полный путь к zrok2.exe")
+        self.zrok_executable = QLineEdit("cloudflared")
+        self.zrok_executable.setPlaceholderText("cloudflared или полный путь к cloudflared.exe")
         self.zrok_share_name = QLineEdit()
         self.zrok_share_name.setMaxLength(63)
         self.zrok_share_name.setPlaceholderText(
-            "Необязательно: имя, созданное командой zrok2 create name"
+            "https://storage.example.com"
         )
         self.zrok_status_label: QLabel | None = None
         self.zrok_details_label: QLabel | None = None
@@ -1014,7 +1010,7 @@ class SettingsPage(QWidget):
                 label.setProperty("muted", True)
                 self.remote_audit_rows.addWidget(label)
 
-        zrok = (tunnels or {}).get("zrok", {})
+        zrok = (tunnels or {}).get("cloudflare", {})
         if self.zrok_restart_button is not None:
             self.zrok_restart_button.setEnabled(online and bool(zrok.get("enabled")))
         if self.zrok_install_button is not None:
@@ -1022,7 +1018,7 @@ class SettingsPage(QWidget):
                 online and not bool(zrok.get("installed")) and not bool(zrok.get("installing"))
             )
             self.zrok_install_button.setText(
-                "Установка zrok2…" if zrok.get("installing") else "Установить zrok2 автоматически"
+                "Устанавливается cloudflared…" if zrok.get("installing") else "Установить cloudflared"
             )
         if self.zrok_enable_button is not None:
             self.zrok_enable_button.setEnabled(
@@ -1036,8 +1032,9 @@ class SettingsPage(QWidget):
                 "starting": "Запускается",
                 "checking": "Проверяем ответ Core через интернет",
                 "unreachable": "Туннель запущен, но Core через интернет недоступен",
-                "account_required": "Подключите аккаунт zrok2",
-                "not_installed": "zrok не установлен",
+                "account_required": "Добавьте токен Cloudflare Tunnel",
+                "configuration_required": "Укажите публичный адрес",
+                "not_installed": "cloudflared не установлен",
                 "installing": "Устанавливается",
                 "installed": "Установлен — подключите аккаунт",
                 "install_error": "Ошибка установки",
@@ -1053,13 +1050,11 @@ class SettingsPage(QWidget):
             error = str(zrok.get("last_error") or "")
             detail = (
                 f"Публичный адрес: {public_url}\n"
-                f"Локальный шлюз: {zrok.get('listener', f'http://127.0.0.1:{self._current_settings.zrok_port}')}\n"
+                f"Локальный шлюз: {zrok.get('listener', f'http://127.0.0.1:{self._current_settings.cloudflare_port}')}\n"
                 "Защита: динамический код при первом входе, затем токен устройства · Manager API скрыт"
             )
             if not self._current_settings.remote_pairing_enabled:
                 detail += "\nПервое подключение через интернет запрещено: включите погашение кодов через удалённый вход."
-            if not zrok.get("share_name"):
-                detail += "\nБез постоянного публичного имени адрес меняется после перезапуска zrok2 — клиенту потребуется новый код."
             if error:
                 detail += f"\nДиагностика: {error}"
             self.zrok_details_label.setText(detail)
@@ -1971,10 +1966,10 @@ class SettingsPage(QWidget):
         self.remote_port.setValue(settings.remote_port)
         self.remote_public_url.setText(settings.remote_public_url)
         self.remote_pairing_enabled.setChecked(settings.remote_pairing_enabled)
-        self.zrok_enabled.setChecked(settings.zrok_enabled)
-        self.zrok_port.setValue(settings.zrok_port)
-        self.zrok_executable.setText(settings.zrok_executable)
-        self.zrok_share_name.setText(settings.zrok_share_name)
+        self.zrok_enabled.setChecked(settings.cloudflare_enabled)
+        self.zrok_port.setValue(settings.cloudflare_port)
+        self.zrok_executable.setText(settings.cloudflare_executable)
+        self.zrok_share_name.setText(settings.cloudflare_public_url)
         self.disk_default_priority.setValue(settings.disk_defaults.write_priority)
         self.disk_default_fill.setValue(settings.disk_defaults.max_fill_percent)
         self.disk_default_free.setValue(settings.disk_defaults.min_free_gib)
@@ -2253,14 +2248,14 @@ class SettingsPage(QWidget):
             layout.addWidget(audit_title)
             self.remote_audit_rows = QVBoxLayout()
             layout.addLayout(self.remote_audit_rows)
-            zrok_title = QLabel("zrok · доступ без настройки роутера")
+            zrok_title = QLabel("Cloudflare Tunnel · постоянный доступ без настройки роутера")
             zrok_title.setStyleSheet("font-weight: 700; font-size: 16px; margin-top: 12px;")
             layout.addWidget(zrok_title)
             zrok_text = QLabel(
-                "Core запускает внешний zrok-клиент и публикует только отдельный loopback-шлюз. "
-                "Его можно установить автоматически и подключить аккаунт кнопками ниже; уже "
-                "установленный вручную zrok2 также определяется автоматически. "
-                "Пароль Cloud Storage не передаётся zrok и никогда не попадает в командную строку."
+                "Core запускает официальный cloudflared и публикует только отдельный loopback-шлюз. "
+                "Создайте remotely-managed Tunnel в Cloudflare, направьте hostname на показанный "
+                "локальный адрес и вставьте токен кнопкой ниже. Токен хранится в закрытом файле Core "
+                "и не передаётся клиентам."
             )
             zrok_text.setWordWrap(True)
             zrok_text.setProperty("muted", True)
@@ -2273,24 +2268,24 @@ class SettingsPage(QWidget):
             zrok_form.setVerticalSpacing(12)
             zrok_form.addRow("Состояние", self.zrok_status_label)
             zrok_form.addRow("Локальный порт шлюза", self.zrok_port)
-            zrok_form.addRow("Программа zrok2", self.zrok_executable)
-            zrok_form.addRow("Публичное имя", self.zrok_share_name)
+            zrok_form.addRow("Программа cloudflared", self.zrok_executable)
+            zrok_form.addRow("Публичный HTTPS-адрес", self.zrok_share_name)
             layout.addWidget(self.zrok_enabled)
             layout.addLayout(zrok_form)
             layout.addWidget(self.zrok_details_label)
-            self.zrok_restart_button = QPushButton("Перезапустить zrok2 без перезапуска Core")
+            self.zrok_restart_button = QPushButton("Перезапустить Cloudflare Tunnel")
             self.zrok_restart_button.clicked.connect(
-                lambda: self.tunnel_restart_requested.emit("zrok")
+                lambda: self.tunnel_restart_requested.emit("cloudflare")
             )
             layout.addWidget(self.zrok_restart_button)
             zrok_account_row = QHBoxLayout()
-            self.zrok_install_button = QPushButton("Установить zrok2 автоматически")
+            self.zrok_install_button = QPushButton("Проверить установку cloudflared")
             self.zrok_install_button.clicked.connect(
-                lambda: self.tunnel_install_requested.emit("zrok")
+                lambda: self.tunnel_install_requested.emit("cloudflare")
             )
-            self.zrok_enable_button = QPushButton("Подключить аккаунт zrok2")
+            self.zrok_enable_button = QPushButton("Добавить токен Cloudflare")
             self.zrok_enable_button.clicked.connect(
-                lambda: self.tunnel_enable_requested.emit("zrok")
+                lambda: self.tunnel_enable_requested.emit("cloudflare")
             )
             zrok_account_row.addWidget(self.zrok_install_button)
             zrok_account_row.addWidget(self.zrok_enable_button)
@@ -3048,10 +3043,14 @@ class SettingsPage(QWidget):
             "remote_port": self.remote_port.value(),
             "remote_public_url": self.remote_public_url.text().strip().rstrip("/"),
             "remote_pairing_enabled": self.remote_pairing_enabled.isChecked(),
-            "zrok_enabled": self.zrok_enabled.isChecked(),
-            "zrok_port": self.zrok_port.value(),
-            "zrok_executable": self.zrok_executable.text().strip() or "zrok2",
-            "zrok_share_name": self.zrok_share_name.text().strip(),
+            "zrok_enabled": False,
+            "zrok_port": self._current_settings.zrok_port,
+            "zrok_executable": self._current_settings.zrok_executable,
+            "zrok_share_name": self._current_settings.zrok_share_name,
+            "cloudflare_enabled": self.zrok_enabled.isChecked(),
+            "cloudflare_port": self.zrok_port.value(),
+            "cloudflare_executable": self.zrok_executable.text().strip() or "cloudflared",
+            "cloudflare_public_url": self.zrok_share_name.text().strip().rstrip("/"),
             "disk_defaults": {
                 "write_priority": self.disk_default_priority.value(),
                 "max_fill_percent": self.disk_default_fill.value(),

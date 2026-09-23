@@ -138,11 +138,16 @@ class MainWindow(QMainWindow):
             remote_port=self.settings.remote_port,
             remote_public_url=self.settings.remote_public_url,
             remote_pairing_enabled=self.settings.remote_pairing_enabled,
-            zrok_enabled=self.settings.zrok_enabled,
+            zrok_enabled=False,
             zrok_host=environment_config.zrok_host,
             zrok_port=self.settings.zrok_port,
             zrok_executable=self.settings.zrok_executable,
             zrok_share_name=self.settings.zrok_share_name,
+            cloudflare_enabled=self.settings.cloudflare_enabled,
+            cloudflare_host=environment_config.cloudflare_host,
+            cloudflare_port=self.settings.cloudflare_port,
+            cloudflare_executable=self.settings.cloudflare_executable,
+            cloudflare_public_url=self.settings.cloudflare_public_url,
             server_name=self.settings.server_name,
             max_upload_bytes=environment_config.max_upload_bytes,
             pairing_ttl_seconds=environment_config.pairing_ttl_seconds,
@@ -234,8 +239,9 @@ class MainWindow(QMainWindow):
         self.dashboard_page = DashboardPage()
         self.connection_page = ConnectionPage()
         self.disks_page = DisksPage()
-        self.receive_page = TransfersPage("inbound")
-        self.send_page = TransfersPage("outbound")
+        self.transfers_page = TransfersPage("all")
+        self.receive_page = self.transfers_page
+        self.send_page = self.transfers_page
         self.control_page = ControlCenterPage()
         self.settings_page = SettingsPage()
         self.update_page = UpdatePage(
@@ -249,8 +255,7 @@ class MainWindow(QMainWindow):
             ("⌂   Основная", self.dashboard_page),
             ("⌁   Подключение", self.connection_page),
             ("▣   Диски", self.disks_page),
-            ("↓   Приём", self.receive_page),
-            ("↑   Отправка", self.send_page),
+            ("⇅   Передачи", self.transfers_page),
             ("⚙   Настройки", self.settings_page),
             ("↻   Обновления", self.update_page),
             ("?   Помощь", self.help_page),
@@ -302,8 +307,7 @@ class MainWindow(QMainWindow):
                 "Основная",
                 "Подключение",
                 "Диски",
-                "Приём",
-                "Отправка",
+                "Передачи",
                 "Настройки",
                 "Обновления",
                 "Помощь",
@@ -345,12 +349,8 @@ class MainWindow(QMainWindow):
         self.disks_page.edit_space_requested.connect(self.edit_space)
         self.disks_page.edit_personal_requested.connect(self.edit_user)
         self.disks_page.archive_space_requested.connect(self.archive_space)
-        self.receive_page.refresh_requested.connect(self.refresh_core)
-        self.receive_page.retry_requested.connect(self.retry_transfer)
-        self.receive_page.configure_cache_requested.connect(
-            lambda: self._show_page(self.disks_page)
-        )
-        self.send_page.refresh_requested.connect(self.refresh_core)
+        self.transfers_page.refresh_requested.connect(self.refresh_core)
+        self.transfers_page.retry_requested.connect(self.retry_transfer)
         self.control_page.refresh_requested.connect(self.refresh_core)
         self.control_page.settings_save_requested.connect(self.save_control_settings)
         self.control_page.preset_requested.connect(self.apply_system_preset)
@@ -655,8 +655,7 @@ class MainWindow(QMainWindow):
         )
         if self.settings_page.connection_panel is not None:
             self.settings_page.connection_panel.set_dynamic_code(dynamic_pairing)
-        self.receive_page.update_data(self.core_transfers, online=self.core_health is not None)
-        self.send_page.update_data(self.core_transfers, online=self.core_health is not None)
+        self.transfers_page.update_data(self.core_transfers, online=self.core_health is not None)
         self.control_page.update_data(self.core_control, online=self.core_health is not None)
         self._apply_interface_mode(
             str(self.core_control.get("settings", {}).get("interface_mode", "detailed"))
@@ -672,12 +671,16 @@ class MainWindow(QMainWindow):
         counts = self.core_transfers.get("counts", {})
         inbound_active = int(counts.get("inbound_active", 0))
         outbound_active = int(counts.get("outbound_active", 0))
-        self._nav_buttons[3].setText(
-            f"↓   Приём   • {inbound_active}" if inbound_active else "↓   Приём"
+        transfer_button_index = next(
+            (index for index, page in enumerate(self._nav_pages) if page is self.transfers_page),
+            -1,
         )
-        self._nav_buttons[4].setText(
-            f"↑   Отправка   • {outbound_active}" if outbound_active else "↑   Отправка"
-        )
+        active_transfer_count = inbound_active + outbound_active
+        if transfer_button_index >= 0:
+            self._nav_buttons[transfer_button_index].setText(
+                f"⇅   Передачи   • {active_transfer_count}"
+                if active_transfer_count else "⇅   Передачи"
+            )
 
     def _refresh_core_state(self) -> None:
         self.core_health = self.core_client.try_health()
@@ -1855,8 +1858,8 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Установка запущена",
-            "Core скачает официальный zrok2, проверит SHA-256 и установит его в свою папку. "
-            "Состояние обновится автоматически.",
+            "Core скачает официальный cloudflared, сверит SHA-256 и поместит программу "
+            "в собственную закрытую папку сервера. Дождитесь статуса «Установлен».",
         )
 
     def delete_user_access(self, user_id: str) -> None:
@@ -1893,10 +1896,16 @@ class MainWindow(QMainWindow):
     def enable_tunnel(self, provider_id: str) -> None:
         if getattr(self, "_tunnel_enable_task", None) is not None:
             return
+        cloudflare = provider_id == "cloudflare"
         token, accepted = QInputDialog.getText(
             self,
-            "Подключить аккаунт zrok2",
-            "Вставьте enable-токен аккаунта zrok2. zrok2 сохранит свой профиль в каталоге Core для автозапуска:",
+            "Добавить токен Cloudflare" if cloudflare else "Подключить аккаунт zrok2",
+            (
+                "Вставьте tunnel token из Cloudflare Zero Trust. Он будет сохранён в закрытом "
+                "файле Core и не появится в журнале или коде подключения:"
+                if cloudflare
+                else "Вставьте enable-токен аккаунта zrok2:"
+            ),
             QLineEdit.EchoMode.Password,
         )
         if not accepted or not token.strip():
@@ -1917,8 +1926,11 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Аккаунт подключён",
-            "Если zrok2 уже включён, интернет-вход запускается автоматически. Иначе включите его "
-            "в настройках и сохраните их. Профиль аккаунта zrok2 сохранён в каталоге Core.",
+            (
+                "Cloudflare Tunnel запустится автоматически после включения и сохранения настроек."
+                if provider_id == "cloudflare"
+                else "Профиль zrok2 сохранён в каталоге Core."
+            ),
         )
 
     def select_pairing_user(self, user_id: str) -> None:
@@ -2451,6 +2463,13 @@ class MainWindow(QMainWindow):
         self._refresh_pages()
 
     def save_general_settings(self, values: dict) -> None:
+        values = {
+            "cloudflare_enabled": self.settings.cloudflare_enabled,
+            "cloudflare_port": self.settings.cloudflare_port,
+            "cloudflare_executable": self.settings.cloudflare_executable,
+            "cloudflare_public_url": self.settings.cloudflare_public_url,
+            **values,
+        }
         if (
             len(
                 {
@@ -2458,18 +2477,19 @@ class MainWindow(QMainWindow):
                     values["lan_port"],
                     values["remote_port"],
                     values["zrok_port"],
+                    values["cloudflare_port"],
                 }
             )
-            != 4
+            != 5
         ):
             QMessageBox.warning(
                 self,
                 "Неверные сетевые порты",
-                "Локальный API, LAN HTTPS, удалённый HTTPS и zrok-шлюз должны использовать разные порты.",
+                "Все локальные, LAN, удалённые и tunnel-порты должны различаться.",
             )
             return
         if values["remote_pairing_enabled"] and not (
-            values["remote_enabled"] or values["zrok_enabled"]
+            values["remote_enabled"] or values["cloudflare_enabled"]
         ):
             QMessageBox.warning(
                 self,
@@ -2488,6 +2508,10 @@ class MainWindow(QMainWindow):
                 zrok_port=values["zrok_port"],
                 zrok_executable=values["zrok_executable"],
                 zrok_share_name=values["zrok_share_name"],
+                cloudflare_enabled=values["cloudflare_enabled"],
+                cloudflare_port=values["cloudflare_port"],
+                cloudflare_executable=values["cloudflare_executable"],
+                cloudflare_public_url=values["cloudflare_public_url"],
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Неверный удалённый адрес", str(exc))
@@ -2502,13 +2526,13 @@ class MainWindow(QMainWindow):
             )
             if response != QMessageBox.StandardButton.Yes:
                 return
-        if values["zrok_enabled"] and not self.settings.zrok_enabled:
+        if values["cloudflare_enabled"] and not self.settings.cloudflare_enabled:
             response = QMessageBox.question(
                 self,
-                "Включить интернет-доступ через zrok?",
-                "Core запустит установленный zrok и опубликует только клиентский шлюз на 127.0.0.1. "
-                "Доступ к файлам потребует логин, пароль и токен подтверждённого устройства. "
-                "Установить zrok2 и подключить аккаунт можно кнопками в этом разделе. Продолжить?",
+                "Включить интернет-доступ через Cloudflare?",
+                "Core запустит cloudflared и опубликует только клиентский шлюз на 127.0.0.1. "
+                "Первый вход выполняется единым пяти­минутным кодом, затем используется токен устройства. "
+                "Для запуска нужны публичный hostname и tunnel token Cloudflare. Продолжить?",
             )
             if response != QMessageBox.StandardButton.Yes:
                 return
@@ -2531,6 +2555,10 @@ class MainWindow(QMainWindow):
             or self.settings.zrok_port != values["zrok_port"]
             or self.settings.zrok_executable != values["zrok_executable"]
             or self.settings.zrok_share_name != values["zrok_share_name"]
+            or self.settings.cloudflare_enabled != values["cloudflare_enabled"]
+            or self.settings.cloudflare_port != values["cloudflare_port"]
+            or self.settings.cloudflare_executable != values["cloudflare_executable"]
+            or self.settings.cloudflare_public_url != values["cloudflare_public_url"]
         )
         core_was_running = self.core_health is not None
         if network_changed and core_was_running:
@@ -2564,6 +2592,10 @@ class MainWindow(QMainWindow):
         self.settings.zrok_port = values["zrok_port"]
         self.settings.zrok_executable = values["zrok_executable"]
         self.settings.zrok_share_name = values["zrok_share_name"]
+        self.settings.cloudflare_enabled = values["cloudflare_enabled"]
+        self.settings.cloudflare_port = values["cloudflare_port"]
+        self.settings.cloudflare_executable = values["cloudflare_executable"]
+        self.settings.cloudflare_public_url = values["cloudflare_public_url"]
         self.settings.disk_defaults = DiskConfiguration.from_dict(values["disk_defaults"])
         self.store.save(self.settings)
         self.settings_page.mark_settings_saved()
@@ -2581,6 +2613,10 @@ class MainWindow(QMainWindow):
                     zrok_port=self.settings.zrok_port,
                     zrok_executable=self.settings.zrok_executable,
                     zrok_share_name=self.settings.zrok_share_name,
+                    cloudflare_enabled=self.settings.cloudflare_enabled,
+                    cloudflare_port=self.settings.cloudflare_port,
+                    cloudflare_executable=self.settings.cloudflare_executable,
+                    cloudflare_public_url=self.settings.cloudflare_public_url,
                     server_name=self.settings.server_name,
                 )
             )

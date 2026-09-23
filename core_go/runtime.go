@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +24,7 @@ import (
 	"time"
 )
 
-const coreVersion = "0.9.24"
+const coreVersion = "0.10.0"
 
 type coreRuntime struct {
 	config coreConfig
@@ -51,7 +54,7 @@ func (runtime *coreRuntime) close() {
 }
 
 func (runtime *coreRuntime) run(parent context.Context) error {
-	instance, err := acquireSingleInstance()
+	instance, err := acquireSingleInstance(singleInstanceKey(runtime.config.DataDirectory))
 	if err != nil {
 		return err
 	}
@@ -101,6 +104,19 @@ func (runtime *coreRuntime) run(parent context.Context) error {
 	_ = server.Shutdown(shutdownContext)
 	runtime.logger.Printf("native supervisor stopped")
 	return result
+}
+
+func singleInstanceKey(dataDirectory string) string {
+	path, err := filepath.Abs(dataDirectory)
+	if err != nil {
+		path = filepath.Clean(dataDirectory)
+	}
+	path = filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		path = strings.ToLower(path)
+	}
+	digest := sha256.Sum256([]byte(path))
+	return hex.EncodeToString(digest[:16])
 }
 
 func (runtime *coreRuntime) proxyServer(cancel context.CancelFunc) *http.Server {

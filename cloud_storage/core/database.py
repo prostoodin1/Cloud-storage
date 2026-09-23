@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -504,6 +505,7 @@ class Database:
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._backup_before_0100_upgrade()
         with self.connection() as connection:
             connection.executescript(SCHEMA)
             root_columns = {
@@ -596,7 +598,7 @@ class Database:
             self._upgrade_automation_schema(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO automation_settings(id, enabled, interval_seconds, updated_at) "
-                "VALUES(1, 1, 60, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                "VALUES(1, 0, 60, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
             connection.execute(
                 "INSERT OR IGNORE INTO transfer_settings("
@@ -712,7 +714,56 @@ class Database:
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES(21, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
+            connection.execute(
+                "UPDATE automation_settings SET enabled = 0 WHERE id = 1"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES(22, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+            )
             connection.commit()
+
+    def _backup_before_0100_upgrade(self) -> None:
+        """Take one verified, consistent SQLite backup before the 0.10 migration."""
+
+        if not self.path.is_file() or self.path.stat().st_size == 0:
+            return
+        try:
+            with sqlite3.connect(self.path) as source:
+                has_migrations = source.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+                ).fetchone()
+                if has_migrations and source.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = 22"
+                ).fetchone():
+                    return
+                integrity = source.execute("PRAGMA integrity_check").fetchone()
+                if not integrity or str(integrity[0]).casefold() != "ok":
+                    raise RuntimeError("SQLite проверка целостности не пройдена перед миграцией 0.10.0")
+
+                backup_directory = self.path.parent / "backups"
+                backup_directory.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+                backup_path = backup_directory / f"pre-0.10.0-{stamp}.db"
+                suffix = 1
+                while backup_path.exists():
+                    backup_path = backup_directory / f"pre-0.10.0-{stamp}-{suffix}.db"
+                    suffix += 1
+                temporary = backup_path.with_suffix(".db.tmp")
+                try:
+                    destination = sqlite3.connect(temporary)
+                    try:
+                        source.backup(destination)
+                        backup_integrity = destination.execute("PRAGMA integrity_check").fetchone()
+                        if not backup_integrity or str(backup_integrity[0]).casefold() != "ok":
+                            raise RuntimeError("Резервная копия базы 0.10.0 не прошла проверку")
+                    finally:
+                        destination.close()
+                    temporary.replace(backup_path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+        except sqlite3.Error as exc:
+            raise RuntimeError(f"Не удалось создать резервную копию базы перед 0.10.0: {exc}") from exc
 
     @staticmethod
     def _upgrade_automation_schema(connection: sqlite3.Connection) -> None:

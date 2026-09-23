@@ -16,13 +16,14 @@ from typing import Any, ClassVar, Protocol
 from urllib.parse import urlsplit
 
 from cloud_storage.client.api_client import ClientApi, ClientApiError, ClientConnectionError
-from cloud_storage.core.config import CoreConfig
+from cloud_storage.core.config import CoreConfig, _restrict_secret_file
 from cloud_storage.core.zrok_installer import ZROK2_VERSION, download_zrok2, managed_zrok2_path
 
 _PUBLIC_URL = re.compile(r"https?://[^\s\"'<>]+")
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ENDPOINT_MARKER = "access your zrok share at the following endpoints:"
 _BARE_FRONTEND = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}(?::\d+)?")
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class TunnelProvider(Protocol):
@@ -38,6 +39,258 @@ class TunnelProvider(Protocol):
     def status(self) -> dict[str, Any]: ...
 
     def manifest(self) -> dict[str, Any]: ...
+
+
+@dataclass(slots=True)
+class CloudflareTunnelService:
+    """Run a remotely-managed Cloudflare Tunnel without exposing its token."""
+
+    provider_id: ClassVar[str] = "cloudflare"
+    display_name: ClassVar[str] = "Cloudflare Tunnel"
+    config: CoreConfig
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _stop_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _process: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
+    _state: str = field(default="disabled", init=False)
+    _public_url: str = field(default="", init=False)
+    _last_error: str = field(default="", init=False)
+    _installing: bool = field(default=False, init=False)
+    _restart_count: int = field(default=0, init=False)
+    _resolved_executable: str = field(default="", init=False)
+    health_probe_id: str = field(default_factory=lambda: secrets.token_hex(32), init=False)
+
+    @property
+    def token_path(self) -> Path:
+        return self.config.data_directory / "cloudflare-tunnel.token"
+
+    def start(self) -> None:
+        with self._lock:
+            if not self.config.cloudflare_enabled or (self._thread and self._thread.is_alive()):
+                return
+            self._stop_event.clear()
+            self._state = "starting"
+            self._last_error = ""
+            self._thread = threading.Thread(
+                target=self._monitor, name="cloud-storage-cloudflare-tunnel", daemon=True
+            )
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        with self._lock:
+            process = self._process
+            self._public_url = ""
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=12)
+        with self._lock:
+            if thread is not None and thread.is_alive():
+                raise RuntimeError("Cloudflare Tunnel ещё останавливается")
+            self._thread = self._process = None
+            if self.config.cloudflare_enabled:
+                self._state = "stopped"
+
+    def restart(self) -> dict[str, Any]:
+        if not self.config.cloudflare_enabled:
+            raise RuntimeError("Cloudflare Tunnel выключен в настройках сервера")
+        self.stop()
+        self.start()
+        return self.status()
+
+    def enable(self, token: str) -> dict[str, Any]:
+        token = token.strip()
+        if not 40 <= len(token) <= 4096 or any(char.isspace() for char in token):
+            raise ValueError("Неверный токен Cloudflare Tunnel")
+        self.config.ensure_directories()
+        temporary = self.token_path.with_suffix(".tmp")
+        temporary.write_text(token, encoding="utf-8")
+        _restrict_secret_file(temporary)
+        os.replace(temporary, self.token_path)
+        _restrict_secret_file(self.token_path)
+        if self.config.cloudflare_enabled:
+            self.restart()
+        return self.status()
+
+    def install(self) -> dict[str, Any]:
+        if self._resolve_executable() is not None:
+            return self.status()
+        with self._lock:
+            if self._installing:
+                return self.status()
+            self._installing = True
+            self._last_error = ""
+            self._state = "installing"
+        threading.Thread(
+            target=self._install_cloudflared,
+            name="cloud-storage-cloudflared-installer",
+            daemon=True,
+        ).start()
+        return self.status()
+
+    def _install_cloudflared(self) -> None:
+        try:
+            from cloud_storage.core.cloudflared_installer import download_cloudflared
+
+            download_cloudflared(self.config.data_directory)
+            with self._lock:
+                self._installing = False
+                self._state = "installed"
+            if self.config.cloudflare_enabled:
+                self.start()
+        except Exception as exc:
+            with self._lock:
+                self._installing = False
+                self._state = "install_error"
+                self._last_error = str(exc)[:500]
+
+    def manifest(self) -> dict[str, Any]:
+        return {
+            "id": self.provider_id,
+            "name": self.display_name,
+            "kind": "tunnel",
+            "built_in": True,
+            "loads_python_code": False,
+            "capabilities": ["status", "restart", "public_https", "token"],
+        }
+
+    def status(self) -> dict[str, Any]:
+        executable = self._resolve_executable()
+        with self._lock:
+            running = self._process is not None and self._process.poll() is None
+            return {
+                "enabled": self.config.cloudflare_enabled,
+                "provider": self.provider_id,
+                "state": self._state if self.config.cloudflare_enabled else "disabled",
+                "installed": executable is not None,
+                "installing": self._installing,
+                "executable": self._resolved_executable or self.config.cloudflare_executable,
+                "process_running": running,
+                "listener": f"http://{self.config.cloudflare_host}:{self.config.cloudflare_port}",
+                "public_url": self._public_url,
+                "configured_public_url": self.config.cloudflare_public_url,
+                "share_type": "named",
+                "login_required": not self.token_path.is_file(),
+                "manager_api_exposed": False,
+                "restart_count": self._restart_count,
+                "last_error": self._last_error,
+            }
+
+    def _resolve_executable(self) -> str | None:
+        configured = self.config.cloudflare_executable.strip()
+        path = Path(configured).expanduser()
+        if path.is_absolute() or path.parent != Path("."):
+            resolved = str(path.resolve()) if path.is_file() else None
+        else:
+            name = "cloudflared.exe" if os.name == "nt" else "cloudflared"
+            candidates = [
+                self.config.data_directory / "tools" / "cloudflared" / name,
+                Path(sys.executable).resolve().parent / name,
+            ]
+            resolved_path = next((item.resolve() for item in candidates if item.is_file()), None)
+            resolved = str(resolved_path) if resolved_path else shutil.which(configured)
+        with self._lock:
+            self._resolved_executable = resolved or ""
+        return resolved
+
+    def _monitor(self) -> None:
+        delay = 1.0
+        while not self._stop_event.is_set():
+            executable = self._resolve_executable()
+            if executable is None:
+                self._set_state("not_installed", "cloudflared не найден")
+                return
+            if not self.token_path.is_file():
+                self._set_state("account_required", "Добавьте токен Cloudflare Tunnel")
+                return
+            if not self.config.cloudflare_public_url:
+                self._set_state("configuration_required", "Укажите публичный HTTPS-адрес туннеля")
+                return
+            command = [
+                executable, "tunnel", "--no-autoupdate", "run", "--token-file", str(self.token_path)
+            ]
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=self._subprocess_environment(),
+                    creationflags=_CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    close_fds=True,
+                )
+            except OSError as exc:
+                self._set_state("error", f"Не удалось запустить cloudflared: {exc}")
+                return
+            with self._lock:
+                self._process = process
+                self._state = "checking"
+            failures = 0
+            while process.poll() is None and not self._stop_event.wait(2):
+                if self._check_public_endpoint():
+                    failures = 0
+                    if self._stop_event.wait(28):
+                        break
+                else:
+                    failures += 1
+                    if failures >= 6:
+                        break
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+            with self._lock:
+                self._process = None
+                self._public_url = ""
+            if self._stop_event.is_set():
+                return
+            self._restart_count += 1
+            self._set_state("error", self._last_error or "Cloudflare Tunnel остановился")
+            if self._stop_event.wait(delay):
+                return
+            delay = min(delay * 2, 30.0)
+
+    def _check_public_endpoint(self) -> bool:
+        candidate = self.config.cloudflare_public_url.rstrip("/")
+        try:
+            health = ClientApi(candidate).health(timeout=8.0)
+            state = health.get("cloudflare") if isinstance(health, dict) else None
+            if not isinstance(state, dict) or state.get("probe_id") != self.health_probe_id:
+                raise ValueError("по публичному адресу ответил другой Core")
+        except (ClientConnectionError, ClientApiError, ValueError) as exc:
+            self._set_state("unreachable", f"Публичный адрес не прошёл проверку: {exc}")
+            return False
+        with self._lock:
+            self._public_url = candidate
+            self._state = "online"
+            self._last_error = ""
+        return True
+
+    @staticmethod
+    def _subprocess_environment() -> dict[str, str]:
+        allowed = {
+            "appdata", "home", "homedrive", "homepath", "https_proxy", "http_proxy",
+            "localappdata", "no_proxy", "path", "programdata", "ssl_cert_dir",
+            "ssl_cert_file", "systemroot", "temp", "tmp", "userprofile",
+        }
+        return {key: value for key, value in os.environ.items() if key.casefold() in allowed}
+
+    def _set_state(self, state: str, error: str = "") -> None:
+        with self._lock:
+            self._state = state
+            self._last_error = error
+            if state != "online":
+                self._public_url = ""
 
 
 @dataclass(slots=True)
@@ -503,7 +756,8 @@ class TunnelProviderRegistry:
     @classmethod
     def built_in(cls, config: CoreConfig) -> TunnelProviderRegistry:
         zrok = ZrokTunnelService(config)
-        return cls(providers={zrok.provider_id: zrok})
+        cloudflare = CloudflareTunnelService(config)
+        return cls(providers={cloudflare.provider_id: cloudflare, zrok.provider_id: zrok})
 
     def start_all(self) -> None:
         for provider in self.providers.values():

@@ -239,6 +239,9 @@ class ClientWindow(QMainWindow):
             self.nav_buttons.append(button)
             self.stack.addWidget(page)
         self.nav_buttons[0].setChecked(True)
+        # Offline sync is intentionally parked in 0.10.0; keep the internal
+        # page for migration compatibility without advertising a dead feature.
+        self.nav_buttons[3].setVisible(False)
         side.addStretch()
 
         state_card = QFrame()
@@ -399,7 +402,7 @@ class ClientWindow(QMainWindow):
         enrollment_controls.addWidget(self.connect_button)
         enrollment_controls.addWidget(self.import_access_button)
         self.account_login_button.setVisible(False)
-        self.google_login_button.setVisible(True)
+        self.google_login_button.setVisible(False)
         self.import_access_button.setVisible(False)
         enrollment_controls.addStretch()
         card_layout.addLayout(enrollment_controls)

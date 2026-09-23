@@ -29,6 +29,11 @@ class CoreConfig:
     zrok_port: int = 8768
     zrok_executable: str = "zrok2"
     zrok_share_name: str = ""
+    cloudflare_enabled: bool = False
+    cloudflare_host: str = "127.0.0.1"
+    cloudflare_port: int = 8769
+    cloudflare_executable: str = "cloudflared"
+    cloudflare_public_url: str = ""
     server_name: str = "Домашнее облако"
     max_upload_bytes: int = 20 * 1024**3
     pairing_ttl_seconds: int = 15 * 60
@@ -86,6 +91,27 @@ class CoreConfig:
             r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}", self.zrok_share_name
         ):
             raise ValueError("zrok share name contains unsupported characters")
+        if self.cloudflare_host not in {"127.0.0.1", "::1", "localhost"}:
+            raise ValueError("Cloudflare backend must bind to loopback")
+        occupied_ports.add(self.zrok_port)
+        if not 1024 <= self.cloudflare_port <= 65535 or (
+            self.cloudflare_enabled and self.cloudflare_port in occupied_ports
+        ):
+            raise ValueError("Cloudflare backend port must be unique and between 1024 and 65535")
+        if not self.cloudflare_executable.strip() or len(self.cloudflare_executable) > 2048:
+            raise ValueError("cloudflared executable cannot be empty")
+        if self.cloudflare_public_url:
+            parsed = urlsplit(self.cloudflare_public_url.strip())
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+                or parsed.path not in {"", "/"}
+            ):
+                raise ValueError("Cloudflare public URL must be an HTTPS origin without a path")
         if not self.server_name.strip():
             raise ValueError("server name cannot be empty")
 
@@ -125,9 +151,8 @@ class CoreConfig:
             "CLOUD_STORAGE_REMOTE_PAIRING_ENABLED",
             bool(persisted.get("remote_pairing_enabled", False)),
         )
-        zrok_enabled = _environment_bool(
-            "CLOUD_STORAGE_ZROK_ENABLED", bool(persisted.get("zrok_enabled", False))
-        )
+        # 0.10 keeps legacy settings for migration but never auto-starts zrok.
+        zrok_enabled = _environment_bool("CLOUD_STORAGE_ZROK_ENABLED", False)
         zrok_host = os.environ.get(
             "CLOUD_STORAGE_ZROK_HOST", str(persisted.get("zrok_host", "127.0.0.1"))
         )
@@ -145,6 +170,28 @@ class CoreConfig:
         zrok_share_name = os.environ.get(
             "CLOUD_STORAGE_ZROK_SHARE_NAME", str(persisted.get("zrok_share_name", ""))
         ).strip()
+        cloudflare_enabled = _environment_bool(
+            "CLOUD_STORAGE_CLOUDFLARE_ENABLED",
+            bool(persisted.get("cloudflare_enabled", False)),
+        )
+        cloudflare_host = os.environ.get(
+            "CLOUD_STORAGE_CLOUDFLARE_HOST",
+            str(persisted.get("cloudflare_host", "127.0.0.1")),
+        )
+        cloudflare_port = int(
+            os.environ.get(
+                "CLOUD_STORAGE_CLOUDFLARE_PORT",
+                str(persisted.get("cloudflare_port", 8769)),
+            )
+        )
+        cloudflare_executable = os.environ.get(
+            "CLOUD_STORAGE_CLOUDFLARE_EXECUTABLE",
+            str(persisted.get("cloudflare_executable", "cloudflared")),
+        ).strip()
+        cloudflare_public_url = os.environ.get(
+            "CLOUD_STORAGE_CLOUDFLARE_PUBLIC_URL",
+            str(persisted.get("cloudflare_public_url", "")),
+        ).strip().rstrip("/")
         server_name = os.environ.get(
             "CLOUD_STORAGE_SERVER_NAME", str(persisted.get("server_name", "Домашнее облако"))
         ).strip()
@@ -178,6 +225,11 @@ class CoreConfig:
             zrok_port=zrok_port,
             zrok_executable=zrok_executable,
             zrok_share_name=zrok_share_name,
+            cloudflare_enabled=cloudflare_enabled,
+            cloudflare_host=cloudflare_host,
+            cloudflare_port=cloudflare_port,
+            cloudflare_executable=cloudflare_executable,
+            cloudflare_public_url=cloudflare_public_url,
             server_name=server_name[:80],
             max_upload_bytes=max(1, max_upload_gib) * 1024**3,
             persisted_extra=persisted_extra,
@@ -247,6 +299,11 @@ class CoreConfig:
             "zrok_port": self.zrok_port,
             "zrok_executable": self.zrok_executable,
             "zrok_share_name": self.zrok_share_name,
+            "cloudflare_enabled": self.cloudflare_enabled,
+            "cloudflare_host": self.cloudflare_host,
+            "cloudflare_port": self.cloudflare_port,
+            "cloudflare_executable": self.cloudflare_executable,
+            "cloudflare_public_url": self.cloudflare_public_url,
             "server_name": self.server_name,
         }
         payload = {**self.persisted_extra, **payload}

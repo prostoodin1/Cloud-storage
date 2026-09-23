@@ -62,35 +62,24 @@ def test_main_window_smoke(tmp_path) -> None:
     window.refresh_disks()
     app.processEvents()
 
-    assert window.stack.count() == 9
+    assert window.stack.count() == 8
     assert window.connection_page.panel is not None
     assert window.settings_page.connection_panel is not None
-    assert window.receive_page.direction == "inbound"
-    assert window.send_page.direction == "outbound"
+    assert window.transfers_page.direction == "all"
     assert window.help_page.article_list.count() > 0
     assert window.settings_page.lan_port.value() == 8766
     assert window.settings_page.remote_port.value() == 8767
     assert window.settings_page.remote_enabled.isChecked() is False
     assert window.settings_page.remote_status_label is not None
     assert window.settings_page.remote_audit_rows is not None
-    assert window.settings_page.zrok_port.value() == 8768
+    assert window.settings_page.zrok_port.value() == 8769
     assert window.settings_page.zrok_enabled.isChecked() is False
-    assert window.settings_page.zrok_executable.text() == "zrok2"
+    assert window.settings_page.zrok_executable.text() == "cloudflared"
     assert window.settings_page.zrok_status_label is not None
     assert window.settings_page.zrok_restart_button is not None
     assert window.settings_page.support_bundle_button is not None
-    assert window.settings_page.automation_create_button is not None
-    assert window.settings_page.automation_rule_rows is not None
-    assert window.settings_page.automation_scheduler_enabled is not None
-    assert window.settings_page.automation_scheduler_interval is not None
-    assert window.settings_page.automation_preview_button is not None
-    scheduled = window.settings_page.automation_trigger.findData("scheduled")
-    window.settings_page.automation_trigger.setCurrentIndex(scheduled)
-    available_actions = {
-        window.settings_page.automation_action.itemData(index)
-        for index in range(window.settings_page.automation_action.count())
-    }
-    assert {"run_backup", "reconcile_mirrors", "full_scan"} <= available_actions
+    assert window.settings_page.automation_create_button is None
+    assert window.settings_page.automation_trigger is None
     assert window.settings_page.notification_rows is not None
     assert window.settings_page.integration_rows is not None
     assert len(window.disks) == 1
@@ -231,12 +220,12 @@ def test_system_tabs_work_offline_and_settings_links_open_requested_tab(tmp_path
 
     assert page.isEnabled() is True
     assert page.tabs.isEnabled() is True
-    assert page.tabs.tabText(page.tabs.currentIndex()) == "Docker"
+    assert page.tabs.tabText(page.tabs.currentIndex()) == "Система"
 
     window.settings_page.system_section_requested.emit("ssh")
     app.processEvents()
     assert window.stack.currentWidget() is page
-    assert page.tabs.tabText(page.tabs.currentIndex()) == "SSH"
+    assert page.tabs.tabText(page.tabs.currentIndex()) == "Система"
     window.close()
 
 

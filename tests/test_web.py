@@ -36,7 +36,8 @@ def test_web_assets_and_anonymous_api(web):
     assert root.status_code == 200 and "text/html" in root.headers["content-type"]
     assert "Введите код подключения" in root.text
     assert "script-src 'self'" in root.headers["content-security-policy"]
-    for file in ["app.js", "app.css"]:
+    assert "Логин" in root.text and "Это доверенное устройство" in root.text
+    for file in ["app.js", "app.css", "account.css"]:
         assert client.get("/web/assets/" + file).status_code == 200
     assert client.get("/web/assets/secret").status_code == 404
     assert client.get("/v1/spaces").status_code == 401
@@ -61,6 +62,69 @@ def test_browser_files_csrf_logout_and_manager_boundary(web):
     assert client.post("/v1/web/logout", headers=headers).status_code == 200
     client.cookies.set(COOKIE, token)
     assert client.get("/v1/spaces").status_code == 401
+
+
+def test_generated_account_can_change_login_password_and_enter_web(web):
+    _, client, code = web
+    paired = client.post(
+        "/v1/pairing/redeem",
+        json={"code": code, "device_name": "Ноутбук", "platform": "Windows"},
+    )
+    assert paired.status_code == 201, paired.text
+    body = paired.json()
+    username = body["initial_username"]
+    password = body["initial_password"]
+    assert username.startswith("user_") and len(password) >= 20
+    device = {"Authorization": f"Bearer {body['device_token']}"}
+    assert client.get("/v1/account", headers=device).json()["username"] == username
+    changed = client.patch(
+        "/v1/account",
+        headers=device,
+        json={
+            "current_password": password,
+            "username": "my.cloud.login",
+            "new_password": "my replacement password 2026",
+        },
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["username"] == "my.cloud.login"
+    origin = {"Origin": "http://testserver"}
+    assert client.post(
+        "/v1/web/login",
+        headers=origin,
+        json={"username": username, "password": password},
+    ).status_code in {401, 403}
+    login = client.post(
+        "/v1/web/login",
+        headers=origin,
+        json={
+            "username": "my.cloud.login",
+            "password": "my replacement password 2026",
+            "remember": True,
+        },
+    )
+    assert login.status_code == 200, login.text
+    assert "Max-Age=" in login.headers["set-cookie"]
+    assert client.get("/v1/spaces").status_code == 200
+
+
+def test_browser_login_without_remember_uses_session_cookie(web):
+    _, client, code = web
+    paired = client.post(
+        "/v1/pairing/redeem",
+        json={"code": code, "device_name": "ПК", "platform": "Windows"},
+    ).json()
+    response = client.post(
+        "/v1/web/login",
+        headers={"Origin": "http://testserver"},
+        json={
+            "username": paired["initial_username"],
+            "password": paired["initial_password"],
+            "remember": False,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert "Max-Age=" not in response.headers["set-cookie"]
 
 
 @pytest.mark.parametrize("origin", [None, "null", "http://attacker.invalid", "https://testserver"])

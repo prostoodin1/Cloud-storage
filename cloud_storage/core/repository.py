@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import sqlite3
 import uuid
 from dataclasses import asdict, dataclass
@@ -85,6 +86,8 @@ class DeviceRecord:
 class PairingResult:
     device: DeviceRecord
     device_token: str
+    initial_username: str = ""
+    initial_password: str = ""
 
 
 class CoreRepository:
@@ -407,6 +410,94 @@ class CoreRepository:
             )
         return self.get_user(user_id)
 
+    def change_own_credentials(
+        self,
+        *,
+        user_id: str,
+        device_id: str,
+        current_password: str,
+        username: str,
+        new_password: str | None,
+    ) -> UserRecord:
+        """Let a trusted client change its own login and, optionally, password."""
+        user = self.get_user(user_id)
+        if not self.authenticate_user_password(user.username, current_password):
+            raise PermissionDeniedError("invalid username or password")
+        normalized = self.credentials.validate_username(username)
+        password_hash = None
+        if new_password:
+            password_hash = self.credentials.hash_password(new_password)
+        try:
+            with self.database.transaction() as connection:
+                if password_hash is None:
+                    changed = connection.execute(
+                        "UPDATE users SET username = ? WHERE id = ?",
+                        (normalized, user_id),
+                    )
+                else:
+                    changed = connection.execute(
+                        """
+                        UPDATE users SET username = ?, password_hash = ?,
+                                         password_version = password_version + 1
+                        WHERE id = ?
+                        """,
+                        (normalized, password_hash, user_id),
+                    )
+                if changed.rowcount != 1:
+                    raise NotFoundError("user not found")
+                # A credential change ends browser logins, but keeps trusted desktop devices.
+                connection.execute(
+                    "DELETE FROM web_sessions WHERE device_id IN "
+                    "(SELECT id FROM devices WHERE user_id = ?)",
+                    (user_id,),
+                )
+                self._audit_tx(
+                    connection,
+                    actor_type="device",
+                    actor_id=device_id,
+                    action="user.credentials.changed",
+                    target_type="user",
+                    target_id=user_id,
+                    detail=f"Пользователь изменил логин на {normalized}",
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("username already exists") from exc
+        return self.get_user(user_id)
+
+    def create_trusted_browser_device(
+        self, *, user_id: str, remote_address: str | None
+    ) -> PairingResult:
+        token = self.credentials.generate_device_token()
+        created = utc_text()
+        device_id = str(uuid.uuid4())
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO devices(
+                    id, user_id, name, platform, token_hash, status, created_at,
+                    approved_at, pairing_method
+                ) VALUES(?, ?, 'Веб-браузер', 'Web', ?, 'trusted', ?, ?, 'dynamic')
+                """,
+                (
+                    device_id,
+                    user_id,
+                    self.credentials.device_token_hash(token),
+                    created,
+                    created,
+                ),
+            )
+            self._audit_tx(
+                connection,
+                actor_type="device",
+                actor_id=device_id,
+                action="web.account_login",
+                target_type="user",
+                target_id=user_id,
+                detail="Вход в веб-версию по логину и паролю",
+                remote_address=remote_address,
+            )
+        return PairingResult(device=self.get_device(device_id), device_token=token)
+
     def set_user_enabled(self, user_id: str, enabled: bool) -> UserRecord:
         with self.database.transaction() as connection:
             changed = connection.execute(
@@ -637,7 +728,8 @@ class CoreRepository:
         user_id = user_id or str(uuid.uuid4())
         device_id = str(uuid.uuid4())
         space_id = str(uuid.uuid4())
-        username = f"device_{device_id.replace('-', '')[:16]}"
+        username = f"user_{device_id.replace('-', '')[:12]}"
+        initial_password = secrets.token_urlsafe(18)
         created = utc_text()
         quota_bytes = 100 * 1024**3
         with self.database.transaction() as connection:
@@ -653,9 +745,16 @@ class CoreRepository:
                     INSERT INTO users(
                         id, username, display_name, email, password_hash, password_version,
                         role, quota_bytes, enabled, created_at
-                    ) VALUES(?, ?, ?, '', NULL, 0, 'member', ?, 1, ?)
+                    ) VALUES(?, ?, ?, '', ?, 1, 'member', ?, 1, ?)
                     """,
-                    (user_id, username, device_name, quota_bytes, created),
+                    (
+                        user_id,
+                        username,
+                        device_name,
+                        self.credentials.hash_password(initial_password),
+                        quota_bytes,
+                        created,
+                    ),
                 )
                 connection.execute(
                     """
@@ -694,7 +793,12 @@ class CoreRepository:
                 detail=f"Устройство {device_name} подключено динамическим кодом",
                 remote_address=remote_address,
             )
-        return PairingResult(device=self.get_device(device_id), device_token=token)
+        return PairingResult(
+            device=self.get_device(device_id),
+            device_token=token,
+            initial_username=username if not existing_user_id else "",
+            initial_password=initial_password if not existing_user_id else "",
+        )
 
     def revoke_unused_access_invitations(self, user_id: str) -> int:
         with self.database.transaction() as connection:

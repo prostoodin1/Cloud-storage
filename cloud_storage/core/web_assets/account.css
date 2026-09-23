@@ -1,0 +1,39 @@
+input {
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--bg);
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.remember {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.remember input { width: auto; }
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  margin: 24px 0;
+}
+.divider::before, .divider::after {
+  content: "";
+  height: 1px;
+  background: var(--line);
+  flex: 1;
+}
+.credentials {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid #43c778;
+  border-radius: 10px;
+  background: #14251d;
+}
+.credentials pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.credentials button { width: 100%; }

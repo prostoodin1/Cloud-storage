@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Cloud Storage — мои файлы</title>
   <link rel="stylesheet" href="/web/assets/app.css">
+  <link rel="stylesheet" href="/web/assets/account.css">
   <script src="/web/assets/app.js" defer></script>
 </head>
 <body>
@@ -12,9 +13,17 @@
   <main>
     <section id="login" class="login" hidden>
       <span class="eyebrow">ВАШИ ФАЙЛЫ · В ВАШЕМ БРАУЗЕРЕ</span>
-      <h1>Подключиться к облаку</h1>
-      <p>Скопируйте текущий динамический код из Server Manager. Он действует 5 минут. В следующий раз этот браузер подключится автоматически.</p>
-      <form id="pair-form"><label for="code">Введите код подключения</label><textarea id="code" rows="3" required spellcheck="false" autocomplete="off" placeholder="CS3.…"></textarea><button id="connect" class="primary" type="submit">Подключиться</button></form>
+      <h1>Войти в облако</h1>
+      <p>Если аккаунт уже создан, используйте свой логин и пароль.</p>
+      <form id="login-form">
+        <label for="username">Логин</label><input id="username" required minlength="3" maxlength="32" autocomplete="username">
+        <label for="password">Пароль</label><input id="password" type="password" required minlength="10" autocomplete="current-password">
+        <label class="remember"><input id="remember-login" type="checkbox"> Это доверенное устройство — запомнить меня</label>
+        <button id="login-button" class="primary" type="submit">Войти</button>
+      </form>
+      <div class="divider"><span>или первое подключение</span></div>
+      <p>Введите текущий динамический код из Server Manager. Он действует 5 минут и автоматически создаст вам аккаунт.</p>
+      <form id="pair-form"><label for="code">Введите код подключения</label><textarea id="code" rows="3" required spellcheck="false" autocomplete="off" placeholder="CS3.…"></textarea><label class="remember"><input id="remember-pair" type="checkbox"> Это доверенное устройство — запомнить меня</label><button id="connect" type="submit">Подключиться по коду</button></form>
       <p class="muted">Не передавайте код посторонним. Вход даёт доступ к пространству, назначенному сервером; администратор может отозвать доступ.</p>
     </section>
     <section id="workspace" class="workspace" hidden>
@@ -30,6 +39,7 @@
   </main>
   <dialog id="preview"><div class="heading"><h2 id="preview-title">Просмотр</h2><button id="close-preview">Закрыть</button></div><div id="preview-content"></div></dialog>
   <dialog id="edit-dialog"><form method="dialog"><h2 id="edit-title">Имя файла</h2><label id="edit-label" for="edit-name">Название</label><input id="edit-name" autocomplete="off"><div class="toolbar"><button value="cancel" formnovalidate>Отмена</button><button id="edit-ok" value="ok" class="primary">Сохранить</button></div></form></dialog>
+  <dialog id="new-credentials" class="credentials"><h2>Ваш новый аккаунт</h2><p>Сохраните данные. Пароль показывается только сейчас.</p><pre id="credentials-text"></pre><div class="toolbar"><button id="copy-credentials" type="button">Копировать логин и пароль</button><button id="close-credentials" class="primary" type="button">Готово</button></div></dialog>
   <footer>Cloud Storage · защищённый веб-доступ</footer>
 </body>
 </html>

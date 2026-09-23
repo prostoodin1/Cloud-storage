@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from cloud_storage.core.repository import NotFoundError
 
@@ -19,6 +19,13 @@ ASSETS = Path(__file__).with_name("web_assets")
 
 class BrowserPairRequest(BaseModel):
     code: str = Field(min_length=1, max_length=8192)
+    remember: bool = False
+
+
+class BrowserLoginRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    password: SecretStr
+    remember: bool = False
 
 
 class BrowserAccess:
@@ -79,6 +86,43 @@ class BrowserAccess:
                 raise HTTPException(403, "Проверка безопасности не пройдена. Обновите страницу")
         return device
 
+    def _start_session(
+        self,
+        request: Request,
+        device_id: str,
+        *,
+        remember: bool,
+        payload: dict | None = None,
+    ) -> JSONResponse:
+        token = secrets.token_urlsafe(48)
+        old = request.cookies.get(COOKIE, "")
+        with self.runtime.database.transaction() as connection:
+            connection.execute("DELETE FROM web_sessions WHERE expires_at <= ?", (int(time.time()),))
+            if old:
+                connection.execute(
+                    "DELETE FROM web_sessions WHERE token_hash = ?", (self.fingerprint(old),)
+                )
+            connection.execute(
+                "INSERT INTO web_sessions(token_hash, device_id, expires_at) VALUES(?, ?, ?)",
+                (self.fingerprint(token), device_id, int(time.time()) + SESSION_SECONDS),
+            )
+        content = {
+            "device_id": device_id,
+            "csrf": self.fingerprint(token, "web-csrf"),
+            **(payload or {}),
+        }
+        response = JSONResponse(content)
+        cookie_options = {
+            "httponly": True,
+            "secure": self.secure(request),
+            "samesite": "strict",
+            "path": "/",
+        }
+        if remember:
+            cookie_options["max_age"] = SESSION_SECONDS
+        response.set_cookie(COOKIE, token, **cookie_options)
+        return response
+
     def register(self, app, redeem, redeem_type):
         @app.get("/", include_in_schema=False)
         def index():
@@ -86,7 +130,11 @@ class BrowserAccess:
 
         @app.get("/web/assets/{name}", include_in_schema=False)
         def asset(name: str):
-            allowed = {"app.js": "text/javascript", "app.css": "text/css"}
+            allowed = {
+                "app.js": "text/javascript",
+                "app.css": "text/css",
+                "account.css": "text/css",
+            }
             if name not in allowed:
                 raise HTTPException(404, "not found")
             return FileResponse(ASSETS / name, media_type=allowed[name])
@@ -100,22 +148,30 @@ class BrowserAccess:
             result = redeem(
                 redeem_type(code=body.code, device_name="Веб-браузер", platform="Web"), request
             )
-            token = secrets.token_urlsafe(48)
-            old = request.cookies.get(COOKIE, "")
-            with self.runtime.database.transaction() as connection:
-                connection.execute("DELETE FROM web_sessions WHERE expires_at <= ?", (int(time.time()),))
-                if old:
-                    connection.execute("DELETE FROM web_sessions WHERE token_hash = ?", (self.fingerprint(old),))
-                connection.execute(
-                    "INSERT INTO web_sessions(token_hash, device_id, expires_at) VALUES(?, ?, ?)",
-                    (self.fingerprint(token), result["device"]["id"], int(time.time()) + SESSION_SECONDS),
-                )
-            response = JSONResponse({"device": result["device"], "csrf": self.fingerprint(token, "web-csrf")})
-            response.set_cookie(
-                COOKIE, token, max_age=SESSION_SECONDS, httponly=True,
-                secure=self.secure(request), samesite="strict", path="/",
+            response = self._start_session(
+                request,
+                result["device"]["id"],
+                remember=body.remember,
+                payload={
+                    "device": result["device"],
+                    "initial_username": result.get("initial_username", ""),
+                    "initial_password": result.get("initial_password", ""),
+                },
             )
             return response
+
+        @app.post("/v1/web/login", tags=["browser"])
+        def login(body: BrowserLoginRequest, request: Request):
+            self.allowed(request)
+            self.check_origin(request)
+            user = self.runtime.repository.authenticate_user_password(
+                body.username, body.password.get_secret_value()
+            )
+            result = self.runtime.repository.create_trusted_browser_device(
+                user_id=user.id,
+                remote_address=request.client.host if request.client else "unknown",
+            )
+            return self._start_session(request, result.device.id, remember=body.remember)
 
         @app.get("/v1/web/session", tags=["browser"])
         def session(request: Request):

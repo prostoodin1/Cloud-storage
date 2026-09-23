@@ -150,6 +150,12 @@ class RemoteSessionRequest(BaseModel):
     password: SecretStr
 
 
+class AccountCredentialsRequest(BaseModel):
+    current_password: SecretStr
+    username: str = Field(min_length=3, max_length=32)
+    new_password: SecretStr | None = None
+
+
 class StorageRootRequest(BaseModel):
     disk_id: str = Field(min_length=8, max_length=100)
     path: str = Field(min_length=3, max_length=2048)
@@ -605,13 +611,16 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "/v1/web/pair",
             "/v1/web/session",
             "/v1/web/logout",
+            "/v1/web/login",
             "/web/assets/app.css",
+            "/web/assets/account.css",
             "/web/assets/app.js",
             "/v1/auth/device-login",
             "/v1/auth/google-device-login",
             "/v1/pairing/redeem",
             "/v1/pairing/status",
             "/v1/remote/session",
+            "/v1/account",
             "/v1/spaces",
             "/v1/operations",
             "/v1/shares",
@@ -2537,7 +2546,40 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         return {
             "device": asdict(result.device),
             "device_token": result.device_token,
+            "initial_username": result.initial_username,
+            "initial_password": result.initial_password,
             "message": message,
+        }
+
+    @app.get("/v1/account", tags=["account"])
+    def account(device: DeviceRecord = Depends(require_device)) -> dict[str, Any]:  # noqa: B008
+        user = runtime.repository.get_user(device.user_id)
+        return {
+            "id": user.id,
+            "username": user.username,
+            "display_name": user.display_name,
+            "role": user.role,
+        }
+
+    @app.patch("/v1/account", tags=["account"])
+    def change_account_credentials(
+        body: AccountCredentialsRequest,
+        device: DeviceRecord = Depends(require_device),  # noqa: B008
+    ) -> dict[str, Any]:
+        user = runtime.repository.change_own_credentials(
+            user_id=device.user_id,
+            device_id=device.id,
+            current_password=body.current_password.get_secret_value(),
+            username=body.username,
+            new_password=(
+                body.new_password.get_secret_value() if body.new_password is not None else None
+            ),
+        )
+        return {
+            "id": user.id,
+            "username": user.username,
+            "display_name": user.display_name,
+            "role": user.role,
         }
 
     @app.post(

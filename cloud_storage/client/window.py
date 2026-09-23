@@ -219,6 +219,7 @@ class ClientWindow(QMainWindow):
         self.files_page = self._make_files_page()
         self.transfers_page = self._make_transfers_page()
         self.offline_page = self._make_offline_page()
+        self.account_page = self._make_account_page()
         self.update_page = UpdatePage("client", self.store.data_directory)
         self.help_page = HelpPage(self.knowledge, "client")
         self.help_page.open_logs_requested.connect(self.open_logs_directory)
@@ -228,6 +229,7 @@ class ClientWindow(QMainWindow):
             ("▣   Мои файлы", self.files_page),
             ("⇅   Передачи", self.transfers_page),
             ("◫   Офлайн", self.offline_page),
+            ("♙   Аккаунт", self.account_page),
             ("↻   Обновления", self.update_page),
             ("?   Помощь", self.help_page),
         ):
@@ -422,6 +424,61 @@ class ClientWindow(QMainWindow):
         controls.addStretch()
         card_layout.addLayout(controls)
         layout.addWidget(form_card)
+        layout.addStretch()
+        return page
+
+    def _make_account_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 16, 24)
+        layout.setSpacing(18)
+        layout.addWidget(
+            make_header(
+                "Мой аккаунт",
+                "Логин и пароль принадлежат вам и могут быть изменены в любое время.",
+            )
+        )
+        card = QFrame()
+        card.setProperty("card", True)
+        card_layout = QVBoxLayout(card)
+        self.account_status = QLabel("Подключитесь к серверу, чтобы управлять аккаунтом.")
+        self.account_status.setWordWrap(True)
+        self.account_status.setProperty("muted", True)
+        form = QFormLayout()
+        self.account_username = QLineEdit()
+        self.account_username.setPlaceholderText("Новый логин: 3–32 символа")
+        self.account_current_password = QLineEdit()
+        self.account_current_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.account_current_password.setPlaceholderText("Текущий пароль")
+        self.account_new_password = QLineEdit()
+        self.account_new_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.account_new_password.setPlaceholderText("Оставьте пустым, чтобы не менять")
+        self.account_repeat_password = QLineEdit()
+        self.account_repeat_password.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Логин", self.account_username)
+        form.addRow("Текущий пароль", self.account_current_password)
+        form.addRow("Новый пароль", self.account_new_password)
+        form.addRow("Повтор нового пароля", self.account_repeat_password)
+        controls = QHBoxLayout()
+        self.account_refresh_button = QPushButton("Обновить данные")
+        self.account_refresh_button.clicked.connect(self.refresh_account)
+        self.account_save_button = QPushButton("Сохранить логин и пароль")
+        self.account_save_button.setProperty("primary", True)
+        self.account_save_button.clicked.connect(self.save_account_credentials)
+        controls.addWidget(self.account_refresh_button)
+        controls.addWidget(self.account_save_button)
+        controls.addStretch()
+        help_text = QLabel(
+            "После смены данных активные браузерные входы завершаются. "
+            "Приложение на этом компьютере останется подключённым."
+        )
+        help_text.setWordWrap(True)
+        help_text.setProperty("muted", True)
+        card_layout.addWidget(self.account_status)
+        card_layout.addLayout(form)
+        card_layout.addLayout(controls)
+        card_layout.addWidget(help_text)
+        layout.addWidget(card)
         layout.addStretch()
         return page
 
@@ -738,6 +795,7 @@ class ClientWindow(QMainWindow):
         self.fingerprint.setText(self.profile.certificate_fingerprint)
         self.device_name.setText(self.profile.device_name or platform.node() or "Мой компьютер")
         self.username.setText(self.profile.username)
+        self.account_username.setText(self.profile.username)
         self.cache_path.setText(self.profile.download_directory)
         self.drive_enabled_checkbox.blockSignals(True)
         self.drive_enabled_checkbox.setChecked(self.profile.drive_enabled)
@@ -1026,6 +1084,7 @@ class ClientWindow(QMainWindow):
         self.profile.device_name = self.device_name.text().strip()
         self.profile.device_status = str(device.get("status", "pending"))
         self.profile.username = str(device.get("username", ""))
+        self.account_username.setText(self.profile.username)
         self.store.save(self.profile)
         self._refresh_server_selector()
         self.password.clear()
@@ -1037,10 +1096,107 @@ class ClientWindow(QMainWindow):
         self.remote_login_button.setEnabled(True)
         pairing_state = str(device.get("status", "trusted"))
         self._set_connection_state(pairing_state)
-        QMessageBox.information(
-            self,
-            "Подключение выполнено",
-            "Сервер сохранён. При следующих запусках клиент подключится автоматически.",
+        initial_username = str(pairing.get("initial_username") or "")
+        initial_password = str(pairing.get("initial_password") or "")
+        if initial_username and initial_password:
+            QApplication.clipboard().setText(
+                f"Логин: {initial_username}\nПароль: {initial_password}"
+            )
+            self.account_username.setText(initial_username)
+            self.account_current_password.setText(initial_password)
+            QMessageBox.information(
+                self,
+                "Аккаунт создан",
+                f"Логин: {initial_username}\nПароль: {initial_password}\n\n"
+                "Данные уже скопированы в буфер обмена. Их можно изменить во вкладке «Аккаунт».",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Подключение выполнено",
+                "Сервер сохранён. При следующих запусках клиент подключится автоматически.",
+            )
+
+    def _account_api(self) -> ClientApi:
+        if not self.token or self.profile.device_status != "trusted":
+            raise ClientConnectionError("Сначала подключите клиент к серверу")
+        return ClientApi(
+            self.profile.server_url,
+            token=self.token,
+            certificate_fingerprint=self.profile.certificate_fingerprint,
+            remote_session=self.remote_session,
+        )
+
+    def refresh_account(self) -> None:
+        self.account_refresh_button.setEnabled(False)
+        self.account_status.setText("Получаем данные аккаунта…")
+
+        def loaded(result: object) -> None:
+            self.account_refresh_button.setEnabled(True)
+            account = result if isinstance(result, dict) else {}
+            username = str(account.get("username") or "")
+            self.account_username.setText(username)
+            self.profile.username = username
+            self.store.save(self.profile)
+            role = "Администратор" if account.get("role") == "admin" else "Пользователь"
+            self.account_status.setText(f"Аккаунт активен · Роль: {role}")
+
+        def failed(message: str) -> None:
+            self.account_refresh_button.setEnabled(True)
+            self.account_status.setText(message)
+
+        self._start_task(lambda: self._account_api().account(), loaded, failed)
+
+    def save_account_credentials(self) -> None:
+        username = self.account_username.text().strip().casefold()
+        current_password = self.account_current_password.text()
+        new_password = self.account_new_password.text()
+        repeated = self.account_repeat_password.text()
+        if len(username) < 3 or not current_password:
+            QMessageBox.warning(self, "Проверьте данные", "Введите логин и текущий пароль.")
+            return
+        if new_password and len(new_password) < 10:
+            QMessageBox.warning(self, "Слабый пароль", "Новый пароль должен содержать минимум 10 символов.")
+            return
+        if new_password != repeated:
+            QMessageBox.warning(self, "Пароли не совпадают", "Повторите новый пароль без ошибок.")
+            return
+        self.account_save_button.setEnabled(False)
+        self.account_status.setText("Сохраняем новые данные…")
+
+        def changed(result: object) -> None:
+            self.account_save_button.setEnabled(True)
+            account = result if isinstance(result, dict) else {}
+            self.profile.username = str(account.get("username") or username)
+            self.username.setText(self.profile.username)
+            self.store.save(self.profile)
+            self.account_current_password.clear()
+            self.account_new_password.clear()
+            self.account_repeat_password.clear()
+            self.account_status.setText("Логин и пароль сохранены")
+            QMessageBox.information(
+                self,
+                "Аккаунт обновлён",
+                "Новые данные действуют для входа через браузер и на других устройствах.",
+            )
+
+        def failed(message: str) -> None:
+            self.account_save_button.setEnabled(True)
+            friendly = {
+                "username already exists": "Этот логин уже используется.",
+                "invalid username or password": "Текущий пароль введён неверно.",
+            }.get(message, message)
+            self.account_status.setText(friendly)
+            QMessageBox.warning(self, "Данные не изменены", friendly)
+
+        self._start_task(
+            lambda: self._account_api().change_account_credentials(
+                current_password=current_password,
+                username=username,
+                new_password=new_password or None,
+            ),
+            changed,
+            failed,
         )
 
     def discover_lan_servers(self) -> None:
@@ -2521,6 +2677,8 @@ class ClientWindow(QMainWindow):
             button.setChecked(self.stack.widget(index) is page)
         if page is self.offline_page:
             self.refresh_offline_index()
+        elif page is self.account_page:
+            self.refresh_account()
 
     def _start_task(
         self,

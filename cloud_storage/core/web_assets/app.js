@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 let csrf = "", spaces = [], current = null, directory = "", previewURL = null, navigation = 0;
 function status(message, error = false) { $("status").textContent = message; $("status").classList.toggle("error", error); }
 function loginView() { navigation++; current=null; directory=""; $("login").hidden = false; $("workspace").hidden = true; $("logout").hidden = true; $("entries").replaceChildren(); closePreview(); csrf = ""; }
-const translations = {"remote pairing is disabled by the administrator":"В Manager отключён вход через интернет. Разрешите первичное подключение устройств.","dynamic pairing code is invalid or expired":"Код недействителен или истёк. Скопируйте новый код из Manager.","too many pairing attempts":"Слишком много попыток. Подождите перед повторным входом.","server is in emergency read-only mode":"Сервер работает в режиме только чтения.","storage roots are not configured":"Администратор ещё не настроил диски хранения."};
+const translations = {"remote pairing is disabled by the administrator":"В Manager отключён вход через интернет. Разрешите первичное подключение устройств.","dynamic pairing code is invalid or expired":"Код недействителен или истёк. Скопируйте новый код из Manager.","invalid username or password":"Неверный логин или пароль.","too many pairing attempts":"Слишком много попыток. Подождите перед повторным входом.","server is in emergency read-only mode":"Сервер работает в режиме только чтения.","storage roots are not configured":"Администратор ещё не настроил диски хранения."};
 async function api(url, options = {}) {
   const response = await fetch(url, {credentials:"same-origin", cache:"no-store", ...options, headers:{"X-CSRF-Token":csrf, "skip_zrok_interstitial":"1", ...options.headers}});
   if (!response.ok) {
@@ -76,7 +76,10 @@ async function preview(entry) {
   else {const pre=document.createElement("pre");pre.textContent=await payload.text();$("preview-content").append(pre);}
   $("preview-title").textContent=entry.name;$("preview").showModal();
 }
-$("pair-form").addEventListener("submit",event=>{event.preventDefault();run(async()=>{$("connect").disabled=true;try{status("Подключаемся…");const data=await(await json("/v1/web/pair","POST",{code:$("code").value.trim()})).json();csrf=data.csrf;$("code").value="";await loadSpaces();}finally{$("connect").disabled=false;}});});
+$("login-form").addEventListener("submit",event=>{event.preventDefault();run(async()=>{$("login-button").disabled=true;try{status("Входим в аккаунт…");const data=await(await json("/v1/web/login","POST",{username:$("username").value.trim(),password:$("password").value,remember:$("remember-login").checked})).json();csrf=data.csrf;$("password").value="";await loadSpaces();}finally{$("login-button").disabled=false;}});});
+$("pair-form").addEventListener("submit",event=>{event.preventDefault();run(async()=>{$("connect").disabled=true;try{status("Подключаемся…");const data=await(await json("/v1/web/pair","POST",{code:$("code").value.trim(),remember:$("remember-pair").checked})).json();csrf=data.csrf;$("code").value="";await loadSpaces();if(data.initial_username&&data.initial_password){$("credentials-text").textContent=`Логин: ${data.initial_username}\nПароль: ${data.initial_password}`;$("new-credentials").showModal();}}finally{$("connect").disabled=false;}});});
+$("copy-credentials").addEventListener("click",()=>run(async()=>{await navigator.clipboard.writeText($("credentials-text").textContent);status("Логин и пароль скопированы");}));
+$("close-credentials").addEventListener("click",()=>$("new-credentials").close());
 $("logout").addEventListener("click",()=>run(async()=>{await json("/v1/web/logout","POST",{});loginView();status("Вы вышли из облака на этом устройстве");}));
 $("refresh").addEventListener("click",()=>run(refresh));
 $("up").addEventListener("click",()=>run(async()=>{directory=directory.split("/").slice(0,-1).join("/");await refresh();}));

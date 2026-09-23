@@ -128,6 +128,24 @@ class ClientApi:
     def pairing_status(self) -> dict[str, Any]:
         return self._json_request("/v1/pairing/status")
 
+    def account(self) -> dict[str, Any]:
+        return self._json_request("/v1/account")
+
+    def change_account_credentials(
+        self,
+        *,
+        current_password: str,
+        username: str,
+        new_password: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "current_password": current_password,
+            "username": username,
+        }
+        if new_password:
+            payload["new_password"] = new_password
+        return self._json_request("/v1/account", method="PATCH", payload=payload, timeout=15.0)
+
     def create_remote_session(self, username: str, password: str) -> dict[str, Any]:
         return self._json_request(
             "/v1/remote/session",

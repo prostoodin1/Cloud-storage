@@ -142,7 +142,8 @@ def test_desktop_client_window_smoke(tmp_path) -> None:
     window.reconnect_timer.stop()
     app.processEvents()
 
-    assert window.stack.count() == 6
+    assert window.stack.count() == 7
+    assert window.account_page is not None
     assert window.help_page.article_list.count() > 0
     assert window.discover_button.text() == "Найти в сети"
     assert window.remote_login_button.text() == "Войти через интернет"

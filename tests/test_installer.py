@@ -22,7 +22,7 @@ def test_installer_version_choice_reaches_interactive_setup(product, monkeypatch
     launch = Mock()
     window.service.launch_installer = launch
     package = UpdatePackage("https://example.com/setup.exe", "a" * 64, 10, "setup.exe")
-    latest = UpdateInfo(product, "0.10.3", "stable", "2026-09-23", "Latest", package)
+    latest = UpdateInfo(product, "0.10.4", "stable", "2026-09-23", "Latest", package)
     previous = UpdateInfo(product, "0.9.23", "stable", "2026-09-11", "Previous", package)
     try:
         window._versions_loaded([latest, previous])

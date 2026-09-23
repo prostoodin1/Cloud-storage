@@ -1,7 +1,7 @@
 param(
   [Parameter(Mandatory=$true)][string]$Dist,
   [string]$InstallerDirectory = '',
-  [string]$ExpectedVersion = '0.10.0',
+  [string]$ExpectedVersion = '0.10.1',
   [switch]$NativeCore
 )
 $ErrorActionPreference = 'Stop'

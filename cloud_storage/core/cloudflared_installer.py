@@ -8,6 +8,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from cloud_storage import __version__
+
 # Pin to the official cloudflare/cloudflared v2026.9.1 release. Keep the hash
 # synchronized with that release's published SHA256 Checksums block.
 VERSION = "2026.9.1"
@@ -40,7 +42,9 @@ def download_cloudflared(data_directory: Path) -> Path:
     digest = hashlib.sha256()
     total = 0
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": "CloudStorage-Server/0.10.0"})
+        request = urllib.request.Request(
+            url, headers={"User-Agent": f"CloudStorage-Server/{__version__}"}
+        )
         with os.fdopen(descriptor, "wb") as output, urllib.request.urlopen(request, timeout=45) as response:
             while chunk := response.read(1024 * 1024):
                 total += len(chunk)

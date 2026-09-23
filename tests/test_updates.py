@@ -118,6 +118,31 @@ def test_update_preferences_are_persistent_and_invalid_values_are_safe(tmp_path)
     assert service.load_preferences() == UpdatePreferences()
 
 
+def test_download_reuses_an_existing_verified_setup(tmp_path, monkeypatch) -> None:
+    payload = b"installer still open by Windows"
+    raw, public_key = signed_manifest(payload)
+    info = parse_signed_manifest(raw, expected_product="client", public_key=public_key)
+    service = UpdateService(
+        "client",
+        tmp_path,
+        feed_url="https://updates.example/client.json",
+        public_key=public_key,
+    )
+    service.download_directory.mkdir(parents=True)
+    installer = service.download_directory / info.package.filename
+    installer.write_bytes(payload)
+
+    def unexpected_download(*_args, **_kwargs):
+        raise AssertionError("a verified cached installer must not be downloaded again")
+
+    monkeypatch.setattr(service, "_open_verified", unexpected_download)
+
+    assert service.download(info) == installer.resolve()
+    state = json.loads((service.download_directory / "update-state.json").read_text())
+    assert state["sha256"] == info.package.sha256
+    assert not list(service.download_directory.glob("update-state-*.tmp"))
+
+
 def test_update_installer_is_reverified_immediately_before_launch(
     tmp_path, monkeypatch
 ) -> None:
@@ -194,6 +219,27 @@ def test_both_setup_packages_offer_an_optional_desktop_shortcut() -> None:
         assert 'Name: "desktopicon"' in source
         assert 'Tasks: desktopicon' in source
         assert 'Flags: unchecked' in source
+
+
+def test_server_setup_stops_all_components_before_retrying_protected_backup() -> None:
+    project = Path(__file__).resolve().parents[1]
+    source = (project / "packaging" / "CloudStorageServer.iss").read_text(
+        encoding="utf-8"
+    )
+    prepare = source.index("function PrepareToInstall")
+    stop = source.index("StopServerComponents;", prepare)
+    backup = source.index("BackupServerData", stop)
+    assert stop < backup
+    for executable in (
+        "CloudStorageServerManager.exe",
+        "CloudStorageContainerManager.exe",
+        "CloudStorageServerCore.exe",
+        "CloudStorageLegacyCore.exe",
+        "CloudStorageServerService.exe",
+    ):
+        assert executable in source
+    assert "function CopyFileWithRetry" in source
+    assert "for Attempt := 1 to 40" in source
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ShellExecute API")

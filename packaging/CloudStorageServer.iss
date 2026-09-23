@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.10.0"
+#define AppVersion "0.10.1"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
 #define BuildRoot "..\dist"
@@ -87,6 +87,54 @@ begin
     SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
 end;
 
+procedure StopImage(ImageName: String);
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM "' + ImageName + '" /T /F', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure StopServerComponents;
+var
+  ResultCode, Attempt: Integer;
+begin
+  { Managers can restart the Core, so close them before stopping the service. }
+  StopImage('CloudStorageServerManager.exe');
+  StopImage('CloudStorageContainerManager.exe');
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop CloudStorageServerCore', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\net.exe'), 'stop CloudStorageServerCore /y', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  { Older installations may have a direct/legacy Core outside SCM. Repeat the
+    termination briefly so handles are closed before the protected backup. }
+  for Attempt := 1 to 3 do begin
+    StopImage('CloudStorageServerCore.exe');
+    StopImage('CloudStorageLegacyCore.exe');
+    StopImage('CloudStorageServerService.exe');
+    Sleep(500);
+  end;
+end;
+
+function CopyFileWithRetry(SourcePath, DestinationPath: String;
+  SourceMayDisappear: Boolean): Boolean;
+var
+  Attempt: Integer;
+begin
+  Result := False;
+  for Attempt := 1 to 40 do begin
+    if not FileExists(SourcePath) then begin
+      Result := SourceMayDisappear;
+      Exit;
+    end;
+    if CopyFile(SourcePath, DestinationPath, False) then begin
+      Result := True;
+      Exit;
+    end;
+    Sleep(250);
+  end;
+end;
+
 function BackupServerData: String;
 var
   DataPath, BackupPath, Stamp: String;
@@ -101,39 +149,36 @@ begin
     Result := 'Не удалось создать резервную копию. Обновление остановлено: ' + BackupPath;
     Exit;
   end;
-  if not CopyFile(DataPath + '\core.db', BackupPath + '\core.db', False) then begin
+  if not CopyFileWithRetry(DataPath + '\core.db', BackupPath + '\core.db', False) then begin
     Result := 'Не удалось скопировать базу. Обновление остановлено; проверьте место и права доступа.';
     Exit;
   end;
   if FileExists(DataPath + '\core-config.json') then
-    if not CopyFile(DataPath + '\core-config.json', BackupPath + '\core-config.json', False) then begin
+    if not CopyFileWithRetry(DataPath + '\core-config.json', BackupPath + '\core-config.json', False) then begin
       Result := 'Не удалось сохранить настройки сервера. Обновление остановлено.';
       Exit;
     end;
   if FileExists(DataPath + '\core-secrets.json') then
-    if not CopyFile(DataPath + '\core-secrets.json', BackupPath + '\core-secrets.json', False) then begin
+    if not CopyFileWithRetry(DataPath + '\core-secrets.json', BackupPath + '\core-secrets.json', False) then begin
       Result := 'Не удалось сохранить ключи сервера. Обновление остановлено.';
       Exit;
     end;
   if FileExists(DataPath + '\core.db-wal') then
-    if not CopyFile(DataPath + '\core.db-wal', BackupPath + '\core.db-wal', False) then begin
+    if not CopyFileWithRetry(DataPath + '\core.db-wal', BackupPath + '\core.db-wal', True) then begin
       Result := 'Не удалось сохранить журнал базы. Обновление остановлено.';
       Exit;
     end;
   if FileExists(DataPath + '\core.db-shm') then
-    if not CopyFile(DataPath + '\core.db-shm', BackupPath + '\core.db-shm', False) then begin
+    if not CopyFileWithRetry(DataPath + '\core.db-shm', BackupPath + '\core.db-shm', True) then begin
       Result := 'Не удалось сохранить состояние базы. Обновление остановлено.';
       Exit;
     end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
-var
-  ResultCode: Integer;
 begin
   Result := '';
-  Exec(ExpandConstant('{sys}\net.exe'), 'stop CloudStorageServerCore /y', '',
-    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  StopServerComponents;
   { The native Go supervisor validates process identity and no longer trusts
     stale numeric PID files from 0.9.x. Remove the legacy lock after stopping. }
   DeleteFile(ExpandConstant('{commonappdata}\CloudStorage\core.pid'));

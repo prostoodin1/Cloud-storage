@@ -329,6 +329,18 @@ class UpdateService:
         destination = (self.download_directory / info.package.filename).resolve()
         if self.download_directory.resolve() not in destination.parents:
             raise UpdateError("небезопасное имя пакета обновления")
+        # A versioned Inno Setup executable can still be open when the permanent
+        # bootstrapper is started for a second time. Windows does not allow an
+        # executable in use to be replaced. Reuse a complete, already verified
+        # package instead of downloading over it.
+        if destination.is_file():
+            try:
+                size_bytes, sha256 = _file_digest(destination)
+            except OSError:
+                size_bytes, sha256 = 0, ""
+            if size_bytes == info.package.size_bytes and sha256 == info.package.sha256:
+                self._write_state(info, destination)
+                return destination
         descriptor, temporary_name = tempfile.mkstemp(
             prefix="update-", suffix=".download", dir=self.download_directory
         )
@@ -355,7 +367,20 @@ class UpdateService:
                 raise UpdateError("пакет обновления скачан не полностью")
             if digest.hexdigest() != info.package.sha256:
                 raise UpdateError("SHA-256 пакета обновления не совпадает")
-            os.replace(temporary, destination)
+            try:
+                os.replace(temporary, destination)
+            except PermissionError as exc:
+                # A parallel/running Setup may have won the race. Its file is
+                # safe to reuse only after the same size and hash verification.
+                try:
+                    size_bytes, sha256 = _file_digest(destination)
+                except OSError:
+                    size_bytes, sha256 = 0, ""
+                if size_bytes != info.package.size_bytes or sha256 != info.package.sha256:
+                    raise UpdateError(
+                        "установщик этой версии уже используется другим процессом; "
+                        "закройте предыдущее окно установки и повторите попытку"
+                    ) from exc
             self._write_state(info, destination)
             return destination
         except UpdateError:
@@ -363,7 +388,12 @@ class UpdateService:
         except (OSError, urllib.error.URLError) as exc:
             raise UpdateError("не удалось скачать пакет обновления") from exc
         finally:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                # Antivirus scanners can briefly retain the temporary file.
+                # It has a random name and is never considered an installer.
+                pass
 
     def launch_installer(
         self,
@@ -398,22 +428,32 @@ class UpdateService:
 
     def _write_state(self, info: UpdateInfo, destination: Path) -> None:
         state = self.download_directory / "update-state.json"
-        temporary = state.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "product": info.product,
-                    "version": info.version,
-                    "path": str(destination),
-                    "sha256": info.package.sha256,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="update-state-", suffix=".tmp", dir=self.download_directory
         )
-        os.replace(temporary, state)
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            temporary.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product": info.product,
+                        "version": info.version,
+                        "path": str(destination),
+                        "sha256": info.package.sha256,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(temporary, state)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def version_key(value: str) -> tuple[int, int, int, int, str]:

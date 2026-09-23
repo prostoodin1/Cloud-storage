@@ -240,6 +240,11 @@ def test_server_setup_stops_all_components_before_retrying_protected_backup() ->
         assert executable in source
     assert "function CopyFileWithRetry" in source
     assert "for Attempt := 1 to 40" in source
+    assert "config CloudStorageServerCore start= disabled" in source
+    assert "failure CloudStorageServerCore reset= 0" in source
+    assert "procedure RestoreServerService" in source
+    assert "procedure DeinitializeSetup" in source
+    assert "*S-1-5-32-544:(F)" in source
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ShellExecute API")

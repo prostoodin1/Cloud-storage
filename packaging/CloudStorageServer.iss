@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.10.1"
+#define AppVersion "0.10.2"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
 #define BuildRoot "..\dist"
@@ -79,12 +79,32 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Cloud Storage Discovery (Local subnet)"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveCloudStorageDiscoveryLocalSubnetFirewall"
 
 [Code]
+var
+  UpgradeServiceTemporarilyDisabled: Boolean;
+  LastBackupError: String;
+
 function IsServerServiceInstalled: Boolean;
 var
   ResultCode: Integer;
 begin
   Result := Exec(ExpandConstant('{sys}\sc.exe'), 'query CloudStorageServerCore', '',
     SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+procedure RestoreServerService;
+var
+  ResultCode: Integer;
+begin
+  if not UpgradeServiceTemporarilyDisabled then
+    Exit;
+  Exec(ExpandConstant('{sys}\sc.exe'), 'config CloudStorageServerCore start= auto', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\sc.exe'),
+    'failure CloudStorageServerCore reset= 86400 actions= restart/5000/restart/15000/restart/60000', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\sc.exe'), 'start CloudStorageServerCore', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  UpgradeServiceTemporarilyDisabled := False;
 end;
 
 procedure StopImage(ImageName: String);
@@ -102,6 +122,19 @@ begin
   { Managers can restart the Core, so close them before stopping the service. }
   StopImage('CloudStorageServerManager.exe');
   StopImage('CloudStorageContainerManager.exe');
+  { A forced stop used to trigger the configured recovery action and restart the
+    old wrapper while its secrets were being copied. Disable start and recovery
+    for the short protected update window. DeinitializeSetup restores both if
+    installation is cancelled or fails before the normal [Run] stage. }
+  if IsServerServiceInstalled then begin
+    Exec(ExpandConstant('{sys}\sc.exe'),
+      'failure CloudStorageServerCore reset= 0 actions= ""', '',
+      SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\sc.exe'),
+      'config CloudStorageServerCore start= disabled', '',
+      SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    UpgradeServiceTemporarilyDisabled := True;
+  end;
   Exec(ExpandConstant('{sys}\sc.exe'), 'stop CloudStorageServerCore', '',
     SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\net.exe'), 'stop CloudStorageServerCore /y', '',
@@ -116,12 +149,25 @@ begin
   end;
 end;
 
+procedure RepairServerSecretPermissions;
+var
+  SecretPath: String;
+  ResultCode: Integer;
+begin
+  SecretPath := ExpandConstant('{commonappdata}\CloudStorage\core-secrets.json');
+  if FileExists(SecretPath) then
+    Exec(ExpandConstant('{sys}\icacls.exe'),
+      '"' + SecretPath + '" /inheritance:r /grant:r *S-1-5-18:(F) *S-1-5-32-544:(F)', '',
+      SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 function CopyFileWithRetry(SourcePath, DestinationPath: String;
   SourceMayDisappear: Boolean): Boolean;
 var
   Attempt: Integer;
 begin
   Result := False;
+  LastBackupError := '';
   for Attempt := 1 to 40 do begin
     if not FileExists(SourcePath) then begin
       Result := SourceMayDisappear;
@@ -133,6 +179,7 @@ begin
     end;
     Sleep(250);
   end;
+  LastBackupError := SysErrorMessage(DLLGetLastError);
 end;
 
 function BackupServerData: String;
@@ -160,7 +207,8 @@ begin
     end;
   if FileExists(DataPath + '\core-secrets.json') then
     if not CopyFileWithRetry(DataPath + '\core-secrets.json', BackupPath + '\core-secrets.json', False) then begin
-      Result := 'Не удалось сохранить ключи сервера. Обновление остановлено.';
+      Result := 'Не удалось сохранить ключи сервера. Обновление остановлено.'#13#10 +
+        'Причина Windows: ' + LastBackupError;
       Exit;
     end;
   if FileExists(DataPath + '\core.db-wal') then
@@ -182,7 +230,21 @@ begin
   { The native Go supervisor validates process identity and no longer trusts
     stale numeric PID files from 0.9.x. Remove the legacy lock after stopping. }
   DeleteFile(ExpandConstant('{commonappdata}\CloudStorage\core.pid'));
+  RepairServerSecretPermissions;
   Result := BackupServerData;
+  if Result <> '' then
+    RestoreServerService;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssDone then
+    UpgradeServiceTemporarilyDisabled := False;
+end;
+
+procedure DeinitializeSetup;
+begin
+  RestoreServerService;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

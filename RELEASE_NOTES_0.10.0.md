@@ -27,7 +27,7 @@
   bootstrappers, Go Core startup, web assets, pairing, authorization, quotas, file and folder
   round-trips, browser sessions, public shares, diagnostics, archive/restore, user isolation, clean
   shutdown, and restart persistence.
-- The setup EXEs are built locally and have not been uploaded to a GitHub release.
+- The stable installers and versioned setup EXEs are published with this GitHub release.
 
 Cloudflare reachability over a real public hostname still needs a configured Tunnel token and DNS
 hostname; the packaged test uses the loopback gateway and does not claim an Internet e2e test.

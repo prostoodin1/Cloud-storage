@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -116,9 +117,63 @@ def _scroll_page(content: QWidget) -> QScrollArea:
     return area
 
 
+class TrafficChart(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self._buckets: list[dict] = []
+        self.setMinimumHeight(150)
+
+    def set_buckets(self, buckets: list[dict]) -> None:
+        self._buckets = buckets[-60:]
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt callback
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        area = self.rect().adjusted(8, 10, -8, -22)
+        painter.setPen(QColor(COLORS["border"]))
+        for step in range(4):
+            y = area.top() + round(area.height() * step / 3)
+            painter.drawLine(area.left(), y, area.right(), y)
+        if not self._buckets:
+            painter.setPen(QColor(COLORS["muted"]))
+            painter.drawText(area, Qt.AlignmentFlag.AlignCenter, "Передач пока нет")
+            return
+        peak = max(
+            1,
+            max(
+                int(item.get("uploaded_bytes", 0)) + int(item.get("downloaded_bytes", 0))
+                for item in self._buckets
+            ),
+        )
+        slot = area.width() / max(1, len(self._buckets))
+        bar_width = max(2.0, min(12.0, slot * 0.65))
+        for index, item in enumerate(self._buckets):
+            x = area.left() + index * slot + (slot - bar_width) / 2
+            uploaded = int(item.get("uploaded_bytes", 0))
+            downloaded = int(item.get("downloaded_bytes", 0))
+            upload_height = area.height() * uploaded / peak
+            download_height = area.height() * downloaded / peak
+            painter.fillRect(
+                round(x),
+                round(area.bottom() - upload_height),
+                round(bar_width),
+                round(upload_height),
+                QColor(COLORS["blue"]),
+            )
+            painter.fillRect(
+                round(x),
+                round(area.bottom() - upload_height - download_height),
+                round(bar_width),
+                round(download_height),
+                QColor(COLORS["green"]),
+            )
+
+
 class DashboardPage(QWidget):
     setup_requested = Signal()
     remind_later_requested = Signal()
+    traffic_period_changed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -193,6 +248,46 @@ class DashboardPage(QWidget):
         storage_layout.addWidget(note)
         self.layout.addWidget(storage)
 
+        traffic = QFrame()
+        traffic.setProperty("card", True)
+        traffic_layout = QVBoxLayout(traffic)
+        traffic_layout.setContentsMargins(18, 16, 18, 16)
+        traffic_header = QHBoxLayout()
+        traffic_title = QLabel("Сетевой трафик")
+        traffic_title.setObjectName("SectionTitle")
+        self.traffic_period = QComboBox()
+        for label, value in (
+            ("24 часа", "24h"),
+            ("7 дней", "7d"),
+            ("30 дней", "30d"),
+            ("Всё время", "all"),
+        ):
+            self.traffic_period.addItem(label, value)
+        self.traffic_period.setCurrentIndex(2)
+        self.traffic_period.currentIndexChanged.connect(
+            lambda _index: self.traffic_period_changed.emit(str(self.traffic_period.currentData()))
+        )
+        traffic_header.addWidget(traffic_title)
+        traffic_header.addStretch()
+        traffic_header.addWidget(self.traffic_period)
+        traffic_totals = QHBoxLayout()
+        self.traffic_uploaded = QLabel("Загружено: —")
+        self.traffic_downloaded = QLabel("Скачано: —")
+        self.traffic_all_time = QLabel("За всё время: —")
+        self.traffic_all_time.setProperty("muted", True)
+        traffic_totals.addWidget(self.traffic_uploaded)
+        traffic_totals.addWidget(self.traffic_downloaded)
+        traffic_totals.addStretch()
+        traffic_totals.addWidget(self.traffic_all_time)
+        legend = QLabel("■ Загрузка на сервер     ■ Скачивание с сервера")
+        legend.setStyleSheet(f"color: {COLORS['muted']};")
+        self.traffic_chart = TrafficChart()
+        traffic_layout.addLayout(traffic_header)
+        traffic_layout.addLayout(traffic_totals)
+        traffic_layout.addWidget(self.traffic_chart)
+        traffic_layout.addWidget(legend)
+        self.layout.addWidget(traffic)
+
         lower = QHBoxLayout()
         lower.setSpacing(12)
         health = QFrame()
@@ -232,6 +327,7 @@ class DashboardPage(QWidget):
         events: list[AuditEvent],
         core_health: dict | None = None,
         core_summary: dict | None = None,
+        traffic: dict | None = None,
     ) -> None:
         configured = [
             item
@@ -263,7 +359,9 @@ class DashboardPage(QWidget):
         physical_keys = {
             f"number:{item.disk_number}"
             if item.disk_number is not None
-            else f"serial:{item.serial}" if item.serial else f"device:{item.device}"
+            else f"serial:{item.serial}"
+            if item.serial
+            else f"device:{item.device}"
             for item in disks
         }
         self.disk_card.set_value(
@@ -285,6 +383,18 @@ class DashboardPage(QWidget):
         self.storage_summary.setText(
             f"{format_bytes(used)} из {format_bytes(total)}" if total else "Нет настроенных дисков"
         )
+        traffic = traffic or {}
+        self.traffic_uploaded.setText(
+            f"Загружено: {format_bytes(int(traffic.get('uploaded_bytes', 0)))}"
+        )
+        self.traffic_downloaded.setText(
+            f"Скачано: {format_bytes(int(traffic.get('downloaded_bytes', 0)))}"
+        )
+        all_time = int(traffic.get("all_time_uploaded_bytes", 0)) + int(
+            traffic.get("all_time_downloaded_bytes", 0)
+        )
+        self.traffic_all_time.setText(f"За всё время: {format_bytes(all_time)}")
+        self.traffic_chart.set_buckets(list(traffic.get("buckets", [])))
 
         clear_layout(self.health_rows)
         if not disks:
@@ -483,8 +593,12 @@ class DisksPage(QWidget):
                 card.action_requested.connect(self.disk_action_requested)
                 self.cards.addWidget(card, index // 2, index % 2)
             return
-        visible_spaces = [item for item in self._spaces if item.get("kind") in {"shared", "personal"}
-                          and bool(item.get("archived_at")) == self.archive_toggle.isChecked()]
+        visible_spaces = [
+            item
+            for item in self._spaces
+            if item.get("kind") in {"shared", "personal"}
+            and bool(item.get("archived_at")) == self.archive_toggle.isChecked()
+        ]
         self.empty.setVisible(not visible_spaces)
         self.empty.setText(
             "Архив пуст. Удалённые виртуальные диски можно восстановить здесь."
@@ -519,19 +633,28 @@ class DisksPage(QWidget):
             detail.setProperty("muted", True)
             card_layout.addWidget(heading)
             card_layout.addWidget(detail)
-            edit = QPushButton("Настроить владельца и квоту" if owner_id else "Настроить пространство")
+            edit = QPushButton(
+                "Настроить владельца и квоту" if owner_id else "Настроить пространство"
+            )
             edit.setVisible(not space.get("archived_at"))
             space_id = str(space.get("id") or "")
             if owner_id:
-                edit.clicked.connect(lambda _checked=False, value=owner_id: self.edit_personal_requested.emit(value))
+                edit.clicked.connect(
+                    lambda _checked=False, value=owner_id: self.edit_personal_requested.emit(value)
+                )
             else:
-                edit.clicked.connect(lambda _checked=False, value=space_id: self.edit_space_requested.emit(value))
+                edit.clicked.connect(
+                    lambda _checked=False, value=space_id: self.edit_space_requested.emit(value)
+                )
             card_layout.addWidget(edit)
-            remove = QPushButton("Восстановить диск" if space.get("archived_at") else "Удалить виртуальный диск")
+            remove = QPushButton(
+                "Восстановить диск" if space.get("archived_at") else "Удалить виртуальный диск"
+            )
             should_archive = not bool(space.get("archived_at"))
             remove.clicked.connect(
-                lambda _checked=False, value=space_id, archived=should_archive:
-                self.archive_space_requested.emit(value, archived)
+                lambda _checked=False, value=space_id, archived=should_archive: (
+                    self.archive_space_requested.emit(value, archived)
+                )
             )
             card_layout.addWidget(remove)
             self.cards.addWidget(card, index // 2, index % 2)
@@ -645,9 +768,7 @@ class SettingsPage(QWidget):
         self.section_list.setFixedWidth(205)
         self.section_list.setWordWrap(True)
         self.section_list.setSpacing(1)
-        self.section_list.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        self.section_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.section_list.currentRowChanged.connect(self._show_section)
         self.stack = QStackedWidget()
         body.addWidget(self.section_list)
@@ -692,9 +813,7 @@ class SettingsPage(QWidget):
         self.remote_status_label: QLabel | None = None
         self.remote_details_label: QLabel | None = None
         self.remote_audit_rows: QVBoxLayout | None = None
-        self.zrok_enabled = QCheckBox(
-            "Подключать сервер к интернету через Cloudflare Tunnel"
-        )
+        self.zrok_enabled = QCheckBox("Подключать сервер к интернету через Cloudflare Tunnel")
         self.zrok_port = QSpinBox()
         self.zrok_port.setRange(1024, 65535)
         self.zrok_port.setValue(8768)
@@ -702,9 +821,7 @@ class SettingsPage(QWidget):
         self.zrok_executable.setPlaceholderText("cloudflared или полный путь к cloudflared.exe")
         self.zrok_share_name = QLineEdit()
         self.zrok_share_name.setMaxLength(63)
-        self.zrok_share_name.setPlaceholderText(
-            "https://storage.example.com"
-        )
+        self.zrok_share_name.setPlaceholderText("https://storage.example.com")
         self.zrok_status_label: QLabel | None = None
         self.zrok_details_label: QLabel | None = None
         self.zrok_install_progress: QProgressBar | None = None
@@ -909,9 +1026,7 @@ class SettingsPage(QWidget):
             remote_security = (health or {}).get("remote") or {}
             pairing_enabled = bool(remote_security.get("pairing_enabled"))
             fingerprint = str(
-                remote_security.get("display_fingerprint")
-                or lan.get("display_fingerprint")
-                or "—"
+                remote_security.get("display_fingerprint") or lan.get("display_fingerprint") or "—"
             )
             self.security_connection_label.setText(
                 f"Доверенных устройств: {trusted} · ожидают: {pending}\n"
@@ -931,8 +1046,7 @@ class SettingsPage(QWidget):
         if self.disk_settings_status_label is not None:
             configurations = list(self._current_settings.disk_configurations.values())
             configured_count = sum(
-                item.role not in {DiskRole.UNCONFIGURED, DiskRole.UNUSED}
-                for item in configurations
+                item.role not in {DiskRole.UNCONFIGURED, DiskRole.UNUSED} for item in configurations
             )
             cache_count = sum(item.role == DiskRole.CACHE for item in configurations)
             self.disk_settings_status_label.setText(
@@ -974,7 +1088,9 @@ class SettingsPage(QWidget):
         remote = health.get("remote") if health else None
         if self.remote_status_label is not None:
             if remote:
-                pairing = " · подключение по коду разрешено" if remote.get("pairing_enabled") else ""
+                pairing = (
+                    " · подключение по коду разрешено" if remote.get("pairing_enabled") else ""
+                )
                 self.remote_status_label.setText(f"HTTPS включён{pairing}")
                 self.remote_status_label.setStyleSheet("color: #43c778; font-weight: 700;")
             elif self._current_settings.remote_enabled and online:
@@ -1003,9 +1119,13 @@ class SettingsPage(QWidget):
                 if str(event.get("action", "")).startswith("remote.access.")
             ][:8]
             if not remote_events:
-                self._add_muted(self.remote_audit_rows, "Внешних обращений пока не зарегистрировано.")
+                self._add_muted(
+                    self.remote_audit_rows, "Внешних обращений пока не зарегистрировано."
+                )
             for event in remote_events:
-                status = "разрешено" if event.get("action") == "remote.access.allowed" else "отклонено"
+                status = (
+                    "разрешено" if event.get("action") == "remote.access.allowed" else "отклонено"
+                )
                 label = QLabel(
                     f"{event.get('timestamp', '—')} · {event.get('remote_address') or '—'} · "
                     f"{status} · {event.get('detail', '')}"
@@ -1022,13 +1142,17 @@ class SettingsPage(QWidget):
                 online and not bool(zrok.get("installed")) and not bool(zrok.get("installing"))
             )
             self.zrok_install_button.setText(
-                "Устанавливается cloudflared…" if zrok.get("installing") else "Установить cloudflared"
+                "Устанавливается cloudflared…"
+                if zrok.get("installing")
+                else "Установить cloudflared"
             )
         if self.zrok_install_progress is not None:
             self.zrok_install_progress.setVisible(bool(zrok.get("installing")))
         if self.zrok_enable_button is not None:
             self.zrok_enable_button.setEnabled(
-                online and bool(zrok.get("installed")) and not zrok.get("enabling")
+                online
+                and bool(zrok.get("installed"))
+                and not zrok.get("enabling")
                 and not zrok.get("installing")
             )
         if self.zrok_status_label is not None:
@@ -1049,7 +1173,15 @@ class SettingsPage(QWidget):
                 "disabled": "Выключен",
             }
             self.zrok_status_label.setText(labels.get(state, state))
-            color = "#43c778" if state == "online" else "#e2383f" if state in {"error", "not_installed"} else "#f5bd4f" if state == "starting" else "#949ca8"
+            color = (
+                "#43c778"
+                if state == "online"
+                else "#e2383f"
+                if state in {"error", "not_installed"}
+                else "#f5bd4f"
+                if state == "starting"
+                else "#949ca8"
+            )
             self.zrok_status_label.setStyleSheet(f"color: {color}; font-weight: 700;")
         if self.zrok_details_label is not None:
             public_url = str(zrok.get("public_url") or "будет показан после запуска")
@@ -1122,9 +1254,7 @@ class SettingsPage(QWidget):
                 self._add_muted(self.pending_device_rows, "Новых запросов на подключение нет.")
             for device in pending:
                 self._add_device_card(self.pending_device_rows, device, pending=True)
-        self._update_maintenance(
-            storage_roots or [], maintenance_jobs or [], spaces or [], online
-        )
+        self._update_maintenance(storage_roots or [], maintenance_jobs or [], spaces or [], online)
         self._update_backups(
             storage_roots or [],
             backup_jobs or [],
@@ -1177,9 +1307,7 @@ class SettingsPage(QWidget):
             if self.backup_start_button is not None:
                 self.backup_start_button.setEnabled(online and self.backup_target.count() > 0)
             if self.backup_policy_save_button is not None:
-                self.backup_policy_save_button.setEnabled(
-                    online and self.backup_target.count() > 0
-                )
+                self.backup_policy_save_button.setEnabled(online and self.backup_target.count() > 0)
             self._load_selected_backup_policy()
         if self.restore_target is not None:
             previous = self.restore_target.currentData()
@@ -1193,9 +1321,7 @@ class SettingsPage(QWidget):
             if previous_index >= 0:
                 self.restore_target.setCurrentIndex(previous_index)
         self._render_restore_jobs(restore_jobs, online)
-        self._render_backup_verifications(
-            list(automation.get("verifications") or []), online
-        )
+        self._render_backup_verifications(list(automation.get("verifications") or []), online)
         if self.backup_rows is None:
             return
         clear_layout(self.backup_rows)
@@ -1274,17 +1400,15 @@ class SettingsPage(QWidget):
                 verify = QPushButton("Проверить пробным восстановлением")
                 verify.setEnabled(self.restore_target.count() > 0)
                 verify.clicked.connect(
-                    lambda _checked=False, backup_id=job["id"]: (
-                        self._emit_backup_verification(backup_id)
+                    lambda _checked=False, backup_id=job["id"]: self._emit_backup_verification(
+                        backup_id
                     )
                 )
                 controls.addWidget(verify)
                 restore = QPushButton("Восстановить повреждённые объекты")
                 restore.setEnabled(self.restore_target.count() > 0)
                 restore.clicked.connect(
-                    lambda _checked=False, backup_id=job["id"]: self._emit_restore(
-                        backup_id
-                    )
+                    lambda _checked=False, backup_id=job["id"]: self._emit_restore(backup_id)
                 )
                 controls.addWidget(restore)
             controls.addStretch()
@@ -1296,9 +1420,7 @@ class SettingsPage(QWidget):
             return
         clear_layout(self.backup_verification_rows)
         if not online:
-            self._add_muted(
-                self.backup_verification_rows, "Запустите Core для проверки снимков."
-            )
+            self._add_muted(self.backup_verification_rows, "Запустите Core для проверки снимков.")
             return
         if not jobs:
             self._add_muted(
@@ -1344,6 +1466,7 @@ class SettingsPage(QWidget):
                 controls.addStretch()
                 box.addLayout(controls)
             self.backup_verification_rows.addWidget(card)
+
     def _render_restore_jobs(self, jobs: list[dict], online: bool) -> None:
         if self.restore_rows is None:
             return
@@ -1396,16 +1519,16 @@ class SettingsPage(QWidget):
             if job["status"] in {"failed", "cancelled"}:
                 resume = QPushButton("Повторить восстановление")
                 resume.clicked.connect(
-                    lambda _checked=False, job_id=job["id"]: (
-                        self.restore_resume_requested.emit(job_id)
+                    lambda _checked=False, job_id=job["id"]: self.restore_resume_requested.emit(
+                        job_id
                     )
                 )
                 controls.addWidget(resume)
             if job["status"] in {"queued", "running"}:
                 cancel = QPushButton("Остановить")
                 cancel.clicked.connect(
-                    lambda _checked=False, job_id=job["id"]: (
-                        self.restore_cancel_requested.emit(job_id)
+                    lambda _checked=False, job_id=job["id"]: self.restore_cancel_requested.emit(
+                        job_id
                     )
                 )
                 controls.addWidget(cancel)
@@ -1521,16 +1644,12 @@ class SettingsPage(QWidget):
         scheduler = automation.get("scheduler") or {}
         if self.automation_scheduler_enabled is not None:
             self.automation_scheduler_enabled.blockSignals(True)
-            self.automation_scheduler_enabled.setChecked(
-                bool(scheduler.get("enabled", True))
-            )
+            self.automation_scheduler_enabled.setChecked(bool(scheduler.get("enabled", True)))
             self.automation_scheduler_enabled.setEnabled(online)
             self.automation_scheduler_enabled.blockSignals(False)
         if self.automation_scheduler_interval is not None:
             self.automation_scheduler_interval.blockSignals(True)
-            self.automation_scheduler_interval.setValue(
-                int(scheduler.get("interval_seconds", 60))
-            )
+            self.automation_scheduler_interval.setValue(int(scheduler.get("interval_seconds", 60)))
             self.automation_scheduler_interval.setEnabled(online)
             self.automation_scheduler_interval.blockSignals(False)
         if self.automation_scheduler_status is not None:
@@ -1601,9 +1720,7 @@ class SettingsPage(QWidget):
                     "enabled": not bool(rule.get("enabled")),
                     "trigger_type": str(rule.get("trigger_type")),
                     "action_type": str(rule.get("action_type")),
-                    "cooldown_minutes": max(
-                        1, int(rule.get("cooldown_seconds", 60)) // 60
-                    ),
+                    "cooldown_minutes": max(1, int(rule.get("cooldown_seconds", 60)) // 60),
                 }
                 toggle.clicked.connect(
                     lambda _checked=False, rule_id=str(rule["id"]), values=update_payload: (
@@ -1666,9 +1783,7 @@ class SettingsPage(QWidget):
                 text = QVBoxLayout()
                 title = QLabel(str(provider.get("name", provider.get("id"))))
                 title.setStyleSheet("font-weight: 700;")
-                detail = QLabel(
-                    "Встроенный · без внешней сети · без загрузки стороннего кода"
-                )
+                detail = QLabel("Встроенный · без внешней сети · без загрузки стороннего кода")
                 detail.setProperty("muted", True)
                 text.addWidget(title)
                 text.addWidget(detail)
@@ -1804,7 +1919,9 @@ class SettingsPage(QWidget):
             detail = QLabel(str(incident.get("detail", "")))
             detail.setWordWrap(True)
             detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            remediation = QLabel(f"Что делать: {incident.get('remediation', 'Проверьте журнал Core.')}")
+            remediation = QLabel(
+                f"Что делать: {incident.get('remediation', 'Проверьте журнал Core.')}"
+            )
             remediation.setWordWrap(True)
             remediation.setStyleSheet("color: #7ab7ff;")
             box.addWidget(title)
@@ -1833,9 +1950,7 @@ class SettingsPage(QWidget):
                 protect = QPushButton("Защитить сервер: только чтение")
                 protect.clicked.connect(
                     lambda _checked=False, incident_id=str(incident["id"]): (
-                        self.diagnostic_remediation_requested.emit(
-                            incident_id, "enter_read_only"
-                        )
+                        self.diagnostic_remediation_requested.emit(incident_id, "enter_read_only")
                     )
                 )
                 controls.addWidget(protect)
@@ -1912,9 +2027,7 @@ class SettingsPage(QWidget):
             card.setProperty("card", True)
             card_layout = QVBoxLayout(card)
             suffix = f" · пространство {job['space_id']}" if job.get("space_id") else ""
-            title = QLabel(
-                f"Перенос {job['source_root_id']} → {job['target_root_id']}{suffix}"
-            )
+            title = QLabel(f"Перенос {job['source_root_id']} → {job['target_root_id']}{suffix}")
             title.setStyleSheet("font-weight: 700;")
             total = int(job.get("total_bytes", 0))
             processed = int(job.get("processed_bytes", 0))
@@ -1943,16 +2056,16 @@ class SettingsPage(QWidget):
             if job["status"] in {"failed", "cancelled"}:
                 resume = QPushButton("Продолжить")
                 resume.clicked.connect(
-                    lambda _checked=False, job_id=job["id"]: (
-                        self.maintenance_resume_requested.emit(job_id)
+                    lambda _checked=False, job_id=job["id"]: self.maintenance_resume_requested.emit(
+                        job_id
                     )
                 )
                 controls.addWidget(resume)
             if job["status"] in {"queued", "running"}:
                 cancel = QPushButton("Отменить")
                 cancel.clicked.connect(
-                    lambda _checked=False, job_id=job["id"]: (
-                        self.maintenance_cancel_requested.emit(job_id)
+                    lambda _checked=False, job_id=job["id"]: self.maintenance_cancel_requested.emit(
+                        job_id
                     )
                 )
                 controls.addWidget(cancel)
@@ -2115,9 +2228,7 @@ class SettingsPage(QWidget):
         elif name == "Подключение":
             self.connection_panel = ConnectionCodePanel()
             self.connection_panel.dynamic_target_requested.connect(self.dynamic_target_requested)
-            self.connection_panel.generation_requested.connect(
-                self.connection_generation_requested
-            )
+            self.connection_panel.generation_requested.connect(self.connection_generation_requested)
             self.connection_panel.create_user_requested.connect(self.add_user_requested)
             self.connection_panel.refresh_button.clicked.connect(self.core_refresh_requested)
             layout.addWidget(self.connection_panel)
@@ -2371,9 +2482,7 @@ class SettingsPage(QWidget):
                 tab_layout = QVBoxLayout(tab)
                 status_label = QLabel("Ядро не опрошено")
                 status_label.setWordWrap(True)
-                status_label.setTextInteractionFlags(
-                    Qt.TextInteractionFlag.TextSelectableByMouse
-                )
+                status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 setattr(self, attribute, status_label)
                 tab_layout.addWidget(status_label)
                 if attribute == "security_network_label":
@@ -2526,9 +2635,7 @@ class SettingsPage(QWidget):
             layout.addWidget(description)
             self.log_path = QLabel("—")
             self.log_path.setWordWrap(True)
-            self.log_path.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-            )
+            self.log_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             path_form = QFormLayout()
             path_form.addRow("Локальный журнал Manager", self.log_path)
             layout.addLayout(path_form)
@@ -2582,9 +2689,7 @@ class SettingsPage(QWidget):
             self.automation_scheduler_status.setWordWrap(True)
             self.automation_scheduler_status.setProperty("muted", True)
             self.automation_settings_button = QPushButton("Сохранить режим выполнения")
-            self.automation_settings_button.clicked.connect(
-                self._emit_automation_settings
-            )
+            self.automation_settings_button.clicked.connect(self._emit_automation_settings)
             scheduler_box.addWidget(scheduler_title)
             scheduler_box.addWidget(self.automation_scheduler_enabled)
             scheduler_box.addLayout(scheduler_form)
@@ -2610,9 +2715,7 @@ class SettingsPage(QWidget):
                 ("По расписанию", "scheduled"),
             ):
                 self.automation_trigger.addItem(label, value)
-            self.automation_trigger.currentIndexChanged.connect(
-                self._automation_trigger_changed
-            )
+            self.automation_trigger.currentIndexChanged.connect(self._automation_trigger_changed)
             rule_form.addRow("Если", self.automation_trigger)
             self.automation_action = QComboBox()
             rule_form.addRow("То", self.automation_action)
@@ -2632,13 +2735,9 @@ class SettingsPage(QWidget):
             self.automation_create_button.setProperty("primary", True)
             self.automation_create_button.clicked.connect(self._emit_automation_rule)
             self.automation_preview_button = QPushButton("Проверить без запуска")
-            self.automation_preview_button.clicked.connect(
-                self.automation_preview_requested
-            )
+            self.automation_preview_button.clicked.connect(self.automation_preview_requested)
             self.automation_evaluate_button = QPushButton("Выполнить совпавшие сейчас")
-            self.automation_evaluate_button.clicked.connect(
-                self.automation_evaluate_requested
-            )
+            self.automation_evaluate_button.clicked.connect(self.automation_evaluate_requested)
             rule_controls.addWidget(self.automation_create_button)
             rule_controls.addWidget(self.automation_preview_button)
             rule_controls.addWidget(self.automation_evaluate_button)
@@ -2698,15 +2797,11 @@ class SettingsPage(QWidget):
             layout.addWidget(description)
             form = QFormLayout()
             self.backup_target = QComboBox()
-            self.backup_target.currentIndexChanged.connect(
-                self._load_selected_backup_policy
-            )
+            self.backup_target.currentIndexChanged.connect(self._load_selected_backup_policy)
             form.addRow("Диск с ролью «Резервные копии»", self.backup_target)
             self.restore_target = QComboBox()
             form.addRow("Основной диск для восстановления", self.restore_target)
-            self.backup_policy_enabled = QCheckBox(
-                "Автоматически создавать и проверять снимки"
-            )
+            self.backup_policy_enabled = QCheckBox("Автоматически создавать и проверять снимки")
             form.addRow("Расписание", self.backup_policy_enabled)
             self.backup_policy_interval = QSpinBox()
             self.backup_policy_interval.setRange(1, 8760)
@@ -2764,9 +2859,7 @@ class SettingsPage(QWidget):
             self.migration_source = QComboBox()
             self.migration_target = QComboBox()
             self.migration_space = QComboBox()
-            self.migration_space.currentIndexChanged.connect(
-                self._select_space_migration_roots
-            )
+            self.migration_space.currentIndexChanged.connect(self._select_space_migration_roots)
             form.addRow("Источник (запись на паузе)", self.migration_source)
             form.addRow("Целевой активный диск", self.migration_target)
             form.addRow("Что переносить", self.migration_space)
@@ -2819,15 +2912,11 @@ class SettingsPage(QWidget):
 
     def _emit_restore(self, backup_job_id: str) -> None:
         if self.restore_target is not None and self.restore_target.currentData():
-            self.restore_requested.emit(
-                backup_job_id, str(self.restore_target.currentData())
-            )
+            self.restore_requested.emit(backup_job_id, str(self.restore_target.currentData()))
 
     def _emit_backup_verification(self, backup_job_id: str) -> None:
         if self.restore_target is not None and self.restore_target.currentData():
-            self.backup_verify_requested.emit(
-                backup_job_id, str(self.restore_target.currentData())
-            )
+            self.backup_verify_requested.emit(backup_job_id, str(self.restore_target.currentData()))
 
     def _emit_backup_policy(self) -> None:
         if (
@@ -2855,9 +2944,7 @@ class SettingsPage(QWidget):
 
     def _emit_backup_policy_run(self) -> None:
         if self.backup_target is not None and self.backup_target.currentData():
-            self.backup_policy_run_requested.emit(
-                str(self.backup_target.currentData())
-            )
+            self.backup_policy_run_requested.emit(str(self.backup_target.currentData()))
 
     def _load_selected_backup_policy(self) -> None:
         target_root_id = (
@@ -2880,19 +2967,13 @@ class SettingsPage(QWidget):
                 int(policy.get("interval_hours", 24)) if policy else 24
             )
         if self.backup_policy_keep is not None:
-            self.backup_policy_keep.setValue(
-                int(policy.get("keep_last", 7)) if policy else 7
-            )
+            self.backup_policy_keep.setValue(int(policy.get("keep_last", 7)) if policy else 7)
         if policy and self.restore_target is not None:
-            verification_index = self.restore_target.findData(
-                policy.get("verification_root_id")
-            )
+            verification_index = self.restore_target.findData(policy.get("verification_root_id"))
             if verification_index >= 0:
                 self.restore_target.setCurrentIndex(verification_index)
         if self.backup_policy_run_button is not None:
-            self.backup_policy_run_button.setEnabled(
-                self._backup_online and policy is not None
-            )
+            self.backup_policy_run_button.setEnabled(self._backup_online and policy is not None)
 
     def _emit_mirror_reconcile(self) -> None:
         if self.mirror_target is not None and self.mirror_target.currentData():
@@ -2949,10 +3030,7 @@ class SettingsPage(QWidget):
             self.automation_rule_hint.setText(text)
 
     def _emit_automation_settings(self) -> None:
-        if (
-            self.automation_scheduler_enabled is None
-            or self.automation_scheduler_interval is None
-        ):
+        if self.automation_scheduler_enabled is None or self.automation_scheduler_interval is None:
             return
         self.automation_settings_requested.emit(
             {
@@ -2970,13 +3048,13 @@ class SettingsPage(QWidget):
             if item.get("matched"):
                 cooldown = int(item.get("cooldown_remaining_seconds", 0))
                 suffix = (
-                    f"; cooldown ещё {cooldown} сек"
-                    if cooldown
-                    else "; действие готово к запуску"
+                    f"; cooldown ещё {cooldown} сек" if cooldown else "; действие готово к запуску"
                 )
                 text = f"Условие правила «{rule_name}» совпало{suffix}. Действие не запускалось."
             else:
-                text = f"Условие правила «{rule_name}» сейчас не совпадает. Действие не запускалось."
+                text = (
+                    f"Условие правила «{rule_name}» сейчас не совпадает. Действие не запускалось."
+                )
         else:
             text = (
                 f"Проверено правил: {len(rules)} · условия совпали: "

@@ -83,6 +83,35 @@ def test_health_and_manager_authorization(tmp_path) -> None:
     assert allowed.json()["users"] == 0
 
 
+def test_manager_traffic_reports_period_and_all_time_totals(tmp_path) -> None:
+    app, client, manager_headers = build_client(tmp_path)
+    now = "2026-09-24T12:00:00+00:00"
+    with app.state.runtime.database.transaction() as connection:
+        for transfer_id, direction, byte_count in (
+            ("traffic-up", "inbound", 5_000_000_000),
+            ("traffic-down", "outbound", 2_000_000_000),
+        ):
+            connection.execute(
+                """
+                INSERT INTO transfer_jobs(
+                    id, direction, status, logical_path, total_bytes, network_bytes,
+                    created_at, updated_at, completed_at
+                ) VALUES(?, ?, 'completed', 'file.bin', ?, ?, ?, ?, ?)
+                """,
+                (transfer_id, direction, byte_count, byte_count, now, now, now),
+            )
+    response = client.get("/v1/admin/traffic?period=all", headers=manager_headers)
+    assert response.status_code == 200, response.text
+    traffic = response.json()
+    assert traffic["uploaded_bytes"] == 5_000_000_000
+    assert traffic["downloaded_bytes"] == 2_000_000_000
+    assert traffic["all_time_uploaded_bytes"] == 5_000_000_000
+    assert traffic["all_time_downloaded_bytes"] == 2_000_000_000
+    assert traffic["buckets"] == [
+        {"bucket": "2026-09", "uploaded_bytes": 5_000_000_000, "downloaded_bytes": 2_000_000_000}
+    ]
+
+
 def test_manager_user_overview_reports_dates_presence_and_current_action(tmp_path) -> None:
     app, client, manager_headers, device_headers, user, _, _ = provision_trusted_device(tmp_path)
     assert client.get("/v1/spaces", headers=device_headers).status_code == 200
@@ -200,14 +229,20 @@ def test_manager_password_reset_replaces_password_for_future_devices(tmp_path) -
     assert reset.status_code == 200
     assert reset.json()["has_password"] is True
     common = {"username": "resetme", "device_name": "Phone", "platform": "Android"}
-    assert client.post(
-        "/v1/auth/device-login",
-        json={**common, "password": "original secure password"},
-    ).status_code == 403
-    assert client.post(
-        "/v1/auth/device-login",
-        json={**common, "password": "replacement secure password"},
-    ).status_code == 201
+    assert (
+        client.post(
+            "/v1/auth/device-login",
+            json={**common, "password": "original secure password"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/v1/auth/device-login",
+            json={**common, "password": "replacement secure password"},
+        ).status_code
+        == 201
+    )
 
 
 def test_confirmed_admin_phone_can_monitor_and_approve_devices(tmp_path) -> None:
@@ -412,19 +447,13 @@ def test_tunnel_registry_is_builtin_and_restart_is_manager_only(tmp_path) -> Non
         zrok_executable="missing-zrok-provider-test",
     )
     app = create_app(config)
-    manager_headers = {
-        "Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"
-    }
+    manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
 
     with TestClient(app) as client:
         overview = client.get("/v1/admin/tunnels", headers=manager_headers)
         denied = client.post("/v1/admin/tunnels/zrok/restart")
-        missing = client.post(
-            "/v1/admin/tunnels/unknown/restart", headers=manager_headers
-        )
-        restarted = client.post(
-            "/v1/admin/tunnels/zrok/restart", headers=manager_headers
-        )
+        missing = client.post("/v1/admin/tunnels/unknown/restart", headers=manager_headers)
+        restarted = client.post("/v1/admin/tunnels/zrok/restart", headers=manager_headers)
         audit = client.get("/v1/admin/audit", headers=manager_headers).json()
     app.state.runtime.tunnels.stop_all()
 
@@ -450,7 +479,7 @@ def test_tunnel_registry_is_builtin_and_restart_is_manager_only(tmp_path) -> Non
                 "public_https",
                 "named_share",
             ],
-        }
+        },
     ]
     assert denied.status_code == 401
     assert missing.status_code == 404
@@ -502,9 +531,9 @@ def test_support_bundle_is_anonymized_and_checksum_protected(tmp_path) -> None:
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/zip")
-    assert response.headers["x-support-bundle-sha256"] == hashlib.sha256(
-        response.content
-    ).hexdigest()
+    assert (
+        response.headers["x-support-bundle-sha256"] == hashlib.sha256(response.content).hexdigest()
+    )
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         assert set(archive.namelist()) == {
             "README.txt",
@@ -518,9 +547,7 @@ def test_support_bundle_is_anonymized_and_checksum_protected(tmp_path) -> None:
             "notifications.json",
             "activity.json",
         }
-        contents = "\n".join(
-            archive.read(name).decode("utf-8") for name in archive.namelist()
-        )
+        contents = "\n".join(archive.read(name).decode("utf-8") for name in archive.namelist())
         manifest = json.loads(archive.read("manifest.json"))
         plugins = json.loads(archive.read("plugins.json"))
 
@@ -748,7 +775,12 @@ def test_paused_root_stays_readable_and_verified_migration_keeps_source_copy(tmp
             "write_enabled": True,
         },
     ]
-    assert client.put("/v1/admin/storage-roots", headers=manager_headers, json={"roots": roots}).status_code == 200
+    assert (
+        client.put(
+            "/v1/admin/storage-roots", headers=manager_headers, json={"roots": roots}
+        ).status_code
+        == 200
+    )
 
     payload = b"verified migration payload"
     route = f"/v1/spaces/{space['id']}/files/archive.bin"
@@ -761,9 +793,7 @@ def test_paused_root_stays_readable_and_verified_migration_keeps_source_copy(tmp
     assert original_path.read_bytes() == payload
 
     roots[0]["write_enabled"] = False
-    paused = client.put(
-        "/v1/admin/storage-roots", headers=manager_headers, json={"roots": roots}
-    )
+    paused = client.put("/v1/admin/storage-roots", headers=manager_headers, json={"roots": roots})
     assert paused.status_code == 200
     assert client.get(route, headers=device_headers).content == payload
 
@@ -838,9 +868,7 @@ def test_verified_backup_contains_database_manifest_current_file_and_version(tmp
         json={"target_root_id": backup_root_id},
     )
     assert started.status_code == 202
-    job = client.get(
-        f"/v1/admin/backups/{started.json()['id']}", headers=manager_headers
-    ).json()
+    job = client.get(f"/v1/admin/backups/{started.json()['id']}", headers=manager_headers).json()
     assert job["status"] == "completed"
     assert job["processed_files"] == 2
     snapshot = backup / job["snapshot_path"]
@@ -855,9 +883,7 @@ def test_verified_backup_contains_database_manifest_current_file_and_version(tmp
 
 
 def test_verified_restore_repairs_damage_without_overwriting_newer_file(tmp_path) -> None:
-    app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(
-        tmp_path
-    )
+    app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(tmp_path)
     primary = tmp_path / "restore-primary" / "CloudStorageData"
     backup = tmp_path / "restore-backup" / "CloudStorageData"
     primary.parent.mkdir()
@@ -887,12 +913,8 @@ def test_verified_restore_repairs_damage_without_overwriting_newer_file(tmp_path
         },
     )
     assert roots.status_code == 200
-    primary_root_id = next(
-        item["id"] for item in roots.json() if item["purpose"] == "primary"
-    )
-    backup_root_id = next(
-        item["id"] for item in roots.json() if item["purpose"] == "backup"
-    )
+    primary_root_id = next(item["id"] for item in roots.json() if item["purpose"] == "primary")
+    backup_root_id = next(item["id"] for item in roots.json() if item["purpose"] == "backup")
     route = f"/v1/spaces/{space['id']}/files/recovery.bin"
     corrupt_route = f"/v1/spaces/{space['id']}/files/corrupt.bin"
     original = b"verified recovery payload"
@@ -964,9 +986,7 @@ def test_verified_restore_repairs_damage_without_overwriting_newer_file(tmp_path
 def test_emergency_read_only_mode_blocks_mutations_but_keeps_reads_and_diagnostics(
     tmp_path,
 ) -> None:
-    _, client, manager_headers, device_headers, user, space, _ = provision_trusted_device(
-        tmp_path
-    )
+    _, client, manager_headers, device_headers, user, space, _ = provision_trusted_device(tmp_path)
     route = f"/v1/spaces/{space['id']}/files/available.txt"
     assert client.put(route, headers=device_headers, content=b"available").status_code == 201
 
@@ -1015,9 +1035,7 @@ def test_emergency_read_only_mode_blocks_mutations_but_keeps_reads_and_diagnosti
 def test_backup_policy_runs_verification_and_safely_rotates_verified_snapshots(
     tmp_path,
 ) -> None:
-    app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(
-        tmp_path
-    )
+    app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(tmp_path)
     primary = tmp_path / "policy-primary" / "CloudStorageData"
     backup = tmp_path / "policy-backup" / "CloudStorageData"
     primary.parent.mkdir()
@@ -1065,9 +1083,7 @@ def test_backup_policy_runs_verification_and_safely_rotates_verified_snapshots(
     assert policy.json()["enabled"] is True
     assert policy.json()["next_run_at"] is not None
 
-    first = client.post(
-        f"/v1/admin/backup-policies/{backup_id}/run", headers=manager_headers
-    )
+    first = client.post(f"/v1/admin/backup-policies/{backup_id}/run", headers=manager_headers)
     assert first.status_code == 202
     first_job = client.get(
         f"/v1/admin/backups/{first.json()['id']}", headers=manager_headers
@@ -1081,9 +1097,7 @@ def test_backup_policy_runs_verification_and_safely_rotates_verified_snapshots(
     assert not any((primary / ".staging").glob("verify-*"))
 
     assert client.put(route, headers=device_headers, content=b"second").status_code == 201
-    second = client.post(
-        f"/v1/admin/backup-policies/{backup_id}/run", headers=manager_headers
-    )
+    second = client.post(f"/v1/admin/backup-policies/{backup_id}/run", headers=manager_headers)
     assert second.status_code == 202
     jobs = client.get("/v1/admin/backups", headers=manager_headers).json()
     current = next(item for item in jobs if item["id"] == second.json()["id"])
@@ -1145,9 +1159,7 @@ def test_due_backup_policy_waits_in_read_only_mode_and_survives_restart(tmp_path
         == 200
     )
     with app.state.runtime.database.transaction() as connection:
-        connection.execute(
-            "UPDATE backup_policies SET next_run_at = '2020-01-01T00:00:00+00:00'"
-        )
+        connection.execute("UPDATE backup_policies SET next_run_at = '2020-01-01T00:00:00+00:00'")
     assert (
         client.put(
             "/v1/admin/server-mode",
@@ -1178,9 +1190,7 @@ def test_due_backup_policy_waits_in_read_only_mode_and_survives_restart(tmp_path
 
 
 def test_trial_restore_rejects_corrupted_snapshot_without_touching_live_file(tmp_path) -> None:
-    app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(
-        tmp_path
-    )
+    app, client, manager_headers, device_headers, _, space, _ = provision_trusted_device(tmp_path)
     primary = tmp_path / "verify-primary" / "CloudStorageData"
     backup = tmp_path / "verify-backup" / "CloudStorageData"
     primary.parent.mkdir()
@@ -1431,6 +1441,7 @@ def test_diagnostics_recover_scan_interrupted_by_restart(tmp_path) -> None:
     assert "перезапуском Core" in scan.error
     assert scan.completed_at is not None
 
+
 def test_personal_file_upload_update_download_and_soft_delete(tmp_path) -> None:
     app, client, _, device_headers, _, space, _ = provision_trusted_device(tmp_path)
     url = f"/v1/spaces/{space['id']}/files/Документы/hello.txt"
@@ -1494,11 +1505,14 @@ def test_windows_drive_directory_create_move_and_delete_round_trip(tmp_path) -> 
         json={"logical_path": "Фото/Лето 2026"},
     )
     assert created.status_code == 201
-    assert client.put(
-        f"{base}/files/Фото/Лето%202026/море.txt",
-        headers=device_headers,
-        content=b"sea",
-    ).status_code == 201
+    assert (
+        client.put(
+            f"{base}/files/Фото/Лето%202026/море.txt",
+            headers=device_headers,
+            content=b"sea",
+        ).status_code
+        == 201
+    )
     moved_file = client.post(
         f"{base}/moves",
         headers=device_headers,
@@ -1519,34 +1533,46 @@ def test_windows_drive_directory_create_move_and_delete_round_trip(tmp_path) -> 
         },
     )
     assert moved_directory.status_code == 200
-    assert client.get(
-        f"{base}/files/Архив/Лето%202026/море-final.txt", headers=device_headers
-    ).content == b"sea"
+    assert (
+        client.get(f"{base}/files/Архив/Лето%202026/море-final.txt", headers=device_headers).content
+        == b"sea"
+    )
     root_entries = client.get(f"{base}/entries", headers=device_headers).json()
     assert len(root_entries) == 1
     assert root_entries[0]["name"] == "Архив"
     assert root_entries[0]["type"] == "directory"
 
     assert client.delete(f"{base}/directories/Архив", headers=device_headers).status_code == 409
-    assert client.delete(
-        f"{base}/files/Архив/Лето%202026/море-final.txt", headers=device_headers
-    ).status_code == 200
-    assert client.delete(
-        f"{base}/directories/Архив/Лето%202026", headers=device_headers
-    ).status_code == 200
+    assert (
+        client.delete(
+            f"{base}/files/Архив/Лето%202026/море-final.txt", headers=device_headers
+        ).status_code
+        == 200
+    )
+    assert (
+        client.delete(f"{base}/directories/Архив/Лето%202026", headers=device_headers).status_code
+        == 200
+    )
     assert client.delete(f"{base}/directories/Архив", headers=device_headers).status_code == 200
 
-    assert client.put(
-        f"{base}/files/blocked", headers=device_headers, content=b"file"
-    ).status_code == 201
-    assert client.post(
-        f"{base}/directories",
-        headers=device_headers,
-        json={"logical_path": "blocked/child"},
-    ).status_code == 409
-    assert client.put(
-        f"{base}/files/blocked/child.txt", headers=device_headers, content=b"no"
-    ).status_code == 409
+    assert (
+        client.put(f"{base}/files/blocked", headers=device_headers, content=b"file").status_code
+        == 201
+    )
+    assert (
+        client.post(
+            f"{base}/directories",
+            headers=device_headers,
+            json={"logical_path": "blocked/child"},
+        ).status_code
+        == 409
+    )
+    assert (
+        client.put(
+            f"{base}/files/blocked/child.txt", headers=device_headers, content=b"no"
+        ).status_code
+        == 409
+    )
 
 
 def test_upload_limit_is_enforced_without_partial_file(tmp_path) -> None:

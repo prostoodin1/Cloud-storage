@@ -55,6 +55,7 @@ from cloud_storage.client.integration import (
 )
 from cloud_storage.client.offline import OfflineRecord, OfflineStore
 from cloud_storage.client.settings import (
+    AccountCredentialVault,
     ClientProfile,
     ClientSettingsStore,
     DeviceTokenVault,
@@ -124,6 +125,9 @@ class ClientWindow(QMainWindow):
         self.profile: ClientProfile = self.store.load()
         self.vault = DeviceTokenVault(self.store.data_directory, self.profile.profile_id)
         self.session_vault = RemoteSessionVault(self.store.data_directory, self.profile.profile_id)
+        self.account_vault = AccountCredentialVault(
+            self.store.data_directory, self.profile.profile_id
+        )
         self.knowledge = KnowledgeBase(self.store.data_directory / "knowledge.db")
         self.transfer_store = TransferStore(self.store.data_directory / "transfers.db")
         self.offline_store = OfflineStore(self.store.data_directory / "offline.db")
@@ -300,12 +304,12 @@ class ClientWindow(QMainWindow):
         card_layout.setContentsMargins(18, 18, 18, 18)
         mode_controls = QHBoxLayout()
         self.connection_mode_buttons: list[QPushButton] = []
-        for index, text in enumerate(
-            ("1. Логин и пароль", "2. Ссылка", "3. QR-code")
-        ):
+        for index, text in enumerate(("1. Логин и пароль", "2. Ссылка", "3. QR-code")):
             button = QPushButton(text)
             button.setCheckable(True)
-            button.clicked.connect(lambda _checked=False, page=index: self._set_connection_mode(page))
+            button.clicked.connect(
+                lambda _checked=False, page=index: self._set_connection_mode(page)
+            )
             mode_controls.addWidget(button)
             button.setVisible(False)
             self.connection_mode_buttons.append(button)
@@ -448,31 +452,40 @@ class ClientWindow(QMainWindow):
         self.account_status.setProperty("muted", True)
         form = QFormLayout()
         self.account_username = QLineEdit()
-        self.account_username.setPlaceholderText("Новый логин: 3–32 символа")
+        self.account_username.setPlaceholderText("Логин: 3–32 символа")
         self.account_current_password = QLineEdit()
-        self.account_current_password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.account_current_password.setPlaceholderText("Текущий пароль")
+        self.account_current_password.setReadOnly(True)
+        self.account_current_password.setPlaceholderText("Сохранённый пароль появится здесь")
         self.account_new_password = QLineEdit()
-        self.account_new_password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.account_new_password.setPlaceholderText("Оставьте пустым, чтобы не менять")
+        self.account_new_password.setPlaceholderText("Введите любой новый пароль")
+        self.account_new_password.setEnabled(False)
         self.account_repeat_password = QLineEdit()
-        self.account_repeat_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.account_repeat_password.setPlaceholderText("Повторите новый пароль")
+        self.account_repeat_password.setEnabled(False)
         form.addRow("Логин", self.account_username)
-        form.addRow("Текущий пароль", self.account_current_password)
+        saved_password_row = QHBoxLayout()
+        saved_password_row.addWidget(self.account_current_password, 1)
+        self.account_copy_button = QPushButton("Копировать")
+        self.account_copy_button.clicked.connect(self._copy_account_credentials)
+        saved_password_row.addWidget(self.account_copy_button)
+        form.addRow("Сохранённый пароль", saved_password_row)
         form.addRow("Новый пароль", self.account_new_password)
         form.addRow("Повтор нового пароля", self.account_repeat_password)
         controls = QHBoxLayout()
         self.account_refresh_button = QPushButton("Обновить данные")
         self.account_refresh_button.clicked.connect(self.refresh_account)
+        self.account_new_password_button = QPushButton("Создать новый пароль")
+        self.account_new_password_button.clicked.connect(self._begin_new_password)
         self.account_save_button = QPushButton("Сохранить логин и пароль")
         self.account_save_button.setProperty("primary", True)
         self.account_save_button.clicked.connect(self.save_account_credentials)
         controls.addWidget(self.account_refresh_button)
+        controls.addWidget(self.account_new_password_button)
         controls.addWidget(self.account_save_button)
         controls.addStretch()
         help_text = QLabel(
-            "После смены данных активные браузерные входы завершаются. "
-            "Приложение на этом компьютере останется подключённым."
+            "Требование к паролю: любое непустое значение. Ограничений по сложности нет. "
+            "Логин и пароль сохраняются на этом компьютере в защищённом хранилище Windows."
         )
         help_text.setWordWrap(True)
         help_text.setProperty("muted", True)
@@ -757,9 +770,10 @@ class ClientWindow(QMainWindow):
             code = str(value.get("one_time_code", "")).strip()
             username = str(value.get("username", "")).strip()
             fingerprints = value.get("certificate_fingerprints") or {}
-            fingerprint = str(
-                fingerprints.get(address) if isinstance(fingerprints, dict) else ""
-            ).strip() or str(value.get("certificate_fingerprint", "")).strip()
+            fingerprint = (
+                str(fingerprints.get(address) if isinstance(fingerprints, dict) else "").strip()
+                or str(value.get("certificate_fingerprint", "")).strip()
+            )
             if not address or not code or not username:
                 raise ValueError("в файле не хватает данных входа")
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -798,6 +812,8 @@ class ClientWindow(QMainWindow):
         self.device_name.setText(self.profile.device_name or platform.node() or "Мой компьютер")
         self.username.setText(self.profile.username)
         self.account_username.setText(self.profile.username)
+        saved_account = self.account_vault.load()
+        self.account_current_password.setText(saved_account[1] if saved_account else "")
         self.cache_path.setText(self.profile.download_directory)
         self.drive_enabled_checkbox.blockSignals(True)
         self.drive_enabled_checkbox.setChecked(self.profile.drive_enabled)
@@ -862,6 +878,7 @@ class ClientWindow(QMainWindow):
         self.profile = profile
         self.vault = DeviceTokenVault(self.store.data_directory, profile.profile_id)
         self.session_vault = RemoteSessionVault(self.store.data_directory, profile.profile_id)
+        self.account_vault = AccountCredentialVault(self.store.data_directory, profile.profile_id)
         self.token = self.vault.load()
         self.remote_session = self.session_vault.load()
         self.api = None
@@ -918,6 +935,7 @@ class ClientWindow(QMainWindow):
         self.drive_manager.stop(removed_profile_id)
         self.vault.clear()
         self.session_vault.clear()
+        self.account_vault.clear()
         profile = self.store.remove_profile(self.profile.profile_id)
         self._activate_profile(profile)
         self._refresh_transfer_cards()
@@ -1020,13 +1038,9 @@ class ClientWindow(QMainWindow):
         profile_id = self.profile.profile_id
 
         def login() -> dict[str, Any]:
-            candidates: list[tuple[str, str]] = [
-                (server_url, self.fingerprint.text().strip())
-            ]
+            candidates: list[tuple[str, str]] = [(server_url, self.fingerprint.text().strip())]
             try:
-                candidates.extend(
-                    (item.url, item.fingerprint) for item in discover_servers()
-                )
+                candidates.extend((item.url, item.fingerprint) for item in discover_servers())
             except OSError:
                 pass
             for candidate, candidate_fingerprint in dict.fromkeys(candidates):
@@ -1101,6 +1115,7 @@ class ClientWindow(QMainWindow):
         initial_username = str(pairing.get("initial_username") or "")
         initial_password = str(pairing.get("initial_password") or "")
         if initial_username and initial_password:
+            self.account_vault.store(initial_username, initial_password)
             QApplication.clipboard().setText(
                 f"Логин: {initial_username}\nПароль: {initial_password}"
             )
@@ -1138,6 +1153,8 @@ class ClientWindow(QMainWindow):
             account = result if isinstance(result, dict) else {}
             username = str(account.get("username") or "")
             self.account_username.setText(username)
+            saved = self.account_vault.load()
+            self.account_current_password.setText(saved[1] if saved else "")
             self.profile.username = username
             self.store.save(self.profile)
             role = "Администратор" if account.get("role") == "admin" else "Пользователь"
@@ -1151,11 +1168,14 @@ class ClientWindow(QMainWindow):
 
     def save_account_credentials(self) -> None:
         username = self.account_username.text().strip().casefold()
-        current_password = self.account_current_password.text()
         new_password = self.account_new_password.text()
         repeated = self.account_repeat_password.text()
-        if len(username) < 3 or not current_password:
-            QMessageBox.warning(self, "Проверьте данные", "Введите логин и текущий пароль.")
+        saved = self.account_vault.load()
+        if len(username) < 3:
+            QMessageBox.warning(self, "Проверьте данные", "Введите логин длиной от 3 символов.")
+            return
+        if self.account_new_password.isEnabled() and not new_password:
+            QMessageBox.warning(self, "Проверьте данные", "Новый пароль не может быть пустым.")
             return
         if new_password != repeated:
             QMessageBox.warning(self, "Пароли не совпадают", "Повторите новый пароль без ошибок.")
@@ -1169,9 +1189,14 @@ class ClientWindow(QMainWindow):
             self.profile.username = str(account.get("username") or username)
             self.username.setText(self.profile.username)
             self.store.save(self.profile)
-            self.account_current_password.clear()
+            password_to_store = new_password or (saved[1] if saved else "")
+            if password_to_store:
+                self.account_vault.store(self.profile.username, password_to_store)
+            self.account_current_password.setText(password_to_store)
             self.account_new_password.clear()
             self.account_repeat_password.clear()
+            self.account_new_password.setEnabled(False)
+            self.account_repeat_password.setEnabled(False)
             self.account_status.setText("Логин и пароль сохранены")
             QMessageBox.information(
                 self,
@@ -1190,13 +1215,29 @@ class ClientWindow(QMainWindow):
 
         self._start_task(
             lambda: self._account_api().change_account_credentials(
-                current_password=current_password,
                 username=username,
-                new_password=new_password or None,
+                new_password=(new_password if self.account_new_password.isEnabled() else None),
+                current_password=(saved[1] if saved else None),
             ),
             changed,
             failed,
         )
+
+    def _begin_new_password(self) -> None:
+        self.account_new_password.setEnabled(True)
+        self.account_repeat_password.setEnabled(True)
+        self.account_new_password.clear()
+        self.account_repeat_password.clear()
+        self.account_new_password.setFocus()
+
+    def _copy_account_credentials(self) -> None:
+        username = self.account_username.text().strip()
+        password = self.account_current_password.text()
+        if not username or not password:
+            QMessageBox.information(self, "Данные ещё не сохранены", "Сначала задайте пароль.")
+            return
+        QApplication.clipboard().setText(f"Логин: {username}\nПароль: {password}")
+        self.account_status.setText("Логин и пароль скопированы")
 
     def discover_lan_servers(self) -> None:
         self.discover_button.setEnabled(False)
@@ -1633,6 +1674,7 @@ class ClientWindow(QMainWindow):
         self.vault.clear()
         self.drive_manager.stop(self.profile.profile_id)
         self.session_vault.clear()
+        self.account_vault.clear()
         self.token = None
         self.remote_session = None
         self.api = None
@@ -1836,20 +1878,18 @@ class ClientWindow(QMainWindow):
         if not entry or entry.get("type") != "file" or not self.api:
             return
         logical = self._join_logical(self.current_directory, entry["name"])
-        response = QMessageBox.question(
-            self,
-            "Переместить файл в корзину?",
-            f"{logical}\n\nФайл останется в серверной корзине.",
-        )
-        if response != QMessageBox.StandardButton.Yes:
-            return
+        self.files_status.setText(f"Перемещаем «{entry['name']}» в серверную корзину…")
         self._start_task(
             self.api.delete_file,
-            lambda result: self.refresh_entries(),
+            lambda result: self._file_deleted(entry["name"]),
             lambda message: self._files_error("Файл не удалён", message),
             str(self.space_selector.currentData()),
             logical,
         )
+
+    def _file_deleted(self, name: str) -> None:
+        self.files_status.setText(f"«{name}» перемещён в корзину")
+        self.refresh_entries()
 
     def _transfer_tick(self) -> None:
         self._refresh_transfer_cards()
@@ -2369,7 +2409,9 @@ class ClientWindow(QMainWindow):
 
     def open_windows_drive(self) -> None:
         space_id = str(self.space_selector.currentData() or self.profile.last_space_id)
-        letter = self.profile.drive_letters.get(space_id, self.profile.drive_letter).upper().rstrip(":")
+        letter = (
+            self.profile.drive_letters.get(space_id, self.profile.drive_letter).upper().rstrip(":")
+        )
         if not wait_for_drive(letter, timeout_seconds=1):
             QMessageBox.information(
                 self,
@@ -2532,7 +2574,9 @@ class ClientWindow(QMainWindow):
                 row, 1, QTableWidgetItem(labels.get(record.status, record.status))
             )
             self.offline_table.setItem(row, 2, QTableWidgetItem(format_bytes(record.size_bytes)))
-            self.offline_table.setItem(row, 3, QTableWidgetItem(self._server_name(record.server_url)))
+            self.offline_table.setItem(
+                row, 3, QTableWidgetItem(self._server_name(record.server_url))
+            )
             if record.id == selected_id:
                 selected_row = row
         if selected_row >= 0:

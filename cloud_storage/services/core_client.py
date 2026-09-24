@@ -57,6 +57,10 @@ class CoreClient:
     def summary(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/summary")
 
+    def traffic(self, period: str = "30d") -> dict[str, Any]:
+        safe_period = period if period in {"24h", "7d", "30d", "all"} else "30d"
+        return self._manager_request(f"/v1/admin/traffic?period={safe_period}")
+
     def diagnostics(self) -> dict[str, Any]:
         return self._manager_request("/v1/admin/diagnostics")
 
@@ -112,9 +116,7 @@ class CoreClient:
         )
 
     def delete_sandbox_cell(self, cell_id: str) -> None:
-        self._manager_request(
-            f"/v1/admin/control-center/cells/{cell_id}", method="DELETE"
-        )
+        self._manager_request(f"/v1/admin/control-center/cells/{cell_id}", method="DELETE")
 
     def run_sandbox_cell(self, cell_id: str) -> dict[str, Any]:
         return self._manager_request(
@@ -577,9 +579,7 @@ class CoreClient:
         return self._manager_request("/v1/admin/spaces", method="POST", payload=values)
 
     def update_space(self, space_id: str, values: dict[str, Any]) -> dict[str, Any]:
-        return self._manager_request(
-            f"/v1/admin/spaces/{space_id}", method="PATCH", payload=values
-        )
+        return self._manager_request(f"/v1/admin/spaces/{space_id}", method="PATCH", payload=values)
 
     def set_space_member(
         self, space_id: str, user_id: str, capabilities: dict[str, bool]
@@ -851,7 +851,9 @@ class CoreSupervisor:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return f"не удалось проверить ({exc})"
-        text = " ".join(CoreSupervisor._decode_command_output(result.stdout or result.stderr).split())
+        text = " ".join(
+            CoreSupervisor._decode_command_output(result.stdout or result.stderr).split()
+        )
         return text[-500:] or f"код {result.returncode}"
 
     @staticmethod
@@ -965,15 +967,12 @@ class CoreSupervisor:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             api_stopped = not self.client.try_health(timeout=0.2)
-            service_stopped = (
-                not service_installed or self._windows_service_status_code() == 1
-            )
+            service_stopped = not service_installed or self._windows_service_status_code() == 1
             if api_stopped and service_stopped:
                 return True
             time.sleep(0.15)
-        return (
-            not self.client.try_health(timeout=0.2)
-            and (not service_installed or self._windows_service_status_code() == 1)
+        return not self.client.try_health(timeout=0.2) and (
+            not service_installed or self._windows_service_status_code() == 1
         )
 
     @staticmethod

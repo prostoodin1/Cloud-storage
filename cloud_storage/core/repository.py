@@ -414,13 +414,15 @@ class CoreRepository:
         *,
         user_id: str,
         device_id: str,
-        current_password: str,
+        current_password: str | None,
         username: str,
         new_password: str | None,
     ) -> UserRecord:
         """Let a trusted client change its own login and, optionally, password."""
         user = self.get_user(user_id)
-        if not self.authenticate_user_password(user.username, current_password):
+        if current_password is not None and not self.authenticate_user_password(
+            user.username, current_password
+        ):
             raise PermissionDeniedError("invalid username or password")
         normalized = self.credentials.validate_username(username)
         password_hash = None
@@ -1021,9 +1023,13 @@ class CoreRepository:
         space_id, created = str(uuid.uuid4()), utc_text()
         with self.database.transaction() as connection:
             for root_id in (primary_storage_root_id, fallback_storage_root_id):
-                if root_id and connection.execute(
-                    "SELECT 1 FROM storage_roots WHERE id = ?", (root_id,)
-                ).fetchone() is None:
+                if (
+                    root_id
+                    and connection.execute(
+                        "SELECT 1 FROM storage_roots WHERE id = ?", (root_id,)
+                    ).fetchone()
+                    is None
+                ):
                     raise NotFoundError("storage root not found")
             connection.execute(
                 """
@@ -1072,9 +1078,13 @@ class CoreRepository:
             raise InvalidCredential("primary and fallback storage roots must differ")
         with self.database.transaction() as connection:
             for root_id in (primary_storage_root_id, fallback_storage_root_id):
-                if root_id and connection.execute(
-                    "SELECT 1 FROM storage_roots WHERE id = ?", (root_id,)
-                ).fetchone() is None:
+                if (
+                    root_id
+                    and connection.execute(
+                        "SELECT 1 FROM storage_roots WHERE id = ?", (root_id,)
+                    ).fetchone()
+                    is None
+                ):
                     raise NotFoundError("storage root not found")
             connection.execute(
                 """
@@ -1178,10 +1188,15 @@ class CoreRepository:
                     (utc_text(), space_id),
                 )
             self._audit_tx(
-                connection, actor_type="manager", actor_id=None,
+                connection,
+                actor_type="manager",
+                actor_id=None,
                 action="space.archived" if archived else "space.restored",
-                target_type="space", target_id=space_id,
-                detail="Виртуальный диск убран в архив" if archived else "Виртуальный диск восстановлен",
+                target_type="space",
+                target_id=space_id,
+                detail="Виртуальный диск убран в архив"
+                if archived
+                else "Виртуальный диск восстановлен",
             )
 
     def list_spaces_admin(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
@@ -1193,7 +1208,8 @@ class CoreRepository:
                        enabled, created_at, archived_at
                 FROM spaces WHERE archived_at IS NULL OR ?
                 ORDER BY CASE kind WHEN 'personal' THEN 0 ELSE 1 END, name
-                """, (int(include_archived),)
+                """,
+                (int(include_archived),),
             ).fetchall()
             members = connection.execute(
                 """
@@ -1317,6 +1333,61 @@ class CoreRepository:
             "pending_devices": pending,
             "files": files[0],
             "stored_bytes": files[1],
+        }
+
+    def traffic_summary(self, period: str = "30d") -> dict[str, Any]:
+        """Return completed network traffic, including durable all-time totals."""
+
+        period = period if period in {"24h", "7d", "30d", "all"} else "30d"
+        now = utc_now()
+        cutoffs = {
+            "24h": now - timedelta(hours=24),
+            "7d": now - timedelta(days=7),
+            "30d": now - timedelta(days=30),
+            "all": None,
+        }
+        bucket_expression = {
+            "24h": "substr(completed_at, 1, 13)",
+            "7d": "substr(completed_at, 1, 10)",
+            "30d": "substr(completed_at, 1, 10)",
+            "all": "substr(completed_at, 1, 7)",
+        }[period]
+        cutoff = cutoffs[period]
+        where = "status = 'completed' AND completed_at IS NOT NULL"
+        parameters: tuple[Any, ...] = ()
+        if cutoff is not None:
+            where += " AND completed_at >= ?"
+            parameters = (utc_text(cutoff),)
+        with self.database.connection() as connection:
+            totals = connection.execute(
+                """
+                SELECT
+                    COALESCE(sum(CASE WHEN direction = 'inbound' THEN network_bytes ELSE 0 END), 0),
+                    COALESCE(sum(CASE WHEN direction = 'outbound' THEN network_bytes ELSE 0 END), 0)
+                FROM transfer_jobs WHERE status = 'completed'
+                """
+            ).fetchone()
+            rows = connection.execute(
+                f"""
+                SELECT {bucket_expression} AS bucket,
+                    COALESCE(sum(CASE WHEN direction = 'inbound' THEN network_bytes ELSE 0 END), 0)
+                        AS uploaded_bytes,
+                    COALESCE(sum(CASE WHEN direction = 'outbound' THEN network_bytes ELSE 0 END), 0)
+                        AS downloaded_bytes
+                FROM transfer_jobs
+                WHERE {where}
+                GROUP BY bucket ORDER BY bucket
+                """,
+                parameters,
+            ).fetchall()
+        buckets = [dict(row) for row in rows]
+        return {
+            "period": period,
+            "uploaded_bytes": sum(int(row["uploaded_bytes"]) for row in buckets),
+            "downloaded_bytes": sum(int(row["downloaded_bytes"]) for row in buckets),
+            "all_time_uploaded_bytes": int(totals[0]),
+            "all_time_downloaded_bytes": int(totals[1]),
+            "buckets": buckets,
         }
 
     def recent_audit(self, limit: int = 100) -> list[dict[str, Any]]:

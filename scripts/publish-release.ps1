@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.10.5",
+    [string]$Version = "0.10.6",
     [string]$MobileVersion = "0.9.14",
     [string]$Repository = "prostoodin1/Cloud-storage",
     [string]$OutputDirectory = "",

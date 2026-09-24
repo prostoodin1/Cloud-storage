@@ -151,7 +151,7 @@ class RemoteSessionRequest(BaseModel):
 
 
 class AccountCredentialsRequest(BaseModel):
-    current_password: SecretStr
+    current_password: SecretStr | None = None
     username: str = Field(min_length=3, max_length=32)
     new_password: SecretStr | None = None
 
@@ -578,6 +578,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "seconds_remaining": max(0, expires_at - now),
             "user_id": user_id,
         }
+
     browser = BrowserAccess(runtime)
     bearer = HTTPBearer(auto_error=False)
     pairing_limiter = SlidingWindowLimiter(limit=10, window_seconds=300)
@@ -695,9 +696,13 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         }
         browser_policy = runtime.control.settings()["browser_access"] if external_request else "all"
         zrok_policy_denied = external_request and (
-            (browser_policy == "nobody" and (
-                request.url.path == "/" or request.url.path.startswith(("/web/", "/v1/web/", "/v1/public/shares/"))
-            ))
+            (
+                browser_policy == "nobody"
+                and (
+                    request.url.path == "/"
+                    or request.url.path.startswith(("/web/", "/v1/web/", "/v1/public/shares/"))
+                )
+            )
             or (browser_policy == "approved" and request.url.path.startswith("/v1/public/shares/"))
         )
         if invalid_local_host:
@@ -774,7 +779,9 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                         actor_type=(
                             "cloudflare_client"
                             if cloudflare_request
-                            else "zrok_client" if zrok_request else "remote_client"
+                            else "zrok_client"
+                            if zrok_request
+                            else "remote_client"
                         ),
                         actor_id=None,
                         action=(
@@ -815,7 +822,16 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="device authorization required")
         try:
             device = runtime.repository.authenticate_device(credentials.credentials)
-            if request.state.external_request and device.pairing_method != "dynamic":
+            # A trusted device token is the durable result of pairing.  Requiring a
+            # second, expiring password session for internet routes caused otherwise
+            # healthy clients to drop into repeated login prompts mid-transfer.
+            # Revoking/disabling the device still invalidates this token immediately.
+            # Privileged mobile administration keeps the additional short session.
+            if (
+                request.state.external_request
+                and request.url.path.startswith("/v1/mobile/admin/")
+                and device.pairing_method != "dynamic"
+            ):
                 runtime.repository.credentials.verify_remote_session(
                     remote_session or "",
                     user_id=device.user_id,
@@ -975,9 +991,10 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "automatic_router_changes": False,
         }
         google_client_id = str(
-            runtime.control.settings().get("integrations", {}).get("email", {}).get(
-                "gmail_client_id", ""
-            )
+            runtime.control.settings()
+            .get("integrations", {})
+            .get("email", {})
+            .get("gmail_client_id", "")
         )
         return {
             "status": "ok" if database_status == "ok" else "degraded",
@@ -1004,6 +1021,10 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     @app.get("/v1/admin/summary", tags=["manager"], dependencies=[Depends(require_manager)])
     def admin_summary() -> dict[str, Any]:
         return runtime.repository.summary()
+
+    @app.get("/v1/admin/traffic", tags=["manager"], dependencies=[Depends(require_manager)])
+    def admin_traffic(period: str = "30d") -> dict[str, Any]:
+        return runtime.repository.traffic_summary(period)
 
     @app.get("/v1/admin/tunnels", tags=["manager"], dependencies=[Depends(require_manager)])
     def tunnel_status() -> dict[str, Any]:
@@ -2043,12 +2064,18 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     def list_admin_spaces(include_archived: bool = False) -> list[dict[str, Any]]:
         return runtime.repository.list_spaces_admin(include_archived=include_archived)
 
-    @app.delete("/v1/admin/spaces/{space_id}", tags=["manager"], dependencies=[Depends(require_manager)])
+    @app.delete(
+        "/v1/admin/spaces/{space_id}", tags=["manager"], dependencies=[Depends(require_manager)]
+    )
     def archive_admin_space(space_id: str) -> dict[str, bool]:
         runtime.repository.set_space_archived(space_id, True)
         return {"archived": True, "files_preserved": True}
 
-    @app.post("/v1/admin/spaces/{space_id}/restore", tags=["manager"], dependencies=[Depends(require_manager)])
+    @app.post(
+        "/v1/admin/spaces/{space_id}/restore",
+        tags=["manager"],
+        dependencies=[Depends(require_manager)],
+    )
     def restore_admin_space(space_id: str) -> dict[str, bool]:
         runtime.repository.set_space_archived(space_id, False)
         return {"restored": True}
@@ -2575,7 +2602,11 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         user = runtime.repository.change_own_credentials(
             user_id=device.user_id,
             device_id=device.id,
-            current_password=body.current_password.get_secret_value(),
+            current_password=(
+                body.current_password.get_secret_value()
+                if body.current_password is not None
+                else None
+            ),
             username=body.username,
             new_password=(
                 body.new_password.get_secret_value() if body.new_password is not None else None
@@ -2619,9 +2650,10 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     )
     def google_device_login(body: GoogleDeviceLoginRequest, request: Request) -> dict[str, Any]:
         client_id = str(
-            runtime.control.settings().get("integrations", {}).get("email", {}).get(
-                "gmail_client_id", ""
-            )
+            runtime.control.settings()
+            .get("integrations", {})
+            .get("email", {})
+            .get("gmail_client_id", "")
         )
         if not client_id:
             raise HTTPException(status_code=409, detail="Google-вход не настроен")
@@ -2704,11 +2736,13 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         result = []
         for item in runtime.repository.list_spaces_for_user(device.user_id):
             used = runtime.storage.space_usage(item.id)
-            result.append({
-                **asdict(item),
-                "used_bytes": used,
-                "free_bytes": max(0, item.quota_bytes - used),
-            })
+            result.append(
+                {
+                    **asdict(item),
+                    "used_bytes": used,
+                    "free_bytes": max(0, item.quota_bytes - used),
+                }
+            )
         return result
 
     @app.get("/v1/spaces/{space_id}/entries", tags=["files"])

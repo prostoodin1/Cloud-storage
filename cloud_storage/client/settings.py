@@ -32,7 +32,9 @@ class ClientProfile:
     @classmethod
     def from_dict(cls, value: dict | None) -> ClientProfile:
         value = value or {}
-        allowed = {key: field for key, field in cls.__dataclass_fields__.items() if key != "extra_fields"}
+        allowed = {
+            key: field for key, field in cls.__dataclass_fields__.items() if key != "extra_fields"
+        }
         fields = {
             key: (
                 bool(value.get(key, field.default))
@@ -43,11 +45,15 @@ class ClientProfile:
             if key != "drive_letters"
         }
         raw_letters = value.get("drive_letters") or {}
-        fields["drive_letters"] = {
-            str(space_id): str(letter).strip().upper().rstrip(":")
-            for space_id, letter in raw_letters.items()
-            if isinstance(space_id, str) and isinstance(letter, str)
-        } if isinstance(raw_letters, dict) else {}
+        fields["drive_letters"] = (
+            {
+                str(space_id): str(letter).strip().upper().rstrip(":")
+                for space_id, letter in raw_letters.items()
+                if isinstance(space_id, str) and isinstance(letter, str)
+            }
+            if isinstance(raw_letters, dict)
+            else {}
+        )
         fields["extra_fields"] = {key: item for key, item in value.items() if key not in allowed}
         return cls(**fields)
 
@@ -106,9 +112,7 @@ class ClientSettingsStore:
         if len(remaining) == len(profiles):
             raise KeyError(profile_id)
         if not remaining:
-            remaining = [
-                ClientProfile(download_directory=str(default_download_directory()))
-            ]
+            remaining = [ClientProfile(download_directory=str(default_download_directory()))]
         next_active = (
             active_profile_id
             if active_profile_id != profile_id
@@ -134,9 +138,7 @@ class ClientSettingsStore:
                     if key not in {"schema_version", "active_profile_id", "profiles"}
                 }
                 profiles = [
-                    ClientProfile.from_dict(item)
-                    for item in raw_profiles
-                    if isinstance(item, dict)
+                    ClientProfile.from_dict(item) for item in raw_profiles if isinstance(item, dict)
                 ]
                 profiles = self._normalize_profiles(profiles)
                 active = str(value.get("active_profile_id", ""))
@@ -193,7 +195,10 @@ class ClientSettingsStore:
                 candidate_letter = raw_letter.strip().upper().rstrip(":")
                 if not space_id:
                     continue
-                if not re.fullmatch(r"[D-Z]", candidate_letter) or candidate_letter in drive_letters:
+                if (
+                    not re.fullmatch(r"[D-Z]", candidate_letter)
+                    or candidate_letter in drive_letters
+                ):
                     candidate_letter = _next_drive_letter(drive_letters)
                 normalized_space_letters[space_id] = candidate_letter
                 drive_letters.add(candidate_letter)
@@ -227,9 +232,7 @@ class ClientSettingsStore:
         self.save(profile, make_active=make_active)
         return profile
 
-    def _write_document(
-        self, profiles: list[ClientProfile], active_profile_id: str
-    ) -> None:
+    def _write_document(self, profiles: list[ClientProfile], active_profile_id: str) -> None:
         profiles = self._normalize_profiles(profiles)
         if not any(item.profile_id == active_profile_id for item in profiles):
             active_profile_id = profiles[0].profile_id
@@ -248,7 +251,14 @@ class ClientSettingsStore:
                         "schema_version": 4,
                         "active_profile_id": active_profile_id,
                         "profiles": [
-                            {**item.extra_fields, **{key: value for key, value in asdict(item).items() if key != "extra_fields"}}
+                            {
+                                **item.extra_fields,
+                                **{
+                                    key: value
+                                    for key, value in asdict(item).items()
+                                    if key != "extra_fields"
+                                },
+                            }
                             for item in profiles
                         ],
                     },
@@ -372,6 +382,66 @@ class RemoteSessionVault:
             token = payload.decode("utf-8")
             return token if token.startswith("css_") and len(token) >= 80 else None
         except (OSError, UnicodeDecodeError):
+            return None
+
+    def clear(self) -> None:
+        self.path.unlink(missing_ok=True)
+
+
+class AccountCredentialVault:
+    """Per-server credentials protected by the current Windows account."""
+
+    def __init__(self, data_directory: Path, profile_id: str = "default") -> None:
+        safe_profile_id = re.sub(r"[^a-zA-Z0-9_-]", "", profile_id)[:64]
+        if not safe_profile_id:
+            raise ValueError("invalid client profile id")
+        self.path = data_directory / "credentials" / f"{safe_profile_id}.bin"
+
+    def store(self, username: str, password: str) -> None:
+        username = username.strip().casefold()
+        if not username or not password or len(password) > 4096:
+            raise ValueError("invalid account credentials")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            {"username": username, "password": password},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if os.name == "nt":
+            import win32crypt
+
+            protected = win32crypt.CryptProtectData(
+                payload,
+                "Cloud Storage account credentials",
+                None,
+                None,
+                None,
+                0,
+            )
+            payload = protected[1] if isinstance(protected, tuple) else protected
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_bytes(payload)
+        if os.name != "nt":
+            temporary.chmod(0o600)
+        os.replace(temporary, self.path)
+
+    def load(self) -> tuple[str, str] | None:
+        if not self.path.exists():
+            return None
+        try:
+            payload = self.path.read_bytes()
+            if os.name == "nt":
+                import win32crypt
+
+                unprotected = win32crypt.CryptUnprotectData(payload, None, None, None, 0)
+                payload = unprotected[1] if isinstance(unprotected, tuple) else unprotected
+            value = json.loads(payload.decode("utf-8"))
+            username = str(value.get("username") or "").strip().casefold()
+            password = str(value.get("password") or "")
+            if not username or not password or len(password) > 4096:
+                return None
+            return username, password
+        except (OSError, UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError):
             return None
 
     def clear(self) -> None:

@@ -16,6 +16,7 @@ from cloud_storage.client.api_client import ClientApi, ClientApiError, ClientCon
 from cloud_storage.client.discovery import DiscoveredServer
 from cloud_storage.client.drive import DriveManager
 from cloud_storage.client.settings import (
+    AccountCredentialVault,
     ClientProfile,
     ClientSettingsStore,
     DeviceTokenVault,
@@ -59,6 +60,15 @@ def test_client_profile_and_device_token_are_persisted(tmp_path) -> None:
     assert session.encode() not in session_vault.path.read_bytes() if os.name == "nt" else True
     session_vault.clear()
     assert session_vault.load() is None
+
+    account_vault = AccountCredentialVault(tmp_path)
+    account_vault.store("user.name", "1")
+    assert account_vault.load() == ("user.name", "1")
+    if os.name == "nt":
+        assert b"user.name" not in account_vault.path.read_bytes()
+        assert b'"password":"1"' not in account_vault.path.read_bytes()
+    account_vault.clear()
+    assert account_vault.load() is None
 
 
 def test_space_drive_letter_survives_profile_save_and_restart(tmp_path) -> None:
@@ -105,9 +115,10 @@ def test_multiple_server_profiles_have_independent_tokens(tmp_path) -> None:
     assert store.set_active(first.profile_id).server_name == "First cloud"
     assert DeviceTokenVault(tmp_path, first.profile_id).load() == first_token
     assert DeviceTokenVault(tmp_path, second.profile_id).load() == second_token
-    assert DeviceTokenVault(tmp_path, first.profile_id).path != DeviceTokenVault(
-        tmp_path, second.profile_id
-    ).path
+    assert (
+        DeviceTokenVault(tmp_path, first.profile_id).path
+        != DeviceTokenVault(tmp_path, second.profile_id).path
+    )
 
 
 def test_legacy_single_profile_is_migrated_on_save(tmp_path) -> None:
@@ -213,9 +224,7 @@ def test_client_recovers_changed_lan_address_by_pinned_server_identity(
         app.processEvents()
 
 
-def test_client_distinguishes_invalid_device_token_from_offline(
-    tmp_path, monkeypatch
-) -> None:
+def test_client_distinguishes_invalid_device_token_from_offline(tmp_path, monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     store = ClientSettingsStore(tmp_path)
     profile = store.load()
@@ -329,9 +338,7 @@ def test_client_api_pairing_and_file_round_trip(tmp_path) -> None:
         )
         first_chunk = resumable_payload[:12]
         client.append_resumable_upload(upload["id"], 0, first_chunk)
-        resumed_client = ClientApi(
-            f"http://127.0.0.1:{port}", token=paired["device_token"]
-        )
+        resumed_client = ClientApi(f"http://127.0.0.1:{port}", token=paired["device_token"])
         resumed = resumed_client.resumable_upload_status(upload["id"])
         assert resumed["received_bytes"] == len(first_chunk)
         resumed_client.append_resumable_upload(

@@ -156,6 +156,8 @@ class MainWindow(QMainWindow):
         self.core_supervisor = CoreSupervisor(self.core_client)
         self.core_health: dict | None = None
         self.core_summary: dict | None = None
+        self.core_traffic: dict = {}
+        self.traffic_period = "30d"
         self.core_users: list[dict] = []
         self.core_spaces: list[dict] = []
         self.core_devices: list[dict] = []
@@ -329,9 +331,8 @@ class MainWindow(QMainWindow):
     def _connect_pages(self) -> None:
         self.dashboard_page.setup_requested.connect(self.open_setup)
         self.dashboard_page.remind_later_requested.connect(self.hide_setup_reminder)
-        self.connection_page.panel.generation_requested.connect(
-            self.generate_connection_code
-        )
+        self.dashboard_page.traffic_period_changed.connect(self._set_traffic_period)
+        self.connection_page.panel.generation_requested.connect(self.generate_connection_code)
         self.connection_page.panel.create_user_requested.connect(self.add_user)
         self.connection_page.panel.edit_user_requested.connect(self.edit_user)
         self.connection_page.panel.delete_user_requested.connect(self.delete_user_access)
@@ -358,9 +359,7 @@ class MainWindow(QMainWindow):
         self.control_page.report_requested.connect(self.create_control_report)
         self.control_page.cell_create_requested.connect(self.create_sandbox_cell)
         self.control_page.cell_run_requested.connect(self.run_sandbox_cell)
-        self.control_page.open_container_manager_requested.connect(
-            self.open_container_manager
-        )
+        self.control_page.open_container_manager_requested.connect(self.open_container_manager)
         self.control_page.docker_install_requested.connect(self.install_docker_desktop)
         self.control_page.ssh_enable_requested.connect(self.enable_windows_ssh)
         self.control_page.ssh_disable_requested.connect(self.disable_windows_ssh)
@@ -429,9 +428,7 @@ class MainWindow(QMainWindow):
         self.settings_page.open_updates_requested.connect(lambda: self._show_page(self.update_page))
         self.settings_page.disks_requested.connect(lambda: self._show_page(self.disks_page))
         self.settings_page.system_section_requested.connect(self._open_system_section)
-        self.settings_page.connection_generation_requested.connect(
-            self.generate_connection_code
-        )
+        self.settings_page.connection_generation_requested.connect(self.generate_connection_code)
         self.settings_page.open_logs_requested.connect(self.open_logs_directory)
 
     def _prepare_server_update(self) -> None:
@@ -459,9 +456,7 @@ class MainWindow(QMainWindow):
             install_root = Path(sys.executable).resolve().parent.parent
             candidates = [
                 install_root / "ContainerManager" / "CloudStorageContainerManager.exe",
-                install_root
-                / "CloudStorageContainerManager"
-                / "CloudStorageContainerManager.exe",
+                install_root / "CloudStorageContainerManager" / "CloudStorageContainerManager.exe",
             ]
             executable = next((path for path in candidates if path.exists()), candidates[0])
             command = [str(executable)]
@@ -597,8 +592,13 @@ class MainWindow(QMainWindow):
         if self.core_health is not None:
             try:
                 dynamic_pairing = self.core_client.dynamic_pairing_code(self._pairing_user_id)
-                if self._pairing_user_id and dynamic_pairing.get("user_id") != self._pairing_user_id:
-                    dynamic_pairing = {"error": "Для кода выбранного пользователя обновите ядро сервера."}
+                if (
+                    self._pairing_user_id
+                    and dynamic_pairing.get("user_id") != self._pairing_user_id
+                ):
+                    dynamic_pairing = {
+                        "error": "Для кода выбранного пользователя обновите ядро сервера."
+                    }
             except (CoreApiError, CoreUnavailable):
                 dynamic_pairing = {}
         users_for_ui = [
@@ -615,6 +615,7 @@ class MainWindow(QMainWindow):
             events,
             core_health=self.core_health,
             core_summary=self.core_summary,
+            traffic=self.core_traffic,
         )
         self.dashboard_page.set_setup_banner_visible(
             not self.settings.setup_complete and not self._setup_banner_hidden
@@ -679,12 +680,14 @@ class MainWindow(QMainWindow):
         if transfer_button_index >= 0:
             self._nav_buttons[transfer_button_index].setText(
                 f"⇅   Передачи   • {active_transfer_count}"
-                if active_transfer_count else "⇅   Передачи"
+                if active_transfer_count
+                else "⇅   Передачи"
             )
 
     def _refresh_core_state(self) -> None:
         self.core_health = self.core_client.try_health()
         self.core_summary = None
+        self.core_traffic = {}
         self.core_users = []
         self.core_spaces = []
         self.core_devices = []
@@ -712,6 +715,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.core_summary = self.core_client.summary()
+            self.core_traffic = self.core_client.traffic(self.traffic_period)
             self.core_users = self.core_client.list_users()
             self.core_spaces = self.core_client.list_spaces_admin()
             self.core_devices = self.core_client.list_devices()
@@ -737,6 +741,17 @@ class MainWindow(QMainWindow):
 
     def refresh_core(self) -> None:
         self._refresh_core_state()
+        self._refresh_pages()
+
+    def _set_traffic_period(self, period: str) -> None:
+        self.traffic_period = period if period in {"24h", "7d", "30d", "all"} else "30d"
+        if not self.core_health:
+            return
+        try:
+            self.core_traffic = self.core_client.traffic(self.traffic_period)
+        except (CoreApiError, CoreUnavailable) as exc:
+            self.audit.record("core.traffic.failed", str(exc), "warning")
+            return
         self._refresh_pages()
 
     def _poll_core_health(self) -> None:
@@ -863,9 +878,7 @@ class MainWindow(QMainWindow):
         except (CoreApiError, CoreUnavailable) as exc:
             QMessageBox.warning(self, "Пространство не создано", self._core_error_text(exc))
             return
-        self.audit.record(
-            "core.space.created", f"Создано пространство {created.get('name', '')}"
-        )
+        self.audit.record("core.space.created", f"Создано пространство {created.get('name', '')}")
         self.refresh_core()
 
     def edit_user(self, user_id: str) -> None:
@@ -906,9 +919,7 @@ class MainWindow(QMainWindow):
         except (CoreApiError, CoreUnavailable) as exc:
             QMessageBox.warning(self, "Пространство не сохранено", self._core_error_text(exc))
             return
-        self.audit.record(
-            "core.space.updated", f"Обновлено пространство {space.get('name', '')}"
-        )
+        self.audit.record("core.space.updated", f"Обновлено пространство {space.get('name', '')}")
         self.refresh_core()
 
     def create_invitation(self, user_id: str, display_name: str) -> None:
@@ -950,10 +961,7 @@ class MainWindow(QMainWindow):
                 str(address).rstrip("/")
                 for address in package.get("addresses", [])
                 if str(address).rstrip("/") != endpoint
-                and (
-                    mode == "internet"
-                    or not str(address).startswith("http://127.")
-                )
+                and (mode == "internet" or not str(address).startswith("http://127."))
             ]
             pairing_link = build_pairing_uri(
                 package["one_time_code"],
@@ -975,9 +983,7 @@ class MainWindow(QMainWindow):
         )
         panel.show_code(connection_code, detail, pairing_link)
         if getattr(self.settings_page, "connection_panel", None) is not None:
-            self.settings_page.connection_panel.show_code(
-                connection_code, detail, pairing_link
-            )
+            self.settings_page.connection_panel.show_code(connection_code, detail, pairing_link)
         self.audit.record(
             "core.connection_code.created",
             f"Создан код подключения для {username or user_id} ({scope})",
@@ -1000,8 +1006,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Пароль изменён",
-            "Новый пароль сохранён и скопирован в буфер обмена. "
-            "Активные интернет-сессии отозваны.",
+            "Новый пароль сохранён и скопирован в буфер обмена. Активные интернет-сессии отозваны.",
         )
         QApplication.clipboard().setText(new_password)
         self.refresh_core()
@@ -1050,9 +1055,7 @@ class MainWindow(QMainWindow):
         dialog.cancel_requested.connect(self.cancel_invitation)
         if user_id:
             dialog.email_requested.connect(
-                lambda _invitation_id, recipient: self.send_user_access_email(
-                    user_id, recipient
-                )
+                lambda _invitation_id, recipient: self.send_user_access_email(user_id, recipient)
             )
         dialog.exec()
 
@@ -1121,9 +1124,7 @@ class MainWindow(QMainWindow):
         self.audit.record("core.device.revoked", f"Отключено устройство {device['name']}")
         self.refresh_core()
 
-    def start_migration(
-        self, source_root_id: str, target_root_id: str, space_id: str = ""
-    ) -> None:
+    def start_migration(self, source_root_id: str, target_root_id: str, space_id: str = "") -> None:
         response = QMessageBox.question(
             self,
             "Начать перенос?",
@@ -1906,7 +1907,9 @@ class MainWindow(QMainWindow):
                 "Cloud Storage уже установит и запустит cloudflared сам. В Cloudflare нужно "
                 "только создать Tunnel, добавить публичный hostname и скопировать tunnel token."
             )
-            open_dashboard = setup.addButton("Открыть Cloudflare", QMessageBox.ButtonRole.ActionRole)
+            open_dashboard = setup.addButton(
+                "Открыть Cloudflare", QMessageBox.ButtonRole.ActionRole
+            )
             have_token = setup.addButton("Токен уже есть", QMessageBox.ButtonRole.AcceptRole)
             setup.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
             setup.exec()
@@ -1978,7 +1981,8 @@ class MainWindow(QMainWindow):
             return
         if archived:
             answer = QMessageBox.question(
-                self, "Удалить виртуальный диск из списка?",
+                self,
+                "Удалить виртуальный диск из списка?",
                 f"«{space.get('name', '')}» будет отключён у всех пользователей и перемещён "
                 "в архив. Общие ссылки будут отозваны. Файлы сохранятся на сервере; "
                 "диск можно восстановить кнопкой «Архив». Физический накопитель не удаляется.",
@@ -2417,8 +2421,12 @@ class MainWindow(QMainWindow):
         if response != QMessageBox.StandardButton.Yes:
             return
         self.settings.disk_configurations.pop(disk_id, None)
-        self.settings.known_disk_ids = [item for item in self.settings.known_disk_ids if item != disk_id]
-        self.settings.ignored_disk_ids = [item for item in self.settings.ignored_disk_ids if item != disk_id]
+        self.settings.known_disk_ids = [
+            item for item in self.settings.known_disk_ids if item != disk_id
+        ]
+        self.settings.ignored_disk_ids = [
+            item for item in self.settings.ignored_disk_ids if item != disk_id
+        ]
         if disk_id not in self.settings.removed_disk_ids:
             self.settings.removed_disk_ids.append(disk_id)
         self.store.save(self.settings)

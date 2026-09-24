@@ -132,9 +132,7 @@ def test_remote_listener_is_default_deny_and_pairing_requires_explicit_opt_in(
     app = create_app(config)
     manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
 
-    with TestClient(app) as manager, TestClient(
-        app, base_url="https://127.0.0.1:18767"
-    ) as remote:
+    with TestClient(app) as manager, TestClient(app, base_url="https://127.0.0.1:18767") as remote:
         health = remote.get("/v1/health")
         hidden_admin = remote.get("/v1/admin/summary", headers=manager_headers)
         hidden_unknown = remote.get("/v1/future-route")
@@ -156,8 +154,7 @@ def test_remote_listener_is_default_deny_and_pairing_requires_explicit_opt_in(
     assert hidden_unknown.status_code == 404
     assert pairing.status_code == 403
     assert any(
-        item["action"] == "remote.access.denied"
-        and item["remote_address"] == "testclient"
+        item["action"] == "remote.access.denied" and item["remote_address"] == "testclient"
         for item in audit
     )
 
@@ -173,9 +170,7 @@ def test_remote_pairing_works_when_administrator_enables_it(tmp_path) -> None:
     app = create_app(config)
     manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
 
-    with TestClient(app) as manager, TestClient(
-        app, base_url="https://127.0.0.1:18767"
-    ) as remote:
+    with TestClient(app) as manager, TestClient(app, base_url="https://127.0.0.1:18767") as remote:
         user = manager.post(
             "/v1/admin/users",
             headers=manager_headers,
@@ -200,7 +195,7 @@ def test_remote_pairing_works_when_administrator_enables_it(tmp_path) -> None:
     assert paired.json()["device"]["status"] == "pending"
 
 
-def test_zrok_gateway_requires_account_login_and_hides_manager_api(tmp_path) -> None:
+def test_zrok_gateway_keeps_trusted_client_connected_and_hides_manager_api(tmp_path) -> None:
     config = CoreConfig(
         data_directory=tmp_path,
         zrok_enabled=True,
@@ -211,9 +206,7 @@ def test_zrok_gateway_requires_account_login_and_hides_manager_api(tmp_path) -> 
     app = create_app(config)
     manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
 
-    with TestClient(app) as manager, TestClient(
-        app, base_url="http://127.0.0.1:18768"
-    ) as internet:
+    with TestClient(app) as manager, TestClient(app, base_url="http://127.0.0.1:18768") as internet:
         user = manager.post(
             "/v1/admin/users",
             headers=manager_headers,
@@ -240,26 +233,18 @@ def test_zrok_gateway_requires_account_login_and_hides_manager_api(tmp_path) -> 
         device_headers = {"Authorization": f"Bearer {paired['device_token']}"}
 
         assert internet.get("/v1/admin/summary", headers=manager_headers).status_code == 404
+        assert internet.get("/v1/admin/support-bundle", headers=manager_headers).status_code == 404
         assert (
-            internet.get("/v1/admin/support-bundle", headers=manager_headers).status_code
-            == 404
-        )
-        assert (
-            internet.post(
-                "/v1/admin/tunnels/zrok/restart", headers=manager_headers
-            ).status_code
+            internet.post("/v1/admin/tunnels/zrok/restart", headers=manager_headers).status_code
             == 404
         )
         assert internet.get("/v1/admin/automation", headers=manager_headers).status_code == 404
-        assert (
-            internet.get("/v1/admin/notifications", headers=manager_headers).status_code
-            == 404
-        )
-        assert (
-            internet.get("/v1/admin/integrations", headers=manager_headers).status_code
-            == 404
-        )
-        assert internet.get("/v1/spaces", headers=device_headers).status_code == 403
+        assert internet.get("/v1/admin/notifications", headers=manager_headers).status_code == 404
+        assert internet.get("/v1/admin/integrations", headers=manager_headers).status_code == 404
+        spaces = internet.get("/v1/spaces", headers=device_headers)
+        assert spaces.status_code == 200
+        # Password login remains available for older/mobile clients but is no longer
+        # required for ordinary trusted desktop file access.
         wrong = internet.post(
             "/v1/remote/session",
             headers=device_headers,
@@ -275,13 +260,6 @@ def test_zrok_gateway_requires_account_login_and_hides_manager_api(tmp_path) -> 
             },
         )
         assert login.status_code == 200
-        spaces = internet.get(
-            "/v1/spaces",
-            headers={
-                **device_headers,
-                "X-Cloud-Remote-Session": login.json()["session_token"],
-            },
-        )
 
     assert spaces.status_code == 200
     assert spaces.json()[0]["name"] == "Мои файлы"
@@ -298,9 +276,7 @@ def test_zrok_gateway_allows_password_request_for_a_new_device(tmp_path) -> None
     app = create_app(config)
     manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
 
-    with TestClient(app) as manager, TestClient(
-        app, base_url="http://127.0.0.1:18768"
-    ) as internet:
+    with TestClient(app) as manager, TestClient(app, base_url="http://127.0.0.1:18768") as internet:
         manager.post(
             "/v1/admin/users",
             headers=manager_headers,
@@ -336,9 +312,7 @@ def test_zrok_mobile_admin_control_requires_confirmed_device_and_session(tmp_pat
     )
     app = create_app(config)
     manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
-    with TestClient(app) as manager, TestClient(
-        app, base_url="http://127.0.0.1:18768"
-    ) as internet:
+    with TestClient(app) as manager, TestClient(app, base_url="http://127.0.0.1:18768") as internet:
         manager.post(
             "/v1/admin/users",
             headers=manager_headers,
@@ -436,9 +410,7 @@ def test_zrok2_share_command_uses_public_namespace_and_keeps_v1_compatibility(
 
 
 def test_zrok2_ephemeral_share_uses_loopback_backend(tmp_path) -> None:
-    service = ZrokTunnelService(
-        CoreConfig(data_directory=tmp_path, zrok_enabled=True)
-    )
+    service = ZrokTunnelService(CoreConfig(data_directory=tmp_path, zrok_enabled=True))
 
     assert service._share_command("zrok2") == [
         "zrok2",
@@ -591,10 +563,7 @@ def test_live_zrok_backend_stays_loopback_and_core_survives_missing_binary(tmp_p
             and time.monotonic() < deadline
         ):
             time.sleep(0.02)
-        assert (
-            servers.application.state.runtime.tunnels.status("zrok")["state"]
-            == "not_installed"
-        )
+        assert servers.application.state.runtime.tunnels.status("zrok")["state"] == "not_installed"
     finally:
         servers.request_shutdown(delay=False)
         thread.join(timeout=8)

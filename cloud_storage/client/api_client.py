@@ -115,9 +115,7 @@ class ClientApi:
             timeout=10.0,
         )
 
-    def login_google_device(
-        self, id_token: str, device_name: str, platform: str
-    ) -> dict[str, Any]:
+    def login_google_device(self, id_token: str, device_name: str, platform: str) -> dict[str, Any]:
         return self._json_request(
             "/v1/auth/google-device-login",
             method="POST",
@@ -134,15 +132,14 @@ class ClientApi:
     def change_account_credentials(
         self,
         *,
-        current_password: str,
         username: str,
         new_password: str | None = None,
+        current_password: str | None = None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "current_password": current_password,
-            "username": username,
-        }
-        if new_password:
+        payload: dict[str, Any] = {"username": username}
+        if current_password is not None:
+            payload["current_password"] = current_password
+        if new_password is not None:
             payload["new_password"] = new_password
         return self._json_request("/v1/account", method="PATCH", payload=payload, timeout=15.0)
 
@@ -371,9 +368,7 @@ class ClientApi:
         if payload is not None and body is not None:
             raise ValueError("request cannot contain both JSON payload and raw body")
         request_body = (
-            json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            if payload is not None
-            else body
+            json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else body
         )
         request_headers = self._headers()
         if payload is not None:

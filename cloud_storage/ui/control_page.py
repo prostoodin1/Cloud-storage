@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -440,6 +441,10 @@ class ControlCenterPage(QWidget):
         self.docker_status = QLabel("Проверяем Docker…")
         self.docker_status.setWordWrap(True)
         self.docker_status.setProperty("muted", True)
+        self.docker_progress = QProgressBar()
+        self.docker_progress.setRange(0, 0)
+        self.docker_progress.setTextVisible(False)
+        self.docker_progress.hide()
         docker_docs = QLabel(
             '<a href="https://docs.docker.com/desktop/setup/install/windows-install/">'
             "Условия и официальная инструкция Docker Desktop</a>"
@@ -452,6 +457,7 @@ class ControlCenterPage(QWidget):
         docker_layout.addWidget(docker_title)
         docker_layout.addWidget(docker_text)
         docker_layout.addWidget(self.docker_status)
+        docker_layout.addWidget(self.docker_progress)
         docker_layout.addWidget(docker_docs)
         docker_layout.addWidget(install_docker)
         layout.addWidget(docker_card)
@@ -601,6 +607,7 @@ class ControlCenterPage(QWidget):
                 f"\nУстановка: {docker_job.get('status')} · {docker_job.get('message', '')}"
             )
         self.docker_status.setText(docker_text)
+        self.docker_progress.setVisible(docker_job.get("status") in {"queued", "running"})
         self.install_docker_button.setEnabled(
             bool(docker.get("supported", True))
             and not bool(docker.get("installed"))

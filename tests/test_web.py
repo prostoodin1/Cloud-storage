@@ -74,7 +74,9 @@ def test_generated_account_can_change_login_password_and_enter_web(web):
     body = paired.json()
     username = body["initial_username"]
     password = body["initial_password"]
-    assert username.startswith("user_") and len(password) >= 20
+    assert username.startswith("user_")
+    assert len(password) == 14 and password[4] == password[9] == "-"
+    assert password.replace("-", "").isdigit()
     device = {"Authorization": f"Bearer {body['device_token']}"}
     assert client.get("/v1/account", headers=device).json()["username"] == username
     changed = client.patch(

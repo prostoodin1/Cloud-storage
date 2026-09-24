@@ -5,12 +5,13 @@ import sys
 
 project_root = Path(SPECPATH).parent
 icon = str(project_root / "assets" / "cloud-storage.ico")
+drive_icon = str(project_root / "assets" / "cloud-storage-drive.ico")
 
 client = Analysis(
     [str(project_root / "cloud_storage" / "client" / "main.py")],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[(icon, "assets")],
+    datas=[(icon, "assets"), (drive_icon, "assets")],
     hiddenimports=["win32crypt", "win32com.client"] if sys.platform == "win32" else [],
     hookspath=[],
     hooksconfig={},

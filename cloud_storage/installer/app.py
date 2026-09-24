@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -98,6 +99,10 @@ class InstallerWindow(QWidget):
         self.status = QLabel("Получаем доступные версии…")
         self.status.setWordWrap(True)
         self.status.setProperty("muted", True)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        self.progress.hide()
         self.refresh = QPushButton("Обновить список версий")
         self.refresh.clicked.connect(self.refresh_versions)
         self.install = QPushButton("Скачать и установить")
@@ -110,6 +115,7 @@ class InstallerWindow(QWidget):
         card_layout.addWidget(self.version)
         card_layout.addWidget(self.notes)
         card_layout.addWidget(self.status)
+        card_layout.addWidget(self.progress)
         card_layout.addWidget(self.refresh)
         card_layout.addWidget(self.install)
         layout.addWidget(card)
@@ -132,9 +138,11 @@ class InstallerWindow(QWidget):
         self.refresh.setEnabled(False)
         self.install.setEnabled(False)
         self.status.setText("Проверяем подписанный каталог версий…")
+        self.progress.show()
         self._run(lambda: self.service.list_versions("stable"), self._versions_loaded)
 
     def _versions_loaded(self, value: object) -> None:
+        self.progress.hide()
         self.refresh.setEnabled(True)
         self.versions = list(value) if isinstance(value, list) else []
         self.version.clear()
@@ -174,6 +182,7 @@ class InstallerWindow(QWidget):
         self.status.setText(
             f"Скачиваем {info.version}; затем проверим подпись каталога, размер и SHA-256…"
         )
+        self.progress.show()
         self._run(lambda: (info, self.service.download(info)), self._downloaded)
 
     def _downloaded(self, value: object) -> None:
@@ -190,6 +199,7 @@ class InstallerWindow(QWidget):
         QApplication.quit()
 
     def _failed(self, message: str) -> None:
+        self.progress.hide()
         self.refresh.setEnabled(True)
         self.install.setEnabled(bool(self.versions))
         self.status.setText(message)

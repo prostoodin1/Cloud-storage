@@ -199,7 +199,7 @@ def test_every_settings_section_is_scrollable_and_has_explanatory_text(tmp_path)
         app.processEvents()
         section = page.stack.currentWidget()
         assert isinstance(section, QScrollArea)
-        assert section.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        assert section.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
         text = " ".join(
             label.text().strip() for label in section.findChildren(QLabel) if label.text().strip()
         )

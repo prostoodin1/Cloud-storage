@@ -173,6 +173,7 @@ def test_update_installer_is_reverified_immediately_before_launch(
     service.launch_installer(installer, info)
     assert launched and launched[0][0] == str(installer.resolve())
     assert "/VERYSILENT" in launched[0]
+    assert "/RELAUNCH=1" in launched[0]
 
     installer.write_bytes(b"modified!")
     with pytest.raises(UpdateError, match="изменён"):
@@ -209,6 +210,7 @@ def test_permanent_installer_can_open_interactive_setup(tmp_path, monkeypatch) -
     assert launched
     assert "/VERYSILENT" not in launched[0]
     assert "/SUPPRESSMSGBOXES" not in launched[0]
+    assert "/RELAUNCH=1" not in launched[0]
     assert "/NORESTART" in launched[0]
 
 
@@ -219,6 +221,14 @@ def test_both_setup_packages_offer_an_optional_desktop_shortcut() -> None:
         assert 'Name: "desktopicon"' in source
         assert 'Tasks: desktopicon' in source
         assert 'Flags: unchecked' in source
+
+
+def test_both_setup_packages_relaunch_after_in_app_update() -> None:
+    project = Path(__file__).resolve().parents[1]
+    for name in ("CloudStorageClient.iss", "CloudStorageServer.iss"):
+        source = (project / "packaging" / name).read_text(encoding="utf-8")
+        assert "ShouldRelaunchAfterUpdate" in source
+        assert "'/RELAUNCH=1'" in source
 
 
 def test_server_setup_stops_all_components_before_retrying_protected_backup() -> None:

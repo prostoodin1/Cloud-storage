@@ -416,7 +416,7 @@ class UpdateService:
         log_path = self.download_directory / f"install-{self.product}.log"
         arguments = [str(installer)]
         if not interactive:
-            arguments.extend(("/VERYSILENT", "/SUPPRESSMSGBOXES"))
+            arguments.extend(("/VERYSILENT", "/SUPPRESSMSGBOXES", "/RELAUNCH=1"))
         arguments.extend(("/NORESTART", "/CLOSEAPPLICATIONS", f"/LOG={log_path}"))
         try:
             if os.name == "nt":

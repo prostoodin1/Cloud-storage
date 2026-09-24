@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import secrets
 import sqlite3
 import uuid
 from dataclasses import asdict, dataclass
@@ -729,7 +728,7 @@ class CoreRepository:
         device_id = str(uuid.uuid4())
         space_id = str(uuid.uuid4())
         username = f"user_{device_id.replace('-', '')[:12]}"
-        initial_password = secrets.token_urlsafe(18)
+        initial_password = self.credentials.generate_memorable_password()
         created = utc_text()
         quota_bytes = 100 * 1024**3
         with self.database.transaction() as connection:

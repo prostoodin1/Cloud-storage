@@ -108,7 +108,10 @@ def format_automation_result(value: object) -> str:
 def _scroll_page(content: QWidget) -> QScrollArea:
     area = QScrollArea()
     area.setWidgetResizable(True)
-    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    # Preserve readable controls on smaller/not-maximized windows.  A short
+    # horizontal scroll is preferable to crushed labels and one-letter buttons.
+    content.setMinimumWidth(680)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     area.setWidget(content)
     return area
 
@@ -704,6 +707,7 @@ class SettingsPage(QWidget):
         )
         self.zrok_status_label: QLabel | None = None
         self.zrok_details_label: QLabel | None = None
+        self.zrok_install_progress: QProgressBar | None = None
         self.zrok_restart_button: QPushButton | None = None
         self.zrok_install_button: QPushButton | None = None
         self.zrok_enable_button: QPushButton | None = None
@@ -1020,6 +1024,8 @@ class SettingsPage(QWidget):
             self.zrok_install_button.setText(
                 "Устанавливается cloudflared…" if zrok.get("installing") else "Установить cloudflared"
             )
+        if self.zrok_install_progress is not None:
+            self.zrok_install_progress.setVisible(bool(zrok.get("installing")))
         if self.zrok_enable_button is not None:
             self.zrok_enable_button.setEnabled(
                 online and bool(zrok.get("installed")) and not zrok.get("enabling")
@@ -2264,6 +2270,10 @@ class SettingsPage(QWidget):
             self.zrok_details_label = QLabel()
             self.zrok_details_label.setWordWrap(True)
             self.zrok_details_label.setProperty("muted", True)
+            self.zrok_install_progress = QProgressBar()
+            self.zrok_install_progress.setRange(0, 0)
+            self.zrok_install_progress.setTextVisible(False)
+            self.zrok_install_progress.hide()
             zrok_form = QFormLayout()
             zrok_form.setVerticalSpacing(12)
             zrok_form.addRow("Состояние", self.zrok_status_label)
@@ -2273,13 +2283,14 @@ class SettingsPage(QWidget):
             layout.addWidget(self.zrok_enabled)
             layout.addLayout(zrok_form)
             layout.addWidget(self.zrok_details_label)
+            layout.addWidget(self.zrok_install_progress)
             self.zrok_restart_button = QPushButton("Перезапустить Cloudflare Tunnel")
             self.zrok_restart_button.clicked.connect(
                 lambda: self.tunnel_restart_requested.emit("cloudflare")
             )
             layout.addWidget(self.zrok_restart_button)
             zrok_account_row = QHBoxLayout()
-            self.zrok_install_button = QPushButton("Проверить установку cloudflared")
+            self.zrok_install_button = QPushButton("Установить cloudflared автоматически")
             self.zrok_install_button.clicked.connect(
                 lambda: self.tunnel_install_requested.emit("cloudflare")
             )

@@ -689,10 +689,10 @@ class CreateUserDialog(QDialog):
         self.email = QLineEdit()
         self.email.setPlaceholderText("user@example.com (необязательно)")
         self.password = QLineEdit()
-        self.password.setPlaceholderText("Минимум 10 символов")
+        self.password.setPlaceholderText("Например: 4821-0365-7194")
         password_row = QHBoxLayout()
         password_row.addWidget(self.password, 1)
-        generate_password = QPushButton("Создать надёжный")
+        generate_password = QPushButton("Сгенерировать простой")
         generate_password.clicked.connect(self.generate_password)
         password_row.addWidget(generate_password)
         copy_password = QPushButton("Копировать")
@@ -780,8 +780,8 @@ class CreateUserDialog(QDialog):
         self.generate_password()
 
     def generate_password(self) -> None:
-        alphabet = string.ascii_letters + string.digits + "-_!@"
-        value = "Cs!" + "".join(secrets.choice(alphabet) for _ in range(17))
+        digits = "".join(secrets.choice(string.digits) for _ in range(12))
+        value = f"{digits[:4]}-{digits[4:8]}-{digits[8:]}"
         self.password.setText(value)
         self.password_confirmation.setText(value)
 
@@ -793,13 +793,6 @@ class CreateUserDialog(QDialog):
                 self,
                 "Проверьте данные",
                 "Введите логин длиной минимум 3 символа и отображаемое имя.",
-            )
-            return
-        if len(self.password.text()) < 10:
-            QMessageBox.warning(
-                self,
-                "Слишком короткий пароль",
-                "Пароль должен содержать минимум 10 символов.",
             )
             return
         if self.password.text() != self.password_confirmation.text():
@@ -970,7 +963,7 @@ class PasswordDialog(QDialog):
         form = QFormLayout()
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password.setPlaceholderText("Минимум 10 символов")
+        self.password.setPlaceholderText("Любой пароль")
         self.confirmation = QLineEdit()
         self.confirmation.setEchoMode(QLineEdit.EchoMode.Password)
         self.confirmation.setPlaceholderText("Повторите пароль")
@@ -988,13 +981,6 @@ class PasswordDialog(QDialog):
         layout.addWidget(buttons)
 
     def _validate(self) -> None:
-        if len(self.password.text()) < 10:
-            QMessageBox.warning(
-                self,
-                "Слишком короткий пароль",
-                "Пароль должен содержать минимум 10 символов.",
-            )
-            return
         if self.password.text() != self.confirmation.text():
             QMessageBox.warning(
                 self,

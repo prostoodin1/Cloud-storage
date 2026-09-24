@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Client"
-#define AppVersion "0.10.4"
+#define AppVersion "0.10.5"
 #define AppPublisher "Cloud Storage"
 #define AppExeName "CloudStorageClient.exe"
 #define WinFspMsi "winfsp-2.1.25156.msi"
@@ -57,6 +57,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Run]
 Filename: "{sys}\msiexec.exe"; Parameters: "/i ""{tmp}\{#WinFspMsi}"" /qn /norestart"; StatusMsg: "Устанавливаем компонент диска WinFsp…"; Flags: waituntilterminated; Check: not IsWinFspInstalled
 Filename: "{app}\{#AppExeName}"; Description: "Запустить Cloud Storage Client"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\{#AppExeName}"; Flags: nowait runasoriginaluser; Check: ShouldRelaunchAfterUpdate
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM CloudStorageDrive.exe /T /F"; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "StopCloudStorageDrive"
@@ -66,6 +67,20 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/IM CloudStorageClient.exe /T /F"; 
 function IsWinFspInstalled: Boolean;
 begin
   Result := RegKeyExists(HKLM32, 'SOFTWARE\WinFsp');
+end;
+
+function ShouldRelaunchAfterUpdate: Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  if not WizardSilent then
+    Exit;
+  for Index := 1 to ParamCount do
+    if CompareText(ParamStr(Index), '/RELAUNCH=1') = 0 then begin
+      Result := True;
+      Exit;
+    end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

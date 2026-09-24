@@ -49,10 +49,12 @@ class CredentialService:
 
     @staticmethod
     def validate_password(password: str) -> None:
-        if len(password) < 10 or len(password) > 256:
-            raise InvalidCredential("password must contain between 10 and 256 characters")
-        if password.casefold() in {"password123", "1234567890", "qwerty12345"}:
-            raise InvalidCredential("password is too common")
+        # Password complexity is deliberately left to the owner.  The UI can
+        # generate a memorable value, but short/custom passwords are accepted.
+        # Keep only a generous transport limit to avoid accidental multi-megabyte
+        # values reaching Argon2.
+        if len(password) > 4096:
+            raise InvalidCredential("password is too long")
 
     def hash_password(self, password: str) -> str:
         self.validate_password(password)
@@ -67,6 +69,11 @@ class CredentialService:
     def generate_pairing_code(self) -> str:
         raw = "".join(secrets.choice(_PAIRING_ALPHABET) for _ in range(8))
         return f"{raw[:4]}-{raw[4:]}"
+
+    @staticmethod
+    def generate_memorable_password() -> str:
+        digits = "".join(secrets.choice("0123456789") for _ in range(12))
+        return f"{digits[:4]}-{digits[4:8]}-{digits[8:]}"
 
     @staticmethod
     def normalize_pairing_code(code: str) -> str:

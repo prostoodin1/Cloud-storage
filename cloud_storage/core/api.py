@@ -983,6 +983,12 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "status": "ok" if database_status == "ok" else "degraded",
             "version": __version__,
             "api_version": "v1",
+            "compatibility": {
+                "api_versions": ["v1"],
+                "pairing_formats": ["CS1", "CS2", "CS3", "cloud-access-v1", "cloud-access-v2"],
+                "settings_migrated_in_place": True,
+                "unknown_fields_ignored": True,
+            },
             "server_name": runtime.config.server_name,
             "server_mode": runtime.recovery.server_mode()["mode"],
             "database": database_status,

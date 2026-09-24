@@ -267,6 +267,7 @@ class ClientWindow(QMainWindow):
 
     def _make_connection_page(self) -> QWidget:
         page = QWidget()
+        page.setMinimumWidth(700)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 16, 24)
         layout.setSpacing(18)
@@ -284,8 +285,8 @@ class ClientWindow(QMainWindow):
         self.connection_title = QLabel("Клиент не подключён")
         self.connection_title.setStyleSheet("font-weight: 700; font-size: 18px;")
         self.connection_detail = QLabel(
-            "Получите действующий пять минут код вида CS3.… у администратора и вставьте "
-            "его ниже. После первого подключения этот компьютер будет входить автоматически."
+            "Получите действующий пяти-минутный код CS3 у администратора и вставьте его ниже. "
+            "Коды и файлы входа старых версий тоже распознаются автоматически."
         )
         self.connection_detail.setWordWrap(True)
         self.connection_detail.setProperty("muted", True)
@@ -381,7 +382,7 @@ class ClientWindow(QMainWindow):
         common_form.setVerticalSpacing(12)
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password.setPlaceholderText("Минимум 10 символов")
+        self.password.setPlaceholderText("Пароль")
         self.device_name = QLineEdit(platform.node() or "Мой компьютер")
         self.password_label = QLabel("Пароль")
         common_form.addRow(self.password_label, self.password)
@@ -429,6 +430,7 @@ class ClientWindow(QMainWindow):
 
     def _make_account_page(self) -> QWidget:
         page = QWidget()
+        page.setMinimumWidth(700)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 16, 24)
         layout.setSpacing(18)
@@ -944,11 +946,11 @@ class ClientWindow(QMainWindow):
             return
         code = raw_code
         device_name = self.device_name.text().strip()
-        if not code.upper().startswith("CS3.") or not device_name:
+        if not code or not device_name:
             QMessageBox.warning(
                 self,
                 "Проверьте данные",
-                "Введите действующий динамический код CS3 из Server Manager.",
+                "Введите код подключения из Server Manager и название устройства.",
             )
             return
         self.connect_button.setEnabled(False)
@@ -1003,11 +1005,11 @@ class ClientWindow(QMainWindow):
         username = self.username.text().strip().casefold()
         password = self.password.text()
         device_name = self.device_name.text().strip()
-        if len(username) < 3 or len(password) < 10 or not device_name:
+        if len(username) < 3 or not password or not device_name:
             QMessageBox.warning(
                 self,
                 "Проверьте данные",
-                "Нужны логин, пароль минимум из 10 символов и название устройства.",
+                "Нужны логин, пароль и название устройства.",
             )
             return
         server_url = validate_server_url(self.server_url.text())
@@ -1154,9 +1156,6 @@ class ClientWindow(QMainWindow):
         repeated = self.account_repeat_password.text()
         if len(username) < 3 or not current_password:
             QMessageBox.warning(self, "Проверьте данные", "Введите логин и текущий пароль.")
-            return
-        if new_password and len(new_password) < 10:
-            QMessageBox.warning(self, "Слабый пароль", "Новый пароль должен содержать минимум 10 символов.")
             return
         if new_password != repeated:
             QMessageBox.warning(self, "Пароли не совпадают", "Повторите новый пароль без ошибок.")
@@ -1402,11 +1401,11 @@ class ClientWindow(QMainWindow):
             return
         username = self.username.text().strip().casefold()
         password = self.password.text()
-        if len(username) < 3 or len(password) < 10:
+        if len(username) < 3 or not password:
             QMessageBox.warning(
                 self,
                 "Проверьте данные",
-                "Введите логин из Server Manager и пароль минимум из 10 символов.",
+                "Введите логин из Server Manager и пароль.",
             )
             return
         try:

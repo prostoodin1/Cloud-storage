@@ -1897,6 +1897,34 @@ class MainWindow(QMainWindow):
         if getattr(self, "_tunnel_enable_task", None) is not None:
             return
         cloudflare = provider_id == "cloudflare"
+        public_url = ""
+        if cloudflare:
+            setup = QMessageBox(self)
+            setup.setWindowTitle("Подключить Cloudflare")
+            setup.setIcon(QMessageBox.Icon.Information)
+            setup.setText(
+                "Cloud Storage уже установит и запустит cloudflared сам. В Cloudflare нужно "
+                "только создать Tunnel, добавить публичный hostname и скопировать tunnel token."
+            )
+            open_dashboard = setup.addButton("Открыть Cloudflare", QMessageBox.ButtonRole.ActionRole)
+            have_token = setup.addButton("Токен уже есть", QMessageBox.ButtonRole.AcceptRole)
+            setup.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+            setup.exec()
+            if setup.clickedButton() is open_dashboard:
+                QDesktopServices.openUrl(QUrl("https://one.dash.cloudflare.com/"))
+            elif setup.clickedButton() is not have_token:
+                return
+            public_url, accepted = QInputDialog.getText(
+                self,
+                "Публичный адрес сайта",
+                "Введите HTTPS-адрес hostname, созданного в Cloudflare\n"
+                "(например https://files.example.com):",
+                QLineEdit.EchoMode.Normal,
+                self.settings.cloudflare_public_url,
+            )
+            public_url = public_url.strip().rstrip("/")
+            if not accepted or not public_url:
+                return
         token, accepted = QInputDialog.getText(
             self,
             "Добавить токен Cloudflare" if cloudflare else "Подключить аккаунт zrok2",
@@ -1910,6 +1938,7 @@ class MainWindow(QMainWindow):
         )
         if not accepted or not token.strip():
             return
+        self._pending_cloudflare_public_url = public_url
         task = _TunnelEnableTask(self.core_client, provider_id, token.strip())
         task.signals.completed.connect(self._tunnel_enable_complete)
         self._tunnel_enable_task = task
@@ -1921,13 +1950,19 @@ class MainWindow(QMainWindow):
         if error:
             QMessageBox.warning(self, "Аккаунт не подключён", error)
             return
+        if provider_id == "cloudflare":
+            public_url = str(getattr(self, "_pending_cloudflare_public_url", ""))
+            self.settings_page.zrok_share_name.setText(public_url)
+            self.settings_page.zrok_enabled.setChecked(True)
+            self.settings_page.remote_pairing_enabled.setChecked(True)
+            self.save_general_settings(self.settings_page._settings_payload())
         self.audit.record("core.tunnel.enabled", f"Подключён аккаунт {provider_id}")
         self.refresh_core()
         QMessageBox.information(
             self,
             "Аккаунт подключён",
             (
-                "Cloudflare Tunnel запустится автоматически после включения и сохранения настроек."
+                "Cloudflare Tunnel включён. Core перезапустится и проверит сайт через интернет."
                 if provider_id == "cloudflare"
                 else "Профиль zrok2 сохранён в каталоге Core."
             ),

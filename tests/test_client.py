@@ -78,7 +78,7 @@ def test_space_drive_letter_survives_profile_save_and_restart(tmp_path) -> None:
 def test_virtual_drive_uses_persistent_cloud_storage_icon() -> None:
     icon = DriveManager._icon_path()
     assert icon.is_file()
-    assert icon.name.casefold() in {"cloud-storage.ico", "python.exe"}
+    assert icon.name.casefold() in {"cloud-storage-drive.ico", "python.exe"}
 
 
 def test_multiple_server_profiles_have_independent_tokens(tmp_path) -> None:

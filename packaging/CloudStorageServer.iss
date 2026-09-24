@@ -1,5 +1,5 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.10.4"
+#define AppVersion "0.10.5"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
 #define BuildRoot "..\dist"
@@ -69,6 +69,7 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""C
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Cloud Storage Discovery (Local subnet)"" dir=in action=allow protocol=UDP localport=47777 profile=any remoteip=localsubnet"; Flags: runhidden waituntilterminated; Tasks: privatefirewall
 Filename: "{sys}\sc.exe"; Parameters: "start CloudStorageServerCore"; StatusMsg: "Запускаем серверную службу…"; Flags: runhidden waituntilterminated
 Filename: "{app}\Manager\CloudStorageServerManager.exe"; Description: "Открыть Cloud Storage Server Manager"; Flags: nowait postinstall skipifsilent runascurrentuser shellexec
+Filename: "{app}\Manager\CloudStorageServerManager.exe"; Flags: nowait runascurrentuser shellexec; Check: ShouldRelaunchAfterUpdate
 
 [UninstallRun]
 Filename: "{sys}\net.exe"; Parameters: "stop CloudStorageServerCore /y"; Flags: runhidden waituntilterminated; RunOnceId: "StopCloudStorageServerCore"
@@ -82,6 +83,20 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=
 var
   UpgradeServiceTemporarilyDisabled: Boolean;
   LastBackupError: String;
+
+function ShouldRelaunchAfterUpdate: Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  if not WizardSilent then
+    Exit;
+  for Index := 1 to ParamCount do
+    if CompareText(ParamStr(Index), '/RELAUNCH=1') = 0 then begin
+      Result := True;
+      Exit;
+    end;
+end;
 
 function IsServerServiceInstalled: Boolean;
 var

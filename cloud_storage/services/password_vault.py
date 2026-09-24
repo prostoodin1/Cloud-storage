@@ -17,7 +17,7 @@ class ManagerPasswordVault:
 
     def store(self, user_id: str, password: str) -> None:
         path = self._path(user_id)
-        if not 10 <= len(password) <= 256:
+        if len(password) > 4096:
             raise ValueError("invalid password length")
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = password.encode("utf-8")
@@ -51,7 +51,7 @@ class ManagerPasswordVault:
                 unprotected = win32crypt.CryptUnprotectData(payload, None, None, None, 0)
                 payload = unprotected[1] if isinstance(unprotected, tuple) else unprotected
             password = payload.decode("utf-8")
-            return password if 10 <= len(password) <= 256 else ""
+            return password if len(password) <= 4096 else ""
         except (OSError, UnicodeDecodeError):
             return ""
 

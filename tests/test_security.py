@@ -7,6 +7,15 @@ from cloud_storage.core.security import CredentialService, InvalidCredential
 from cloud_storage.services.security import UnsafeStoragePath, make_managed_file_inert
 
 
+def test_passwords_have_no_complexity_rule_and_generator_is_memorable() -> None:
+    credentials = CredentialService.from_secret("12" * 48)
+    assert credentials.verify_password(credentials.hash_password("1"), "1")
+    generated = credentials.generate_memorable_password()
+    assert len(generated) == 14
+    assert generated[4] == generated[9] == "-"
+    assert generated.replace("-", "").isdigit()
+
+
 def test_managed_upload_becomes_read_only_and_non_executable(tmp_path) -> None:
     storage = tmp_path / "storage"
     storage.mkdir()

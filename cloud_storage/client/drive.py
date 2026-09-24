@@ -176,13 +176,13 @@ class DriveManager:
         if getattr(sys, "frozen", False):
             executable = Path(sys.executable).resolve()
             candidates = [
-                executable.parent / "_internal" / "assets" / "cloud-storage.ico",
-                executable.parent / "assets" / "cloud-storage.ico",
+                executable.parent / "_internal" / "assets" / "cloud-storage-drive.ico",
+                executable.parent / "assets" / "cloud-storage-drive.ico",
                 executable,
             ]
         else:
             candidates = [
-                Path(__file__).resolve().parents[2] / "assets" / "cloud-storage.ico",
+                Path(__file__).resolve().parents[2] / "assets" / "cloud-storage-drive.ico",
                 Path(sys.executable).resolve(),
             ]
         return next((path for path in candidates if path.is_file()), candidates[-1])

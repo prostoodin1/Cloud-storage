@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QTextBrowser,
@@ -80,8 +81,9 @@ class UpdatePage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         content = QWidget()
+        content.setMinimumWidth(700)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(4, 4, 18, 24)
         layout.setSpacing(16)
@@ -139,6 +141,10 @@ class UpdatePage(QWidget):
         )
         self.status_label.setProperty("muted", True)
         self.status_label.setWordWrap(True)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        self.progress.hide()
         version_form = QFormLayout()
         self.version_combo = QComboBox()
         self.version_combo.addItem("Сначала проверьте доступные версии", None)
@@ -165,6 +171,7 @@ class UpdatePage(QWidget):
         buttons.addStretch()
         card_layout.addWidget(self.version_label)
         card_layout.addWidget(self.status_label)
+        card_layout.addWidget(self.progress)
         card_layout.addLayout(version_form)
         card_layout.addLayout(buttons)
         layout.addWidget(card)
@@ -357,6 +364,7 @@ class UpdatePage(QWidget):
 
     def _busy(self, text: str) -> None:
         self.status_label.setText(text)
+        self.progress.show()
         self.check_button.setEnabled(False)
         self.version_combo.setEnabled(False)
         self.download_button.setEnabled(False)
@@ -364,6 +372,7 @@ class UpdatePage(QWidget):
         self.reveal_button.setEnabled(False)
 
     def _idle(self) -> None:
+        self.progress.hide()
         self.check_button.setEnabled(True)
         self.version_combo.setEnabled(bool(self.versions))
         self.reveal_button.setEnabled(self.installer is not None and self.installer.is_file())

@@ -30,9 +30,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Drive build failed.' }
 & (Join-Path $PSScriptRoot 'fetch-packaging-deps.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Packaging dependency download failed.' }
 
-& $compiler "/DBuildRoot=$env:CLOUD_STORAGE_BUILD_DIST" (Join-Path $projectRoot 'packaging\CloudStorageClient.iss')
+& $compiler (Join-Path $projectRoot 'packaging\CloudStorageClient.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Client installer build failed.' }
-& $compiler "/DBuildRoot=$env:CLOUD_STORAGE_BUILD_DIST" (Join-Path $projectRoot 'packaging\CloudStorageServer.iss')
+& $compiler (Join-Path $projectRoot 'packaging\CloudStorageServer.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Server installer build failed.' }
 $outputs = Join-Path $projectRoot 'outputs'
 $bootstrapDist = Join-Path $releaseRoot 'installer-dist'

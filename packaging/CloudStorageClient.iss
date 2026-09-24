@@ -1,10 +1,13 @@
 #define AppName "Cloud Storage Client"
-#define AppVersion "0.10.6"
+#define AppVersion "0.10.7"
 #define AppPublisher "Cloud Storage"
 #define AppExeName "CloudStorageClient.exe"
 #define WinFspMsi "winfsp-2.1.25156.msi"
 #ifndef BuildRoot
-#define BuildRoot "..\dist"
+  #define BuildRoot GetEnv("CLOUD_STORAGE_BUILD_DIST")
+  #if BuildRoot == ""
+    #define BuildRoot "..\dist"
+  #endif
 #endif
 
 [Setup]

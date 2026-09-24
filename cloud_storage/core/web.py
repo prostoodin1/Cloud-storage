@@ -5,6 +5,7 @@ import secrets
 import time
 from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -55,7 +56,17 @@ class BrowserAccess:
         # Do not trust Forwarded/X-Forwarded-* supplied by an arbitrary client.
         scheme = "https" if self.secure(request) else "http"
         expected = f"{scheme}://{request.url.netloc}"
-        if request.headers.get("origin", "").rstrip("/") != expected:
+        allowed_origins = {expected}
+        configured_public_url = ""
+        if bool(getattr(request.state, "cloudflare_request", False)):
+            configured_public_url = self.runtime.config.cloudflare_public_url
+        elif bool(getattr(request.state, "remote_request", False)):
+            configured_public_url = self.runtime.config.remote_public_url
+        if configured_public_url:
+            parsed = urlsplit(configured_public_url)
+            if parsed.scheme == "https" and parsed.netloc and not parsed.username:
+                allowed_origins.add(f"{parsed.scheme}://{parsed.netloc}")
+        if request.headers.get("origin", "").rstrip("/") not in allowed_origins:
             raise HTTPException(403, "Запрос с другого сайта запрещён")
         if request.headers.get("sec-fetch-site", "same-origin") not in {"same-origin", "none"}:
             raise HTTPException(403, "Запрос с другого сайта запрещён")

@@ -298,3 +298,42 @@ def test_external_browser_cookie_secure_and_remote_pairing_switch(tmp_path, monk
             ).status_code
             == 403
         )
+
+
+def test_cloudflare_browser_accepts_only_configured_public_origin(tmp_path):
+    config = CoreConfig(
+        data_directory=tmp_path,
+        lan_enabled=True,
+        cloudflare_enabled=True,
+        cloudflare_port=18769,
+        cloudflare_public_url="https://storage.example.test",
+        remote_pairing_enabled=True,
+    )
+    app = create_app(config)
+    with TestClient(app, base_url="http://127.0.0.1:18769") as tunnel:
+        local = TestClient(app, base_url="http://127.0.0.1:8765")
+        manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
+        code = local.get("/v1/admin/dynamic-pairing-code", headers=manager_headers).json()["code"]
+        paired = tunnel.post(
+            "/v1/pairing/redeem",
+            json={"code": code, "device_name": "ПК", "platform": "Windows"},
+        ).json()
+        valid = tunnel.post(
+            "/v1/web/login",
+            headers={"Origin": "https://storage.example.test"},
+            json={
+                "username": paired["initial_username"],
+                "password": paired["initial_password"],
+            },
+        )
+        assert valid.status_code == 200, valid.text
+        assert "Secure" in valid.headers["set-cookie"]
+        rejected = tunnel.post(
+            "/v1/web/login",
+            headers={"Origin": "https://attacker.invalid"},
+            json={
+                "username": paired["initial_username"],
+                "password": paired["initial_password"],
+            },
+        )
+        assert rejected.status_code == 403

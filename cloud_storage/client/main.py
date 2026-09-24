@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtWidgets import QApplication
 
 from cloud_storage.client.window import ClientWindow
+from cloud_storage.client.windows_session import relaunch_as_desktop_user
 from cloud_storage.single_instance import SingleInstance
 from cloud_storage.ui.theme import apply_theme
 
@@ -19,6 +20,14 @@ def _activate(window: ClientWindow) -> None:
 
 
 def main() -> int:
+    try:
+        if relaunch_as_desktop_user():
+            return 0
+    except OSError:
+        # A normally launched client is already in Explorer's session. If a
+        # locked-down Windows policy blocks linked-token launch, keep the UI
+        # usable instead of preventing the application from starting.
+        pass
     QApplication.setApplicationName("Cloud Storage Desktop Client")
     QApplication.setOrganizationName("Cloud Storage")
     QApplication.setHighDpiScaleFactorRoundingPolicy(

@@ -82,9 +82,10 @@ try {
     $clientManifest = Join-Path $temporary "client-$Version.json"
     $serverManifest = Join-Path $temporary "server-$Version.json"
     $releaseText = (Get-Content -LiteralPath $notes -Raw -Encoding utf8).Trim()
-    & $python (Join-Path $PSScriptRoot "sign-update-manifest.py") --key $key --product client --version $Version --installer $clientInstaller --url "$baseUrl/$([IO.Path]::GetFileName($clientInstaller))" --notes $releaseText --output $clientManifest
+    $updateChannel = if ($isPrerelease) { 'beta' } else { 'stable' }
+    & $python (Join-Path $PSScriptRoot "sign-update-manifest.py") --key $key --product client --version $Version --channel $updateChannel --installer $clientInstaller --url "$baseUrl/$([IO.Path]::GetFileName($clientInstaller))" --notes $releaseText --output $clientManifest
     if ($LASTEXITCODE -ne 0) { throw "Client manifest signing failed" }
-    & $python (Join-Path $PSScriptRoot "sign-update-manifest.py") --key $key --product server --version $Version --installer $serverInstaller --url "$baseUrl/$([IO.Path]::GetFileName($serverInstaller))" --notes $releaseText --output $serverManifest
+    & $python (Join-Path $PSScriptRoot "sign-update-manifest.py") --key $key --product server --version $Version --channel $updateChannel --installer $serverInstaller --url "$baseUrl/$([IO.Path]::GetFileName($serverInstaller))" --notes $releaseText --output $serverManifest
     if ($LASTEXITCODE -ne 0) { throw "Server manifest signing failed" }
 
     $clientCatalog = Join-Path $temporary $catalogNames[0]

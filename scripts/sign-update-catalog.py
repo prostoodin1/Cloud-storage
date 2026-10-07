@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,6 +19,19 @@ def canonical_payload(value: dict[str, object]) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def version_key(value: object) -> tuple[int, int, int, int, int]:
+    match = re.fullmatch(
+        r"(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:(a|b|rc)(\d{1,6}))?",
+        str(value),
+    )
+    if not match:
+        raise ValueError(f"invalid catalog version: {value}")
+    major, minor, patch = (int(match.group(index)) for index in range(1, 4))
+    label = match.group(4) or ""
+    prerelease = int(match.group(5) or 0)
+    return major, minor, patch, {"a": 0, "b": 1, "rc": 2, "": 3}[label], prerelease
 
 
 def main() -> int:
@@ -85,10 +99,7 @@ def main() -> int:
                 "package": manifest.get("package"),
             }
         )
-    versions.sort(
-        key=lambda item: tuple(int(part) for part in str(item.get("version", "0")).split(".")),
-        reverse=True,
-    )
+    versions.sort(key=lambda item: version_key(item.get("version", "0")), reverse=True)
     value: dict[str, object] = {
         "schema_version": 2,
         "product": args.product,

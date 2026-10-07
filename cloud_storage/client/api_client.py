@@ -160,6 +160,24 @@ class ClientApi:
             f"/v1/spaces/{urllib.parse.quote(space_id, safe='')}/entries?{query}"
         )
 
+    def create_share(
+        self,
+        space_id: str,
+        logical_path: str,
+        kind: str = "file",
+        ttl_hours: int = 24 * 7,
+    ) -> dict[str, Any]:
+        return self._json_request(
+            "/v1/shares",
+            method="POST",
+            payload={
+                "space_id": space_id,
+                "logical_path": logical_path,
+                "kind": kind,
+                "ttl_hours": ttl_hours,
+            },
+        )
+
     def create_directory(self, space_id: str, logical_path: str) -> dict[str, Any]:
         return self._json_request(
             f"/v1/spaces/{urllib.parse.quote(space_id, safe='')}/directories",

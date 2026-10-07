@@ -429,6 +429,8 @@ def test_search_and_revocable_public_file_share(tmp_path) -> None:
     assert created.status_code == 201
     share = created.json()
     assert share["token"].startswith("csh_")
+    assert share["page_url_path"].startswith("/s/csh_")
+    assert share["url"].endswith(share["page_url_path"])
     assert client.get(share["url_path"]).json()["name"] == "Summer-report.txt"
     downloaded = client.get(f"{share['url_path']}/download")
     assert downloaded.status_code == 200

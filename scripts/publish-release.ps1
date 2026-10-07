@@ -1,12 +1,13 @@
 param(
-    [string]$Version = "0.10.7",
+    [string]$Version = "0.10.8b1",
     [string]$MobileVersion = "0.9.14",
     [string]$Repository = "prostoodin1/Cloud-storage",
     [string]$OutputDirectory = "",
     [string]$PayloadDirectory = "",
     [string]$PrivateKey = "",
     [string]$NotesFile = "",
-    [switch]$IncludeMobile
+    [switch]$IncludeMobile,
+    [switch]$Prerelease
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +19,7 @@ $payloads = if ($PayloadDirectory) { $PayloadDirectory } else { Join-Path $proje
 $key = if ($PrivateKey) { $PrivateKey } else { Join-Path (Split-Path $projectRoot -Parent) "private\cloud-storage-update-ed25519.pem" }
 $notes = if ($NotesFile) { $NotesFile } else { Join-Path $projectRoot "RELEASE_NOTES_$Version.md" }
 $tag = "v$Version"
+$isPrerelease = $Prerelease -or $Version -match '(?i)(a|b|rc|alpha|beta)'
 $targetCommit = (& git -C $projectRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $targetCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Could not resolve the release source commit"
@@ -98,7 +100,9 @@ try {
     & $python (Join-Path $PSScriptRoot "sign-update-catalog.py") --key $key --product server --existing-catalog $oldServerCopy --manifest $serverManifest --output $serverCatalog
     if ($LASTEXITCODE -ne 0) { throw "Server catalog signing failed" }
 
-    & gh release create $tag --repo $Repository --target $targetCommit --title "Cloud Storage $Version" --notes-file $notes --draft
+    $releaseCreateArgs = @('release', 'create', $tag, '--repo', $Repository, '--target', $targetCommit, '--title', "Cloud Storage $Version", '--notes-file', $notes, '--draft')
+    if ($isPrerelease) { $releaseCreateArgs += '--prerelease' }
+    & gh @releaseCreateArgs
     if ($LASTEXITCODE -ne 0) { throw "Draft release could not be created" }
     $assets = @($expectedUserFiles | ForEach-Object { Join-Path $output $_ }) + `
         @($payloadNames | ForEach-Object { Join-Path $payloads $_ }) + `
@@ -125,7 +129,9 @@ try {
         if ($localSize -ne $remoteSize) { throw "Uploaded payload size mismatch for $file" }
     }
 
-    & gh release edit $tag --repo $Repository --draft=false --latest
+    $releaseEditArgs = @('release', 'edit', $tag, '--repo', $Repository, '--draft=false')
+    if ($isPrerelease) { $releaseEditArgs += '--prerelease' } else { $releaseEditArgs += '--latest' }
+    & gh @releaseEditArgs
     if ($LASTEXITCODE -ne 0) { throw "Draft is complete but could not be published" }
     Write-Host "Published $tag atomically with $expectedUserFileCount user files, two setup payloads and two signed catalogs."
 }

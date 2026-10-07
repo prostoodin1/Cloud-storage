@@ -1,4 +1,5 @@
 """Same-origin browser access; no device credential is exposed to JavaScript."""
+
 from __future__ import annotations
 
 import secrets
@@ -29,6 +30,13 @@ class BrowserLoginRequest(BaseModel):
     remember: bool = False
 
 
+class BrowserShareRequest(BaseModel):
+    space_id: str = Field(min_length=1, max_length=100)
+    logical_path: str = Field(min_length=1, max_length=1024)
+    kind: str = Field(pattern="^(file|directory)$")
+    ttl_hours: int = Field(default=168, ge=1, le=720)
+
+
 class BrowserAccess:
     def __init__(self, runtime):
         self.runtime = runtime
@@ -48,7 +56,10 @@ class BrowserAccess:
         if self.runtime.control.settings()["browser_access"] == "nobody":
             raise HTTPException(403, "Вход через браузер отключён администратором")
         if not self.secure(request) and request.url.hostname not in {
-            "127.0.0.1", "localhost", "::1", "testserver"
+            "127.0.0.1",
+            "localhost",
+            "::1",
+            "testserver",
         }:
             raise HTTPException(403, "Для браузерного входа требуется HTTPS")
 
@@ -108,7 +119,9 @@ class BrowserAccess:
         token = secrets.token_urlsafe(48)
         old = request.cookies.get(COOKIE, "")
         with self.runtime.database.transaction() as connection:
-            connection.execute("DELETE FROM web_sessions WHERE expires_at <= ?", (int(time.time()),))
+            connection.execute(
+                "DELETE FROM web_sessions WHERE expires_at <= ?", (int(time.time()),)
+            )
             if old:
                 connection.execute(
                     "DELETE FROM web_sessions WHERE token_hash = ?", (self.fingerprint(old),)
@@ -139,16 +152,42 @@ class BrowserAccess:
         def index():
             return FileResponse(ASSETS / "index.html", media_type="text/html")
 
+        @app.get("/s/{token}", include_in_schema=False)
+        def public_share_page(token: str):
+            if not token.startswith("csh_") or len(token) > 256:
+                raise HTTPException(404, "not found")
+            return FileResponse(ASSETS / "share.html", media_type="text/html")
+
         @app.get("/web/assets/{name}", include_in_schema=False)
         def asset(name: str):
             allowed = {
                 "app.js": "text/javascript",
                 "app.css": "text/css",
                 "account.css": "text/css",
+                "share.js": "text/javascript",
+                "share.css": "text/css",
             }
             if name not in allowed:
                 raise HTTPException(404, "not found")
             return FileResponse(ASSETS / name, media_type=allowed[name])
+
+        @app.post("/v1/web/shares", tags=["browser"])
+        def create_web_share(body: BrowserShareRequest, request: Request):
+            device = self.authenticate(request)
+            share = self.runtime.storage.create_public_share(
+                body.space_id,
+                device.user_id,
+                body.logical_path,
+                body.kind,
+                ttl_hours=body.ttl_hours,
+            )
+            path = f"/s/{share.token}"
+            return {
+                **asdict(share),
+                "url_path": f"/v1/public/shares/{share.token}",
+                "page_url_path": path,
+                "url": str(request.base_url).rstrip("/") + path,
+            }
 
         @app.post("/v1/web/pair", tags=["browser"])
         def pair(body: BrowserPairRequest, request: Request):
@@ -203,5 +242,7 @@ class BrowserAccess:
                     (self.fingerprint(request.cookies.get(COOKIE, "")),),
                 )
             response = JSONResponse({"logged_out": True})
-            response.delete_cookie(COOKIE, httponly=True, secure=self.secure(request), samesite="strict")
+            response.delete_cookie(
+                COOKIE, httponly=True, secure=self.secure(request), samesite="strict"
+            )
             return response

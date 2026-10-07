@@ -1,5 +1,6 @@
 #define AppName "Cloud Storage Client"
-#define AppVersion "0.10.7"
+#define AppVersion "0.10.8b1"
+#define AppFileVersion "0.10.8.1"
 #define AppPublisher "Cloud Storage"
 #define AppExeName "CloudStorageClient.exe"
 #define WinFspMsi "winfsp-2.1.25156.msi"
@@ -15,7 +16,7 @@ AppId={{B7B6A410-25AF-47DC-96D6-B40F85E762A8}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#AppFileVersion}
 DefaultDirName={autopf}\Cloud Storage\Client
 DefaultGroupName=Cloud Storage
 DisableProgramGroupPage=yes

@@ -613,9 +613,12 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "/v1/web/session",
             "/v1/web/logout",
             "/v1/web/login",
+            "/v1/web/shares",
             "/web/assets/app.css",
             "/web/assets/account.css",
             "/web/assets/app.js",
+            "/web/assets/share.js",
+            "/web/assets/share.css",
             "/v1/auth/device-login",
             "/v1/auth/google-device-login",
             "/v1/pairing/redeem",
@@ -648,6 +651,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             r"/v1/public/shares/[^/]+",
             r"/v1/public/shares/[^/]+/download",
             r"/v1/public/shares/[^/]+/files/.+",
+            r"/s/[^/]+",
             r"/v1/mobile/admin/devices/[^/]+/(approve|revoke)",
             r"/v1/mobile/admin/backups/[^/]+/run",
             r"/v1/mobile/admin/storage/[^/]+/write",
@@ -700,10 +704,15 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
                 browser_policy == "nobody"
                 and (
                     request.url.path == "/"
-                    or request.url.path.startswith(("/web/", "/v1/web/", "/v1/public/shares/"))
+                    or request.url.path.startswith(
+                        ("/web/", "/v1/web/", "/v1/public/shares/", "/s/")
+                    )
                 )
             )
-            or (browser_policy == "approved" and request.url.path.startswith("/v1/public/shares/"))
+            or (
+                browser_policy == "approved"
+                and request.url.path.startswith(("/v1/public/shares/", "/s/"))
+            )
         )
         if invalid_local_host:
             response = JSONResponse(status_code=400, content={"detail": "invalid host header"})
@@ -764,10 +773,15 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
-        if request.url.path == "/" or request.url.path.startswith("/web/assets/"):
+        if (
+            request.url.path == "/"
+            or request.url.path.startswith("/web/assets/")
+            or request.url.path.startswith("/s/")
+        ):
             response.headers["Content-Security-Policy"] = (
                 "default-src 'none'; script-src 'self'; style-src 'self'; "
-                "connect-src 'self'; img-src 'self' blob:; base-uri 'none'; "
+                "connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; "
+                "frame-src 'self'; base-uri 'none'; "
                 "form-action 'self'; frame-ancestors 'none'"
             )
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -2785,6 +2799,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     @app.post("/v1/shares", tags=["files"], status_code=status.HTTP_201_CREATED)
     def create_share(
         body: CreateShareRequest,
+        request: Request,
         device: DeviceRecord = Depends(require_device),  # noqa: B008
     ) -> dict[str, Any]:
         share = runtime.storage.create_public_share(
@@ -2794,9 +2809,23 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             body.kind,
             ttl_hours=body.ttl_hours,
         )
+        page_path = f"/s/{quote(share.token)}"
+        public_base = ""
+        for provider in ("cloudflare", "zrok"):
+            tunnel = runtime.tunnels.status(provider)
+            candidate = str(tunnel.get("public_url") or "").rstrip("/")
+            if tunnel.get("state") == "online" and candidate.startswith("https://"):
+                public_base = candidate
+                break
+        if not public_base:
+            public_base = runtime.config.remote_public_url.rstrip("/")
+        if not public_base:
+            public_base = str(request.base_url).rstrip("/")
         return {
             **asdict(share),
             "url_path": f"/v1/public/shares/{quote(share.token)}",
+            "page_url_path": page_path,
+            "url": public_base + page_path,
         }
 
     @app.delete("/v1/shares/{share_id}", tags=["files"])

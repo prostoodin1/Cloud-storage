@@ -58,6 +58,7 @@ async function refresh() {
     size.textContent=entry.type==="directory"?"—":bytes(entry.size_bytes);
     date.textContent=entry.modified_at?new Date(entry.modified_at).toLocaleString():"—";
     if(entry.type==="file")actions.append(button("Скачать",()=>download(entry)));
+    if(entry.type==="file"&&current.can_share)actions.append(button("↗ Поделиться",()=>share(entry)));
     if(current.can_modify)actions.append(button("Переименовать",()=>rename(entry)));
     if(current.can_delete)actions.append(button("Удалить",()=>remove(entry)));
     row.append(name,size,date,actions);$("entries").append(row);
@@ -65,6 +66,7 @@ async function refresh() {
   $("empty").textContent="В этой папке пока нет файлов";$("empty").hidden=entries.length>0;status(`Подключено · Объектов: ${entries.length}`);
 }
 function download(entry) {const a=document.createElement("a");a.href=`${base()}/files/${encoded(joined(entry.name))}`;a.download=entry.name;document.body.append(a);a.click();a.remove();status(`Скачивание: ${entry.name}`);}
+async function share(entry) {const response=await json("/v1/web/shares","POST",{space_id:current.id,logical_path:joined(entry.name),kind:entry.type,ttl_hours:168});const data=await response.json();const link=data.url||`${location.origin}${data.page_url_path}`;await navigator.clipboard.writeText(link);status("Ссылка скопирована. Она показывает только выбранный объект и действует 7 дней.");}
 async function rename(entry) {const name=await ask("Новое имя",entry.name);if(name===null||name===entry.name)return;await json(`${base()}/moves`,"POST",{source_path:joined(entry.name),destination_path:joined(validName(name)),kind:entry.type});await refresh();}
 async function remove(entry) {if(!await ask(`Удалить «${entry.name}»?`,"",true))return;await api(`${base()}/${entry.type==="directory"?"directories":"files"}/${encoded(joined(entry.name))}`,{method:"DELETE"});await refresh();}
 function closePreview(){if(previewURL){URL.revokeObjectURL(previewURL);previewURL=null;}$("preview-content").replaceChildren();$("preview").close();}

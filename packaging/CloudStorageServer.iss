@@ -1,5 +1,6 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.10.7"
+#define AppVersion "0.10.8b1"
+#define AppFileVersion "0.10.8.1"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
   #define BuildRoot GetEnv("CLOUD_STORAGE_BUILD_DIST")
@@ -13,7 +14,7 @@ AppId={{C6C699F4-2F76-4D14-B7A4-A0B120362E1E}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#AppFileVersion}
 DefaultDirName={autopf}\Cloud Storage\Server
 DefaultGroupName=Cloud Storage
 DisableProgramGroupPage=yes

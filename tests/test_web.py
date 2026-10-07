@@ -39,7 +39,7 @@ def test_web_assets_and_anonymous_api(web):
     assert "Введите код подключения" in root.text
     assert "script-src 'self'" in root.headers["content-security-policy"]
     assert "Логин" in root.text and "Это доверенное устройство" in root.text
-    for file in ["app.js", "app.css", "account.css"]:
+    for file in ["app.js", "app.css", "account.css", "share.js", "share.css"]:
         assert client.get("/web/assets/" + file).status_code == 200
     assert client.get("/web/assets/secret").status_code == 404
     assert client.get("/v1/spaces").status_code == 401
@@ -86,6 +86,39 @@ def test_browser_files_csrf_logout_and_manager_boundary(web):
     assert client.post("/v1/web/logout", headers=headers).status_code == 200
     client.cookies.set(COOKIE, token)
     assert client.get("/v1/spaces").status_code == 401
+
+
+def test_browser_creates_isolated_public_file_page(web):
+    _, client, code = web
+    _, headers = pair(client, code)
+    space = client.get("/v1/spaces").json()[0]["id"]
+    base = f"/v1/spaces/{space}"
+    assert (
+        client.put(
+            base + "/files/private.txt", content=b"only this file", headers=headers
+        ).status_code
+        == 201
+    )
+    assert (
+        client.put(
+            base + "/files/hidden.txt", content=b"must stay hidden", headers=headers
+        ).status_code
+        == 201
+    )
+    created = client.post(
+        "/v1/web/shares",
+        headers=headers,
+        json={"space_id": space, "logical_path": "private.txt", "kind": "file", "ttl_hours": 168},
+    )
+    assert created.status_code == 200, created.text
+    share = created.json()
+    assert share["page_url_path"].startswith("/s/csh_")
+    page = client.get(share["page_url_path"])
+    assert page.status_code == 200
+    assert "только этот объект" in page.text
+    overview = client.get(share["url_path"])
+    assert overview.json()["name"] == "private.txt"
+    assert "hidden.txt" not in page.text
 
 
 def test_generated_account_can_change_login_password_and_enter_web(web):

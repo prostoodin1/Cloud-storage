@@ -25,7 +25,7 @@ class DriveManager:
     def __init__(self, data_directory: Path) -> None:
         self.data_directory = data_directory
         self._processes: dict[
-            tuple[str, str], tuple[tuple[str, str, str, str], subprocess.Popen[bytes]]
+            tuple[str, str], tuple[tuple[str, str, str, str, int], subprocess.Popen[bytes]]
         ] = {}
 
     def reconcile(self, profiles: list[ClientProfile]) -> dict[str, DriveStatus]:
@@ -58,6 +58,7 @@ class DriveManager:
                 profile.server_url.rstrip("/"),
                 profile.certificate_fingerprint.casefold(),
                 space_id,
+                profile.cache_limit_gib,
             )
             if running and running[0] == signature and running[1].poll() is None:
                 continue
@@ -125,7 +126,7 @@ class DriveManager:
         profile: ClientProfile,
         space_id: str,
         letter: str,
-        signature: tuple[str, str, str, str],
+        signature: tuple[str, str, str, str, int],
     ) -> None:
         helper = self._helper_path()
         if helper is None:
@@ -141,6 +142,8 @@ class DriveManager:
             space_id,
             "--data-dir",
             str(self.data_directory),
+            "--cache-limit-gib",
+            str(profile.cache_limit_gib),
             "--parent-pid",
             str(os.getpid()),
             "--icon",

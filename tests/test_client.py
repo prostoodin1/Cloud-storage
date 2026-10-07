@@ -135,7 +135,8 @@ def test_legacy_single_profile_is_migrated_on_save(tmp_path) -> None:
     store.save(migrated)
 
     payload = json.loads(store.path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
+    assert payload["profiles"][0]["cache_limit_gib"] == 10
     assert payload["active_profile_id"] == "default"
     assert len(payload["profiles"]) == 1
 

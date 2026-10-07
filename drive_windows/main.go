@@ -22,6 +22,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -358,6 +359,7 @@ type cloudFileSystem struct {
 	spaceID     string
 	cacheRoot   string
 	cacheHashes map[string]string
+	cacheLimit  int64
 	mu          sync.Mutex
 	syncError   string
 	volume      space
@@ -379,8 +381,12 @@ func (c *cloudFileSystem) refreshVolume() error {
 	return os.ErrPermission
 }
 
-func newCloudFileSystem(api *apiClient, spaceID, cacheRoot string) *cloudFileSystem {
-	return &cloudFileSystem{api: api, spaceID: spaceID, cacheRoot: cacheRoot, cacheHashes: map[string]string{}}
+func newCloudFileSystem(api *apiClient, spaceID, cacheRoot string, limits ...int64) *cloudFileSystem {
+	limit := int64(10 * 1024 * 1024 * 1024)
+	if len(limits) > 0 && limits[0] > 0 {
+		limit = limits[0]
+	}
+	return &cloudFileSystem{api: api, spaceID: spaceID, cacheRoot: cacheRoot, cacheHashes: map[string]string{}, cacheLimit: limit}
 }
 
 // WinFSP locks canonicalize names. Resolve every component against the server,
@@ -578,6 +584,9 @@ func (c *cloudFileSystem) ensureCached(logical string, info *remoteInfo, local s
 	if stat, err := os.Stat(local); err == nil && stat.Size() == info.size && hash == info.sha256 {
 		return nil
 	}
+	if err := c.ensureCacheCapacity(local, info.size); err != nil {
+		return err
+	}
 	if err := c.api.download(c.spaceID, logical, info.sha256, local); err != nil {
 		return err
 	}
@@ -589,14 +598,68 @@ func (c *cloudFileSystem) ensureCached(logical string, info *remoteInfo, local s
 
 func (c *cloudFileSystem) upload(logical, local string) error {
 	if err := c.api.upload(c.spaceID, logical, local); err != nil {
+		_ = os.WriteFile(local+".cloud-pending", []byte(time.Now().UTC().Format(time.RFC3339)), 0o600)
 		c.mu.Lock()
 		c.syncError = "Не удалось сохранить файл на сервере. Локальная копия осталась в кэше."
 		c.mu.Unlock()
 		return err
 	}
+	_ = os.Remove(local + ".cloud-pending")
 	c.mu.Lock()
 	delete(c.cacheHashes, strings.ToLower(logical))
 	c.mu.Unlock()
+	return nil
+}
+
+type cacheCandidate struct {
+	path     string
+	size     int64
+	modified time.Time
+}
+
+// ensureCacheCapacity keeps the on-disk staging area bounded. Files whose
+// upload failed have a .cloud-pending marker and are never evicted.
+func (c *cloudFileSystem) ensureCacheCapacity(target string, desiredTargetSize int64) error {
+	if desiredTargetSize < 0 || desiredTargetSize > c.cacheLimit {
+		return syscall.ENOSPC
+	}
+	target = filepath.Clean(target)
+	var used int64
+	var candidates []cacheCandidate
+	err := filepath.WalkDir(c.cacheRoot, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		clean := filepath.Clean(current)
+		if clean == target || strings.HasSuffix(clean, ".part") || strings.HasSuffix(clean, ".cloud-pending") {
+			return nil
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		used += info.Size()
+		if _, pendingErr := os.Stat(clean + ".cloud-pending"); pendingErr == nil {
+			return nil
+		}
+		candidates = append(candidates, cacheCandidate{clean, info.Size(), info.ModTime()})
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].modified.Before(candidates[j].modified) })
+	for _, item := range candidates {
+		if used+desiredTargetSize <= c.cacheLimit {
+			break
+		}
+		if os.Remove(item.path) == nil {
+			used -= item.size
+		}
+	}
+	if used+desiredTargetSize > c.cacheLimit {
+		return syscall.ENOSPC
+	}
 	return nil
 }
 
@@ -612,6 +675,17 @@ type trackedFile struct {
 func (t *trackedFile) Write(payload []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	position, err := t.File.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	info, err := t.File.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if err := t.owner.ensureCacheCapacity(t.File.Name(), max(info.Size(), position+int64(len(payload)))); err != nil {
+		return 0, err
+	}
 	t.dirty = true
 	return t.File.Write(payload)
 }
@@ -619,6 +693,13 @@ func (t *trackedFile) Write(payload []byte) (int, error) {
 func (t *trackedFile) WriteAt(payload []byte, offset int64) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	info, err := t.File.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if err := t.owner.ensureCacheCapacity(t.File.Name(), max(info.Size(), offset+int64(len(payload)))); err != nil {
+		return 0, err
+	}
 	t.dirty = true
 	return t.File.WriteAt(payload, offset)
 }
@@ -626,6 +707,9 @@ func (t *trackedFile) WriteAt(payload []byte, offset int64) (int, error) {
 func (t *trackedFile) Truncate(size int64) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if err := t.owner.ensureCacheCapacity(t.File.Name(), size); err != nil {
+		return err
+	}
 	t.dirty = true
 	return t.File.Truncate(size)
 }
@@ -636,6 +720,13 @@ func (t *trackedFile) Append(payload []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, err := t.File.Seek(0, io.SeekEnd); err != nil {
+		return 0, err
+	}
+	info, err := t.File.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if err := t.owner.ensureCacheCapacity(t.File.Name(), info.Size()+int64(len(payload))); err != nil {
 		return 0, err
 	}
 	t.dirty = true
@@ -914,6 +1005,7 @@ func run() error {
 	dataDir := flag.String("data-dir", "", "Cloud Storage Client data directory")
 	parentPID := flag.Int("parent-pid", 0, "parent client process identifier")
 	iconPath := flag.String("icon", "", "Cloud Storage icon shown by Windows Explorer")
+	cacheLimitGiB := flag.Int("cache-limit-gib", 10, "local staging cache size in GiB (10-30)")
 	smokeTest := flag.Bool("smoke-test", false, "validate the executable and exit")
 	flag.Parse()
 	if *smokeTest {
@@ -924,6 +1016,9 @@ func run() error {
 	}
 	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`).MatchString(*spaceFlag) {
 		return errors.New("invalid space identifier")
+	}
+	if *cacheLimitGiB < 10 || *cacheLimitGiB > 30 {
+		return errors.New("cache limit must be between 10 and 30 GiB")
 	}
 	mutexName, err := windows.UTF16PtrFromString(driveMutexPrefix + *profileID + "-" + *spaceFlag)
 	if err != nil {
@@ -982,7 +1077,7 @@ func run() error {
 	if err := os.MkdirAll(cacheRoot, 0o700); err != nil {
 		return err
 	}
-	cloud := newCloudFileSystem(api, spaceID, cacheRoot)
+	cloud := newCloudFileSystem(api, spaceID, cacheRoot, int64(*cacheLimitGiB)*1024*1024*1024)
 	if err := cloud.refreshVolume(); err != nil {
 		return err
 	}

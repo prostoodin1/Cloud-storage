@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QStackedWidget,
     QSystemTrayIcon,
     QTableWidget,
@@ -547,8 +549,26 @@ class ClientWindow(QMainWindow):
         toolbar.addWidget(self.upload_button)
         layout.addLayout(toolbar)
 
-        self.files_table = QTableWidget(0, 4)
-        self.files_table.setHorizontalHeaderLabels(["Имя", "Тип", "Размер", "Изменён"])
+        cache_row = QHBoxLayout()
+        cache_row.addWidget(QLabel("Локальный кэш виртуальных дисков:"))
+        self.cache_limit_selector = QSpinBox()
+        self.cache_limit_selector.setRange(10, 30)
+        self.cache_limit_selector.setSuffix(" ГБ")
+        self.cache_limit_selector.setToolTip(
+            "Файлы сначала сохраняются в локальный кэш, затем синхронизируются с сервером."
+        )
+        self.cache_limit_selector.editingFinished.connect(self._save_cache_limit)
+        cache_row.addWidget(self.cache_limit_selector)
+        cache_hint = QLabel("По умолчанию 10 ГБ; можно увеличить до 30 ГБ.")
+        cache_hint.setProperty("muted", True)
+        cache_row.addWidget(cache_hint)
+        cache_row.addStretch()
+        layout.addLayout(cache_row)
+
+        self.files_table = QTableWidget(0, 5)
+        self.files_table.setHorizontalHeaderLabels(
+            ["Имя", "Тип", "Размер", "Изменён", "Поделиться"]
+        )
         self.files_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.files_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.files_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -562,6 +582,9 @@ class ClientWindow(QMainWindow):
         )
         self.files_table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.files_table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.ResizeToContents
         )
         self.files_table.doubleClicked.connect(self.open_selected)
         self.files_empty = QLabel(
@@ -579,9 +602,12 @@ class ClientWindow(QMainWindow):
         cache_button.clicked.connect(self.download_selected)
         self.delete_file_button = QPushButton("Удалить")
         self.delete_file_button.clicked.connect(self.delete_selected)
+        self.share_file_button = QPushButton("Поделиться")
+        self.share_file_button.clicked.connect(self.share_selected)
         actions.addWidget(open_button)
         actions.addWidget(cache_button)
         actions.addWidget(self.delete_file_button)
+        actions.addWidget(self.share_file_button)
         actions.addStretch()
         layout.addLayout(actions)
         return page
@@ -815,6 +841,9 @@ class ClientWindow(QMainWindow):
         saved_account = self.account_vault.load()
         self.account_current_password.setText(saved_account[1] if saved_account else "")
         self.cache_path.setText(self.profile.download_directory)
+        self.cache_limit_selector.blockSignals(True)
+        self.cache_limit_selector.setValue(self.profile.cache_limit_gib)
+        self.cache_limit_selector.blockSignals(False)
         self.drive_enabled_checkbox.blockSignals(True)
         self.drive_enabled_checkbox.setChecked(self.profile.drive_enabled)
         self.drive_enabled_checkbox.blockSignals(False)
@@ -1743,6 +1772,7 @@ class ClientWindow(QMainWindow):
         space = next((item for item in self.spaces if str(item.get("id")) == space_id), {})
         self.upload_button.setEnabled(bool(space.get("can_upload", False)))
         self.delete_file_button.setEnabled(bool(space.get("can_delete", False)))
+        self.share_file_button.setEnabled(bool(space.get("can_share", False)))
 
     def refresh_entries(self) -> None:
         if not self.api or not self.space_selector.currentData():
@@ -1806,6 +1836,13 @@ class ClientWindow(QMainWindow):
             self.files_table.setItem(row, 1, QTableWidgetItem(kind))
             self.files_table.setItem(row, 2, QTableWidgetItem(size))
             self.files_table.setItem(row, 3, QTableWidgetItem(modified))
+            share = QPushButton("↗ Ссылка")
+            share.setEnabled(
+                entry.get("type") == "file"
+                and bool(self._current_space().get("can_share", False))
+            )
+            share.clicked.connect(lambda _checked=False, item=entry: self.share_selected(item))
+            self.files_table.setCellWidget(row, 4, share)
             if entry.get("name") == selected_name:
                 self.files_table.selectRow(row)
 
@@ -1815,6 +1852,73 @@ class ClientWindow(QMainWindow):
             return None
         item = self.files_table.item(row, 0)
         return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _current_space(self) -> dict[str, Any]:
+        space_id = str(self.space_selector.currentData() or "")
+        return next((item for item in self.spaces if str(item.get("id")) == space_id), {})
+
+    def _save_cache_limit(self) -> None:
+        value = self.cache_limit_selector.value()
+        if self.profile.cache_limit_gib == value:
+            return
+        self.profile.cache_limit_gib = value
+        self.store.save(self.profile)
+        self._reconcile_drives()
+
+    def share_selected(self, entry: dict[str, Any] | None = None) -> None:
+        selected = entry or self.selected_entry()
+        if not self.api or not selected or not self.space_selector.currentData():
+            QMessageBox.information(self, "Нет файла", "Выберите файл или папку.")
+            return
+        logical_path = self._join_logical(self.current_directory, str(selected["name"]))
+        kind = str(selected.get("type", "file"))
+        if kind != "file":
+            QMessageBox.information(
+                self,
+                "Выберите файл",
+                "В этой beta-версии публичные ссылки создаются для отдельных файлов.",
+            )
+            return
+
+        def ready(result: object) -> None:
+            if not isinstance(result, dict):
+                self._files_error("Ссылка не создана", "Сервер вернул некорректный ответ.")
+                return
+            link = str(result.get("url") or "")
+            if not link:
+                path = str(result.get("page_url_path") or result.get("url_path") or "")
+                link = self.profile.server_url.rstrip("/") + path
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Ссылка на файл")
+            dialog.setMinimumWidth(620)
+            box = QVBoxLayout(dialog)
+            box.addWidget(
+                QLabel("По ссылке виден только выбранный объект. Срок действия — 7 дней.")
+            )
+            field = QLineEdit(link)
+            field.setReadOnly(True)
+            field.selectAll()
+            box.addWidget(field)
+            buttons = QHBoxLayout()
+            copy = QPushButton("Копировать ссылку")
+            copy.setProperty("primary", True)
+            copy.clicked.connect(lambda: QApplication.clipboard().setText(link))
+            close = QPushButton("Готово")
+            close.clicked.connect(dialog.accept)
+            buttons.addStretch()
+            buttons.addWidget(copy)
+            buttons.addWidget(close)
+            box.addLayout(buttons)
+            dialog.exec()
+
+        self._start_task(
+            self.api.create_share,
+            ready,
+            lambda message: self._files_error("Ссылка не создана", message),
+            str(self.space_selector.currentData()),
+            logical_path,
+            kind,
+        )
 
     def open_selected(self) -> None:
         entry = self.selected_entry()

@@ -27,6 +27,7 @@ class ClientProfile:
     drive_enabled: bool = True
     drive_letter: str = "S"
     drive_letters: dict[str, str] = field(default_factory=dict)
+    cache_limit_gib: int = 10
     extra_fields: dict = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -35,15 +36,21 @@ class ClientProfile:
         allowed = {
             key: field for key, field in cls.__dataclass_fields__.items() if key != "extra_fields"
         }
-        fields = {
-            key: (
-                bool(value.get(key, field.default))
-                if isinstance(field.default, bool)
-                else str(value.get(key, field.default))
-            )
-            for key, field in allowed.items()
-            if key != "drive_letters"
-        }
+        fields = {}
+        for key, dataclass_field in allowed.items():
+            if key == "drive_letters":
+                continue
+            raw = value.get(key, dataclass_field.default)
+            if isinstance(dataclass_field.default, bool):
+                fields[key] = bool(raw)
+            elif isinstance(dataclass_field.default, int):
+                try:
+                    fields[key] = int(raw)
+                except (TypeError, ValueError):
+                    fields[key] = dataclass_field.default
+            else:
+                fields[key] = str(raw)
+        fields["cache_limit_gib"] = max(10, min(30, fields["cache_limit_gib"]))
         raw_letters = value.get("drive_letters") or {}
         fields["drive_letters"] = (
             {
@@ -248,7 +255,7 @@ class ClientSettingsStore:
                 json.dump(
                     {
                         **self._document_extras,
-                        "schema_version": 4,
+                        "schema_version": 5,
                         "active_profile_id": active_profile_id,
                         "profiles": [
                             {

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"unicode/utf16"
 
@@ -41,6 +42,34 @@ func TestRealVolumeQuotaAndLabel(t *testing.T) {
 	b.GetVolumeInfo(nil, &info)
 	if info.TotalSize != 0 || info.FreeSize != 0 {
 		t.Fatal("negative quota wrapped")
+	}
+}
+
+func TestCacheLimitEvictsOldCleanFilesAndProtectsPending(t *testing.T) {
+	root := t.TempDir()
+	old := filepath.Join(root, "old.bin")
+	pending := filepath.Join(root, "pending.bin")
+	if err := os.WriteFile(old, make([]byte, 6), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pending, make([]byte, 6), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pending+".cloud-pending", []byte("pending"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cloud := newCloudFileSystem(nil, "space", root, 12)
+	if err := cloud.ensureCacheCapacity(filepath.Join(root, "new.bin"), 6); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old cache file was not evicted: %v", err)
+	}
+	if _, err := os.Stat(pending); err != nil {
+		t.Fatalf("pending upload was evicted: %v", err)
+	}
+	if err := cloud.ensureCacheCapacity(filepath.Join(root, "too-large.bin"), 13); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("expected ENOSPC, got %v", err)
 	}
 }
 

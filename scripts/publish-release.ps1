@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.10.8b1",
+    [string]$Version = "0.10.8b2",
     [string]$MobileVersion = "0.9.14",
     [string]$Repository = "prostoodin1/Cloud-storage",
     [string]$OutputDirectory = "",
@@ -69,6 +69,10 @@ if ($unexpected.Count -or $missing.Count -or $actualUserFiles.Count -ne $expecte
 if ($LASTEXITCODE -ne 0) { throw "GitHub CLI is not authenticated" }
 $existingRelease = & gh release list --repo $Repository --limit 100 --json tagName | ConvertFrom-Json
 if ($existingRelease.tagName -contains $tag) { throw "Release $tag already exists" }
+$catalogHostTag = (& gh release view --repo $Repository --json tagName --jq '.tagName').Trim()
+if ($LASTEXITCODE -ne 0 -or -not $catalogHostTag) {
+    throw "Could not resolve the stable release that hosts the public update catalogs"
+}
 
 $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("cloud-storage-release-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $temporary | Out-Null
@@ -134,6 +138,13 @@ try {
     if ($isPrerelease) { $releaseEditArgs += '--prerelease' } else { $releaseEditArgs += '--latest' }
     & gh @releaseEditArgs
     if ($LASTEXITCODE -ne 0) { throw "Draft is complete but could not be published" }
+    if ($isPrerelease) {
+        & gh release upload $catalogHostTag --repo $Repository --clobber $clientCatalog $serverCatalog
+        if ($LASTEXITCODE -ne 0) {
+            throw "Release $tag is public, but its signed catalogs could not be published through releases/latest"
+        }
+        Write-Host "Updated signed beta catalogs on $catalogHostTag for the releases/latest feed."
+    }
     Write-Host "Published $tag atomically with $expectedUserFileCount user files, two setup payloads and two signed catalogs."
 }
 finally {

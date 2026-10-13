@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -38,8 +39,14 @@ class BrowserShareRequest(BaseModel):
 
 
 class BrowserAccess:
-    def __init__(self, runtime):
+    def __init__(
+        self,
+        runtime,
+        *,
+        login_allowed: Callable[[str, str], bool] | None = None,
+    ):
         self.runtime = runtime
+        self.login_allowed = login_allowed or (lambda _username, _remote_address: True)
 
     def fingerprint(self, value: str, purpose: str = "web-session") -> str:
         return self.runtime.repository.credentials.fingerprint(value, purpose)
@@ -214,12 +221,15 @@ class BrowserAccess:
         def login(body: BrowserLoginRequest, request: Request):
             self.allowed(request)
             self.check_origin(request)
+            remote_address = request.client.host if request.client else "unknown"
+            if not self.login_allowed(body.username.strip().casefold(), remote_address):
+                raise HTTPException(429, "Слишком много попыток входа. Попробуйте через 5 минут")
             user = self.runtime.repository.authenticate_user_password(
                 body.username, body.password.get_secret_value()
             )
             result = self.runtime.repository.create_trusted_browser_device(
                 user_id=user.id,
-                remote_address=request.client.host if request.client else "unknown",
+                remote_address=remote_address,
             )
             return self._start_session(request, result.device.id, remember=body.remember)
 

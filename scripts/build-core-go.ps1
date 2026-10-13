@@ -11,6 +11,16 @@ if (-not $go) {
 }
 
 $source = Join-Path $projectRoot 'core_go'
+$venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$python = if ($env:CLOUD_STORAGE_PYTHON) {
+    (Resolve-Path -LiteralPath $env:CLOUD_STORAGE_PYTHON).Path
+} elseif (Test-Path -LiteralPath $venvPython) {
+    $venvPython
+} else {
+    (Get-Command python -ErrorAction Stop).Source
+}
+$version = (& $python -c "from cloud_storage import __version__; print(__version__)").Trim()
+if (-not $version) { throw 'Cloud Storage version is empty.' }
 $coreDirectory = Join-Path $distRoot 'CloudStorageServerCore'
 $serviceDirectory = Join-Path $distRoot 'CloudStorageServerService'
 New-Item -ItemType Directory -Path $coreDirectory -Force | Out-Null
@@ -21,8 +31,13 @@ try {
     & $go test ./...
     if ($LASTEXITCODE -ne 0) { throw 'Go Core tests failed.' }
     $output = Join-Path $coreDirectory 'CloudStorageServerCore.exe'
-    & $go build -trimpath -ldflags '-s -w -H=windowsgui' -o $output .
+    $linkerFlags = "-s -w -H=windowsgui -X main.coreVersion=$version"
+    & $go build -trimpath -ldflags $linkerFlags -o $output .
     if ($LASTEXITCODE -ne 0) { throw 'Go Core build failed.' }
+    $reportedVersion = (& $output --version | Out-String).Trim()
+    if ($reportedVersion -ne $version) {
+        throw "Go Core version mismatch: built '$reportedVersion', expected '$version'."
+    }
     Copy-Item -LiteralPath $output -Destination (Join-Path $serviceDirectory 'CloudStorageServerService.exe') -Force
 } finally {
     Pop-Location

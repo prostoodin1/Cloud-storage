@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory=$true)][string]$Dist,
-  [string]$ExpectedVersion = '0.10.8b1'
+  [string]$ExpectedVersion = '0.10.8b2'
 )
 $ErrorActionPreference = 'Stop'
 $releaseDist = (Resolve-Path -LiteralPath $Dist).Path
@@ -16,7 +16,7 @@ function Get-FreeQaPort {
 
 $letter = @('W','V','U','T','S','R','Q','P','O','N','M','L','K','J','I','H','G','F','E','D') |
   Where-Object { -not (Test-Path -LiteralPath ($_ + ':\')) } | Select-Object -First 1
-if (-not $letter) { throw 'Нет свободной буквы для изолированной проверки диска' }
+if (-not $letter) { throw 'No free drive letter is available for the isolated drive test' }
 
 $port = Get-FreeQaPort
 $baseUrl = "http://127.0.0.1:$port"
@@ -42,7 +42,7 @@ try {
     try { $health = Invoke-RestMethod -Uri "$baseUrl/v1/health" -TimeoutSec 2 }
     catch { $health = $null }
   } until ($health -or $core.HasExited -or (Get-Date) -ge $deadline)
-  if (-not $health) { throw "Core не запустился: $(Get-Content -LiteralPath $coreErr -Raw -ErrorAction SilentlyContinue)" }
+  if (-not $health) { throw "Core did not start: $(Get-Content -LiteralPath $coreErr -Raw -ErrorAction SilentlyContinue)" }
   $checks['core_version'] = ($health.version -eq $ExpectedVersion)
   $secrets = Get-Content -LiteralPath (Join-Path $env:CLOUD_STORAGE_CORE_DATA_DIR 'core-secrets.json') -Raw | ConvertFrom-Json
   $managerHeaders = @{Authorization=('Bearer ' + $secrets.manager_token)}
@@ -57,7 +57,7 @@ try {
   $clientData = Join-Path $qaRoot 'client'
   $tokenDir = Join-Path $clientData 'tokens'
   New-Item -ItemType Directory -Path $tokenDir -Force | Out-Null
-  @{
+  $settingsJson = @{
     schema_version=4
     active_profile_id='default'
     profiles=@(@{
@@ -65,7 +65,9 @@ try {
       device_id=[string]$paired.device.id;device_status='trusted';last_space_id=$spaceId
       drive_letter=$letter;drive_letters=@{$spaceId=$letter}
     })
-  } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $clientData 'client-settings.json') -Encoding utf8
+  } | ConvertTo-Json -Depth 6
+  $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+  [IO.File]::WriteAllText((Join-Path $clientData 'client-settings.json'), $settingsJson, $utf8WithoutBom)
   Add-Type -AssemblyName System.Security
   $plain = [Text.Encoding]::UTF8.GetBytes([string]$paired.device_token)
   $protected = [Security.Cryptography.ProtectedData]::Protect($plain, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)
@@ -76,7 +78,7 @@ try {
   $deadline = (Get-Date).AddSeconds(25)
   do { Start-Sleep -Milliseconds 200 } until ((Test-Path -LiteralPath $root) -or $drive.HasExited -or (Get-Date) -ge $deadline)
   $checks['drive_mounted'] = (Test-Path -LiteralPath $root)
-  if (-not $checks['drive_mounted']) { throw "Виртуальный диск не подключён; код процесса $($drive.ExitCode)" }
+  if (-not $checks['drive_mounted']) { throw "Virtual drive was not mounted; process exit code $($drive.ExitCode)" }
 
   $folder = Join-Path $root 'Client folder'
   New-Item -ItemType Directory -Path $folder | Out-Null
@@ -84,8 +86,13 @@ try {
   $payload = [Text.Encoding]::UTF8.GetBytes(('Cloud Storage real drive QA ' * 4096))
   [IO.File]::WriteAllBytes($file, $payload)
   $downloaded = [IO.File]::ReadAllBytes($file)
-  $expectedHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($payload))
-  $actualHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($downloaded))
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    $expectedHash = [BitConverter]::ToString($sha256.ComputeHash($payload)).Replace('-', '')
+    $actualHash = [BitConverter]::ToString($sha256.ComputeHash($downloaded)).Replace('-', '')
+  } finally {
+    $sha256.Dispose()
+  }
   $checks['folder_created'] = (Test-Path -LiteralPath $folder -PathType Container)
   $checks['file_roundtrip_sha256'] = ($expectedHash -eq $actualHash)
   $entries = @(Invoke-RestMethod -Uri "$baseUrl/v1/spaces/$spaceId/entries?directory=Client%20folder" -Headers $deviceHeaders)

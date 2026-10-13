@@ -207,6 +207,25 @@ def test_browser_login_without_remember_uses_session_cookie(web):
     assert "Max-Age=" not in response.headers["set-cookie"]
 
 
+def test_web_login_limits_password_guessing(web):
+    _, client, _ = web
+    origin = {"Origin": "http://testserver"}
+    for _ in range(5):
+        response = client.post(
+            "/v1/web/login",
+            headers=origin,
+            json={"username": "target.user", "password": "1"},
+        )
+        assert response.status_code == 403
+    blocked = client.post(
+        "/v1/web/login",
+        headers=origin,
+        json={"username": "target.user", "password": "1"},
+    )
+    assert blocked.status_code == 429
+    assert "5 минут" in blocked.json()["detail"]
+
+
 @pytest.mark.parametrize("origin", [None, "null", "http://attacker.invalid", "https://testserver"])
 def test_cross_origin_pairing_rejected(web, origin):
     _, client, code = web

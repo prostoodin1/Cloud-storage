@@ -30,11 +30,28 @@ if ($LASTEXITCODE -ne 0) { throw 'Drive build failed.' }
 & (Join-Path $PSScriptRoot 'fetch-packaging-deps.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Packaging dependency download failed.' }
 
+$signScript = Join-Path $PSScriptRoot 'sign-windows-files.ps1'
+$applicationBinaries = @(
+    (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageServerManager\CloudStorageServerManager.exe'),
+    (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageContainerManager\CloudStorageContainerManager.exe'),
+    (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageServerCore\CloudStorageServerCore.exe'),
+    (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageLegacyCore\CloudStorageLegacyCore.exe'),
+    (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageServerService\CloudStorageServerService.exe'),
+    (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageClient\CloudStorageClient.exe'),
+    (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageClient\CloudStorageDrive.exe')
+)
+& $signScript -Paths $applicationBinaries
+
 & $compiler (Join-Path $projectRoot 'packaging\CloudStorageClient.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Client installer build failed.' }
 & $compiler (Join-Path $projectRoot 'packaging\CloudStorageServer.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Server installer build failed.' }
 $outputs = Join-Path $projectRoot 'outputs'
+$versionedSetups = @(
+    (Join-Path $outputs "CloudStorage-Client-Setup-$version-windows-x64.exe"),
+    (Join-Path $outputs "CloudStorage-Server-Setup-$version-windows-x64.exe")
+)
+& $signScript -Paths $versionedSetups
 $bootstrapDist = Join-Path $releaseRoot 'installer-dist'
 $bootstrapWork = Join-Path $releaseRoot 'installer-build'
 $bootstrapSpec = Join-Path $releaseRoot 'installer-spec'
@@ -55,6 +72,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Stable client installer build failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Stable server installer build failed.' }
 Copy-Item -LiteralPath (Join-Path $bootstrapDist 'CloudStorage-Client-Installer-windows-x64.exe') -Destination $outputs -Force
 Copy-Item -LiteralPath (Join-Path $bootstrapDist 'CloudStorage-Server-Installer-windows-x64.exe') -Destination $outputs -Force
+$bootstrapInstallers = @(
+    (Join-Path $outputs 'CloudStorage-Client-Installer-windows-x64.exe'),
+    (Join-Path $outputs 'CloudStorage-Server-Installer-windows-x64.exe')
+)
+& $signScript -Paths $bootstrapInstallers
 $clientZip = Join-Path $outputs "CloudStorage-Desktop-Client-$version-windows-x64.zip"
 $serverZip = Join-Path $outputs "CloudStorage-Server-Manager-$version-windows-x64.zip"
 Compress-Archive -Path (Join-Path $env:CLOUD_STORAGE_BUILD_DIST 'CloudStorageClient') -DestinationPath $clientZip -CompressionLevel Optimal -Force

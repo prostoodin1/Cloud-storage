@@ -579,16 +579,34 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "user_id": user_id,
         }
 
-    browser = BrowserAccess(runtime)
     bearer = HTTPBearer(auto_error=False)
     pairing_limiter = SlidingWindowLimiter(limit=10, window_seconds=300)
     remote_pairing_limiter = SlidingWindowLimiter(limit=5, window_seconds=900)
     remote_login_limiter = SlidingWindowLimiter(limit=5, window_seconds=300)
+    web_login_account_limiter = SlidingWindowLimiter(limit=5, window_seconds=300)
+    web_login_source_limiter = SlidingWindowLimiter(limit=30, window_seconds=300)
     remote_request_limiter = SlidingWindowLimiter(limit=600, window_seconds=60)
     remote_audit_limiter = SlidingWindowLimiter(limit=30, window_seconds=3600)
     mobile_confirmation_limiter = SlidingWindowLimiter(limit=10, window_seconds=300)
     consumed_mobile_confirmations: dict[str, int] = {}
     consumed_mobile_confirmations_lock = threading.Lock()
+
+    def allow_web_login(username: str, remote_address: str) -> bool:
+        # Tunnel backends can present every visitor as the same loopback peer.
+        # Limit both the account and the apparent source so distributed password
+        # guessing and random-username Argon2 CPU exhaustion are bounded without
+        # trusting spoofable forwarding headers.
+        account_key = runtime.repository.credentials.fingerprint(
+            username, "web-login-account"
+        )
+        source_key = runtime.repository.credentials.fingerprint(
+            remote_address, "web-login-source"
+        )
+        return web_login_account_limiter.allow(account_key) and web_login_source_limiter.allow(
+            source_key
+        )
+
+    browser = BrowserAccess(runtime, login_allowed=allow_web_login)
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=(

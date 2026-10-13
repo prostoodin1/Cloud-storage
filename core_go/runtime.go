@@ -24,7 +24,9 @@ import (
 	"time"
 )
 
-const coreVersion = "0.10.4"
+// Set from cloud_storage.__version__ by scripts/build-core-go.ps1.
+// Keeping a development fallback makes `go test` and local `go run` useful.
+var coreVersion = "dev"
 
 type coreRuntime struct {
 	config coreConfig

@@ -1,7 +1,7 @@
 param(
   [Parameter(Mandatory=$true)][string]$Dist,
   [string]$InstallerDirectory = '',
-  [string]$ExpectedVersion = '0.10.8b1',
+  [string]$ExpectedVersion = '0.10.8b2',
   [switch]$NativeCore
 )
 $ErrorActionPreference = 'Stop'
@@ -13,6 +13,22 @@ function Get-FreeQaPort {
   $listener.Start()
   try { return $listener.LocalEndpoint.Port }
   finally { $listener.Stop() }
+}
+function Invoke-QaStatus {
+  param(
+    [Parameter(Mandatory=$true)][string]$Uri,
+    [string]$Method = 'Get',
+    [hashtable]$Headers = @{}
+  )
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing -Method $Method -Uri $Uri -Headers $Headers -ErrorAction Stop
+    return [int]$response.StatusCode
+  } catch {
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+      return [int]$_.Exception.Response.StatusCode
+    }
+    throw
+  }
 }
 $qaPort = Get-FreeQaPort
 $compatibilityPort = Get-FreeQaPort
@@ -89,14 +105,16 @@ try {
   }
   if ($NativeCore) {
     $checks['native_supervisor'] = ($health.runtime -eq 'go')
-    $denied = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$qaBaseUrl/v1/admin/shutdown" -SkipHttpErrorCheck
+    $deniedStatus = Invoke-QaStatus -Method Post -Uri "$qaBaseUrl/v1/admin/shutdown"
     Start-Sleep -Milliseconds 1200
     $stillAlive = Invoke-RestMethod -Uri "$qaBaseUrl/v1/health" -TimeoutSec 5
-    $checks['unauthorized_shutdown_rejected'] = ($denied.StatusCode -eq 401 -and $stillAlive.runtime -eq 'go' -and -not $coreProcess.HasExited)
+    $checks['unauthorized_shutdown_rejected'] = ($deniedStatus -eq 401 -and $stillAlive.runtime -eq 'go' -and -not $coreProcess.HasExited)
   }
   $root = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/" -TimeoutSec 5
   $asset = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/web/assets/app.js" -TimeoutSec 5
-  $checks['packaged_web_assets'] = ($root.Content -like '*Введите код подключения*' -and $asset.Content -like '*loadSpaces*')
+  # Keep executable string literals ASCII so Windows PowerShell 5.1 can parse
+  # this UTF-8 script even when its legacy default code page is not UTF-8.
+  $checks['packaged_web_assets'] = ($root.Content -like '*id="pair-form"*' -and $asset.Content -like '*loadSpaces*')
   $secrets = Get-Content -LiteralPath (Join-Path $env:CLOUD_STORAGE_CORE_DATA_DIR 'core-secrets.json') -Raw | ConvertFrom-Json
   $managerHeaders = @{Authorization=('Bearer ' + $secrets.manager_token)}
   $code = Invoke-RestMethod -Uri "$qaBaseUrl/v1/admin/dynamic-pairing-code" -Headers $managerHeaders
@@ -142,11 +160,30 @@ try {
   $checks['packaged_archive_restore'] = ($restored.Content -ceq $payloadText)
   $anotherCode = Invoke-RestMethod -Uri "$qaBaseUrl/v1/admin/dynamic-pairing-code" -Headers $managerHeaders
   $stranger = Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/pairing/redeem" -ContentType 'application/json' -Body (@{code=$anotherCode.code;device_name='Other QA person';platform='Windows'} | ConvertTo-Json)
-  $strangerRead = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Headers @{Authorization=('Bearer ' + $stranger.device_token)} -SkipHttpErrorCheck
-  $checks['personal_space_isolation'] = ($strangerRead.StatusCode -eq 404)
+  $strangerStatus = Invoke-QaStatus -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Headers @{Authorization=('Bearer ' + $stranger.device_token)}
+  $checks['personal_space_isolation'] = ($strangerStatus -eq 404)
   Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/admin/shutdown" -Headers @{Authorization=('Bearer ' + $secrets.manager_token)} | Out-Null
   if (-not $coreProcess.WaitForExit(10000)) { throw 'Packaged Core did not stop after authenticated shutdown' }
-  $checks['clean_shutdown'] = ($coreProcess.ExitCode -eq 0)
+  # Windows PowerShell 5 only populates ExitCode reliably after the parameterless
+  # WaitForExit overload drains the redirected process handles.
+  $coreProcess.WaitForExit()
+  $coreProcess.Refresh()
+  $exitCode = $coreProcess.ExitCode
+  if ($null -ne $exitCode) {
+    $checks['clean_shutdown'] = ($coreProcess.HasExited -and $exitCode -eq 0)
+  } elseif ($NativeCore) {
+    # Start-Process on Windows PowerShell 5 can return no ExitCode when both
+    # output streams are redirected. The native Core writes this marker only
+    # after its child has stopped and cleanup has completed.
+    $coreLog = Join-Path $env:CLOUD_STORAGE_CORE_DATA_DIR 'core.log'
+    $checks['clean_shutdown'] = (
+      $coreProcess.HasExited -and
+      (Test-Path -LiteralPath $coreLog) -and
+      ((Get-Content -LiteralPath $coreLog -Raw) -like '*native supervisor stopped*')
+    )
+  } else {
+    $checks['clean_shutdown'] = $coreProcess.HasExited
+  }
   Start-Sleep -Milliseconds 500
   $coreProcess = Start-Process -FilePath $runtimePath -WindowStyle Hidden -RedirectStandardOutput $coreOut -RedirectStandardError $coreErr -PassThru
   $health = $null

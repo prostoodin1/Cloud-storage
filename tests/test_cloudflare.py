@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 
 from fastapi.testclient import TestClient
@@ -41,7 +42,7 @@ def test_cloudflared_install_downloads_in_background_and_reports_completion(
         proceed.wait(2)
         folder = data_directory / "tools" / "cloudflared"
         folder.mkdir(parents=True)
-        binary = folder / "cloudflared.exe"
+        binary = folder / ("cloudflared.exe" if os.name == "nt" else "cloudflared")
         binary.write_bytes(b"test binary")
         completed.set()
         return binary

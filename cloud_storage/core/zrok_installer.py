@@ -37,15 +37,16 @@ _ASSETS = {
 
 
 def managed_zrok2_path(data_directory: Path) -> Path:
-    name = "zrok2.exe" if os.name == "nt" else "zrok2"
+    name = "zrok2.exe" if platform.system() == "Windows" else "zrok2"
     return data_directory / "tools" / "zrok2" / name
 
 
 def download_zrok2(data_directory: Path) -> Path:
+    system = platform.system()
     machine = platform.machine().casefold()
     architecture = "arm64" if machine in {"arm64", "aarch64"} else "amd64"
     try:
-        asset, expected_sha256 = _ASSETS[(platform.system(), architecture)]
+        asset, expected_sha256 = _ASSETS[(system, architecture)]
     except KeyError as exc:
         raise RuntimeError("automatic zrok2 installation is not available on this platform") from exc
     url = f"https://github.com/openziti/zrok/releases/download/v{ZROK2_VERSION}/{asset}"
@@ -56,7 +57,7 @@ def download_zrok2(data_directory: Path) -> Path:
         raise RuntimeError("zrok2 package is unexpectedly large")
     if hashlib.sha256(archive).hexdigest() != expected_sha256:
         raise RuntimeError("zrok2 package checksum does not match the official release")
-    executable_name = "zrok2.exe" if os.name == "nt" else "zrok2"
+    executable_name = "zrok2.exe" if system == "Windows" else "zrok2"
     try:
         package = tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz")
     except tarfile.TarError as exc:
@@ -77,7 +78,7 @@ def download_zrok2(data_directory: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_bytes(payload)
-    if os.name != "nt":
+    if system != "Windows":
         temporary.chmod(0o700)
     os.replace(temporary, target)
     return target

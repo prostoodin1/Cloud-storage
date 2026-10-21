@@ -1,0 +1,271 @@
+{
+  "date": "2026-10-21",
+  "timezone": "Europe/Paris",
+  "base_commit": "2bb520f81eab9b2747615350355070202d8710e7",
+  "upload_target_MB_s": [
+    100,
+    200
+  ],
+  "upload_target_achieved": false,
+  "method": "Random 128 MiB, 3 sequential repetitions over loopback TLS; WAN separately 16 MiB through public Quick Tunnel on same physical PC; not separate devices",
+  "environment": {
+    "python": "3.13.0",
+    "packages": {
+      "fastapi": "0.156.8",
+      "uvicorn": "0.54.0",
+      "cryptography": "49.0.0",
+      "PySide6": "6.12.0",
+      "httpx": "0.28.1"
+    }
+  },
+  "samples": {
+    "baseline": [
+      {
+        "kind": "direct_upload",
+        "seconds": 10.02653800000553,
+        "MiB_s": 12.766121267373585
+      },
+      {
+        "kind": "download_sha256",
+        "seconds": 1.425599800015334,
+        "MiB_s": 89.78676904880543,
+        "sha256_ok": true
+      },
+      {
+        "kind": "resumable_upload",
+        "seconds": 7.118927900010021,
+        "MiB_s": 17.980235478971462,
+        "chunk_bytes": 4194304,
+        "sha256_ok": true
+      },
+      {
+        "kind": "direct_upload",
+        "seconds": 9.330947099981131,
+        "MiB_s": 13.717792913032252
+      },
+      {
+        "kind": "download_sha256",
+        "seconds": 1.5198321000207216,
+        "MiB_s": 84.21982928130998,
+        "sha256_ok": true
+      },
+      {
+        "kind": "resumable_upload",
+        "seconds": 6.298370400007116,
+        "MiB_s": 20.322717126934197,
+        "chunk_bytes": 4194304,
+        "sha256_ok": true
+      },
+      {
+        "kind": "direct_upload",
+        "seconds": 8.811869699973613,
+        "MiB_s": 14.525861634152772
+      },
+      {
+        "kind": "download_sha256",
+        "seconds": 1.515090400003828,
+        "MiB_s": 84.48340772252044,
+        "sha256_ok": true
+      },
+      {
+        "kind": "resumable_upload",
+        "seconds": 7.734609900013311,
+        "MiB_s": 16.548992341524517,
+        "chunk_bytes": 4194304,
+        "sha256_ok": true
+      }
+    ],
+    "candidate_source": [
+      {
+        "kind": "parallel_upload_4",
+        "seconds": 6.096238500002073,
+        "MiB_s": 83.98621543429212,
+        "per_file_seconds": [
+          5.95986790000461,
+          6.057772600004682,
+          6.079236099991249,
+          6.030916900024749
+        ],
+        "sha256_ok": true
+      },
+      {
+        "kind": "direct_upload",
+        "seconds": 1.7662657000182662,
+        "MiB_s": 72.46927797934154
+      },
+      {
+        "kind": "download_sha256",
+        "seconds": 0.8991409999725875,
+        "MiB_s": 142.3580951195668,
+        "sha256_ok": true
+      },
+      {
+        "kind": "resumable_upload",
+        "seconds": 2.087922200007597,
+        "MiB_s": 61.30496624804041,
+        "chunk_bytes": 33554432,
+        "sha256_ok": true
+      },
+      {
+        "kind": "direct_upload",
+        "seconds": 1.787713800003985,
+        "MiB_s": 71.59982766800518
+      },
+      {
+        "kind": "download_sha256",
+        "seconds": 0.9088104999973439,
+        "MiB_s": 140.84344316045434,
+        "sha256_ok": true
+      },
+      {
+        "kind": "resumable_upload",
+        "seconds": 2.135841800016351,
+        "MiB_s": 59.929532233623334,
+        "chunk_bytes": 33554432,
+        "sha256_ok": true
+      },
+      {
+        "kind": "direct_upload",
+        "seconds": 1.6668174999940675,
+        "MiB_s": 76.7930502292276
+      },
+      {
+        "kind": "download_sha256",
+        "seconds": 0.9794077999831643,
+        "MiB_s": 130.69121973727417,
+        "sha256_ok": true
+      },
+      {
+        "kind": "resumable_upload",
+        "seconds": 2.186155900009908,
+        "MiB_s": 58.550261671374805,
+        "chunk_bytes": 33554432,
+        "sha256_ok": true
+      }
+    ],
+    "candidate_exe_local": [
+      {
+        "kind": "direct_upload",
+        "seconds": 1.6653403000091203,
+        "MiB_s": 76.86116765402183
+      },
+      {
+        "kind": "download_sha256",
+        "seconds": 0.867055300011998,
+        "MiB_s": 147.62610873635023,
+        "sha256_ok": true
+      },
+      {
+        "kind": "resumable_upload",
+        "seconds": 2.2978210000146646,
+        "MiB_s": 55.70494829631338,
+        "chunk_bytes": 33554432,
+        "sha256_ok": true
+      },
+      {
+        "kind": "direct_upload",
+        "seconds": 1.786061899998458,
+        "MiB_s": 71.66604920026036
+      },
+      {
+        "kind": "download_sha256",
+        "seconds": 0.8974548000260256,
+        "MiB_s": 142.62556732248586,
+        "sha256_ok": true
+      },
+      {
+        "kind": "resumable_upload",
+        "seconds": 2.012135400000261,
+        "MiB_s": 63.614009275908266,
+        "chunk_bytes": 33554432,
+        "sha256_ok": true
+      },
+      {
+        "kind": "direct_upload",
+        "seconds": 1.7100541999971028,
+        "MiB_s": 74.85142868583748
+      },
+      {
+        "kind": "download_sha256",
+        "seconds": 0.9260629999917,
+        "MiB_s": 138.21953798083632,
+        "sha256_ok": true
+      },
+      {
+        "kind": "resumable_upload",
+        "seconds": 2.140304600005038,
+        "MiB_s": 59.8045717416571,
+        "chunk_bytes": 33554432,
+        "sha256_ok": true
+      }
+    ],
+    "candidate_exe_public": [
+      {
+        "kind": "direct_upload",
+        "seconds": 1.2159007000154816,
+        "MiB_s": 13.158969313691717
+      },
+      {
+        "kind": "download_sha256",
+        "seconds": 1.2074858999985736,
+        "MiB_s": 13.250672326707004,
+        "sha256_ok": true
+      },
+      {
+        "kind": "resumable_upload",
+        "seconds": 1.4841240999812726,
+        "MiB_s": 10.780769613674419,
+        "chunk_bytes": 33554432,
+        "sha256_ok": true
+      }
+    ]
+  },
+  "checks": {
+    "full_python_passed": 226,
+    "final_targeted_python_passed": 16,
+    "targeted_overlap_with_full": 12,
+    "mobile_protocol_passed": 7,
+    "mobile_typecheck": "passed",
+    "ruff": "passed",
+    "packaged": {
+      "manager_package": true,
+      "container_manager_package": true,
+      "client_drive_module": true,
+      "system_icu_not_shadowed": true,
+      "client": true,
+      "go_core_binary": true,
+      "packaged_core_api": true,
+      "native_supervisor": true,
+      "unauthorized_shutdown_rejected": true,
+      "packaged_web_assets": true,
+      "packaged_quota": true,
+      "packaged_file_roundtrip": true,
+      "packaged_client_folder": true,
+      "packaged_usage": true,
+      "packaged_browser_same_person": true,
+      "packaged_browser_folder_upload": true,
+      "packaged_public_share": true,
+      "packaged_diagnostics": true,
+      "packaged_archive_hidden": true,
+      "packaged_archive_restore": true,
+      "personal_space_isolation": true,
+      "clean_shutdown": true,
+      "restart_preserves_tokens_files_and_browser_session": true
+    },
+    "mounted_drive": {
+      "core_version": true,
+      "drive_mounted": true,
+      "folder_created": true,
+      "file_roundtrip_sha256": true,
+      "server_sees_drive_upload": true,
+      "quota_is_3_gib": true,
+      "usage_recorded": true
+    }
+  },
+  "limitations": [
+    "No physical Android/iOS run",
+    "No two independent WAN devices",
+    "No multi-day load or physical disk-full test",
+    "Windows Client and Legacy Core rebuilt; unchanged Go/Manager/Drive components reused from v0.10.8b2"
+  ]
+}

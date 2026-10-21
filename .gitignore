@@ -10,6 +10,7 @@ work/
 *.spec.local
 *.log
 outputs/
+drive-qa-*/
 packaging/third_party/
 .idea/
 .vscode/

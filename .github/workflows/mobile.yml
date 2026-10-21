@@ -33,6 +33,7 @@ jobs:
           cache-dependency-path: mobile/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      - run: pnpm test:transfers
       - run: pnpm doctor
       - run: pnpm exec expo export --platform android --output-dir dist-android
       - run: pnpm exec expo export --platform ios --output-dir dist-ios

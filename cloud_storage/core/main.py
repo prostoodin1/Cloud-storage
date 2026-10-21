@@ -168,6 +168,9 @@ class CoreServerGroup:
             access_log=False,
             server_header=False,
             date_header=False,
+            # Idle TLS keep-alive peers may never finish their close handshake.
+            # Bound shutdown so a disconnected client cannot pin a restart.
+            timeout_graceful_shutdown=3,
             ssl_certfile=certificate,
             ssl_keyfile=private_key,
             lifespan="off" if certificate or secondary else "auto",

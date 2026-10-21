@@ -31,6 +31,7 @@ import {
 import { colors } from './src/theme';
 import {
   offlineDirectory,
+  isRetryableTransferError,
   runDownloadTransfer,
   runUploadTransfer,
   safeFileName,
@@ -90,6 +91,7 @@ function MainApp() {
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminError, setAdminError] = useState('');
   const activeTransfers = useRef(new Set<string>());
+  const transferRetryAfter = useRef(new Map<string, number>());
   const transferRef = useRef(transfers);
   const connectionRef = useRef(connection);
   const photoBackupRef = useRef(photoBackup);
@@ -292,7 +294,8 @@ function MainApp() {
 
   const processTransfer = useCallback(
     async (id: string) => {
-      if (!api || activeTransfers.current.has(id)) return;
+      if (!api || activeTransfers.current.has(id) || activeTransfers.current.size >= 2) return;
+      if ((transferRetryAfter.current.get(id) ?? 0) > Date.now()) return;
       const record = transferRef.current.find((item) => item.id === id);
       if (!record || !['queued', 'running'].includes(record.status)) return;
       activeTransfers.current.add(id);
@@ -301,6 +304,7 @@ function MainApp() {
           record.direction === 'upload'
             ? await runUploadTransfer(api, record, replaceTransfer)
             : await runDownloadTransfer(api, record, replaceTransfer);
+        transferRetryAfter.current.delete(id);
         if (completed.direction === 'upload') void loadEntries();
         if (
           completed.direction === 'download' &&
@@ -311,9 +315,11 @@ function MainApp() {
         }
       } catch (error) {
         const latest = transferRef.current.find((item) => item.id === id) ?? record;
+        const retryable = isRetryableTransferError(error);
+        if (retryable) transferRetryAfter.current.set(id, Date.now() + 10_000 + Math.random() * 5_000);
         replaceTransfer({
           ...latest,
-          status: 'failed',
+          status: retryable ? 'queued' : 'failed',
           error: error instanceof Error ? error.message : 'Передача не выполнена.',
         });
       } finally {
@@ -325,9 +331,12 @@ function MainApp() {
 
   useEffect(() => {
     if (stage !== 'main') return;
-    transferRef.current
+    const pump = () => transferRef.current
       .filter((item) => ['queued', 'running'].includes(item.status))
       .forEach((item) => void processTransfer(item.id));
+    pump();
+    const timer = setInterval(pump, 2_000);
+    return () => clearInterval(timer);
   }, [stage, processTransfer, transfers]);
 
   const queueUpload = async (asset: UploadAsset) => {

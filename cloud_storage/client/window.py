@@ -2072,9 +2072,17 @@ class ClientWindow(QMainWindow):
                 f"Ожидание сети: {exc}",
             )
             return {"id": transfer_id, "network_error": True}
-        except (ClientApiError, OSError, ValueError, KeyError) as exc:
+        except ClientApiError as exc:
+            retryable = exc.status_code in {408, 429, 502, 503, 504}
+            self.transfer_store.set_status(
+                transfer_id, "queued" if retryable else "failed", str(exc)
+            )
+            return {"id": transfer_id, "network_error": retryable}
+        except (OSError, ValueError, KeyError) as exc:
             self.transfer_store.set_status(transfer_id, "failed", str(exc))
             return {"id": transfer_id, "network_error": False}
+        finally:
+            api.close()
 
     def _run_upload_transfer(self, api: ClientApi, transfer: TransferRecord) -> None:
         source = Path(transfer.local_path)
@@ -2118,33 +2126,50 @@ class ClientWindow(QMainWindow):
         if offset > transfer.total_bytes:
             raise ValueError("Сервер сообщил неверное смещение загрузки")
         self.transfer_store.update_progress(transfer.id, offset, remote_session_id=upload_id)
+        # Old servers keep the original 4 MiB behaviour. New servers advertise
+        # their bounded maximum; do not trust an arbitrary remote allocation.
+        advertised = status.get("max_chunk_bytes")
+        chunk_bytes = (
+            min(32 * 1024**2, advertised)
+            if type(advertised) is int and advertised >= 256 * 1024
+            else 4 * 1024**2
+        )
         with source.open("rb") as handle:
             handle.seek(offset)
             while offset < transfer.total_bytes:
                 if not self._transfer_should_continue(transfer.id):
                     raise TransferInterrupted("transfer paused")
-                chunk = handle.read(min(4 * 1024 * 1024, transfer.total_bytes - offset))
+                chunk = handle.read(min(chunk_bytes, transfer.total_bytes - offset))
                 if not chunk:
                     raise OSError("Не удалось прочитать исходный файл")
                 status = api.append_resumable_upload(upload_id, offset, chunk)
-                offset = int(status.get("received_bytes", offset + len(chunk)))
+                acknowledged = int(status.get("received_bytes", offset + len(chunk)))
+                if acknowledged != offset + len(chunk):
+                    raise ValueError("Сервер подтвердил неверное смещение загрузки")
+                offset = acknowledged
                 self.transfer_store.update_progress(transfer.id, offset)
         api.complete_resumable_upload(upload_id)
         self.transfer_store.update_progress(transfer.id, transfer.total_bytes)
         self.transfer_store.set_status(transfer.id, "completed")
 
     def _run_download_transfer(self, api: ClientApi, transfer: TransferRecord) -> None:
+        last_bytes = 0
+        last_update = time.monotonic()
+
+        def progress(done: int, total: int) -> None:
+            nonlocal last_bytes, last_update
+            now = time.monotonic()
+            if done - last_bytes >= 16 * 1024**2 or now - last_update >= 0.5:
+                self.transfer_store.update_progress(transfer.id, done, total_bytes=total)
+                last_bytes, last_update = done, now
+
         destination = api.download_file(
             transfer.space_id,
             transfer.logical_path,
             Path(transfer.local_path),
             expected_sha256=transfer.expected_sha256,
             should_continue=lambda: self._transfer_should_continue(transfer.id),
-            progress=lambda done, total: self.transfer_store.update_progress(
-                transfer.id,
-                done,
-                total_bytes=total,
-            ),
+            progress=progress,
         )
         completed_size = destination.stat().st_size
         self.transfer_store.update_progress(

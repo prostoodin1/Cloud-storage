@@ -27,6 +27,7 @@ from cloud_storage.core.repository import (
     utc_now,
     utc_text,
 )
+from cloud_storage.core.transfer_io import MAX_UPLOAD_CHUNK_BYTES, TransferProgress
 from cloud_storage.services.security import make_managed_file_inert
 
 
@@ -276,6 +277,9 @@ class UploadSession:
         self._hash = hashlib.sha256()
         self._size = 0
         self._finished = False
+        self._progress = TransferProgress(
+            lambda count: self.service._update_transfer_network(self.transfer_id, count)
+        )
         try:
             self.service._create_inbound_transfer(
                 transfer_id=self.transfer_id,
@@ -305,7 +309,7 @@ class UploadSession:
         self._handle.write(chunk)
         self._hash.update(chunk)
         self._size += len(chunk)
-        self.service._update_transfer_network(self.transfer_id, self._size)
+        self._progress.update(self._size)
 
     def commit(self) -> FileRecord:
         if self._finished:
@@ -1077,11 +1081,14 @@ class StorageService:
 
         def iterator() -> Iterator[bytes]:
             sent = 0
+            progress = TransferProgress(
+                lambda count: self._update_transfer_network(transfer_id, count)
+            )
             try:
                 with physical_path.open("rb") as handle:
                     while chunk := handle.read(4 * 1024 * 1024):
                         sent += len(chunk)
-                        self._update_transfer_network(transfer_id, sent)
+                        progress.update(sent)
                         yield chunk
                 with self.database.transaction() as connection:
                     connection.execute(
@@ -3469,6 +3476,7 @@ class StorageService:
             "expected_size": record.expected_size,
             "expected_sha256": record.expected_sha256,
             "received_bytes": record.received_bytes,
+            "max_chunk_bytes": MAX_UPLOAD_CHUNK_BYTES,
             "content_type": record.content_type,
             "status": record.status,
             "result_file_id": record.result_file_id,

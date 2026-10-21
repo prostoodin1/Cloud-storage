@@ -4,7 +4,10 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import ssl
+import threading
+import time
 import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
@@ -68,6 +71,14 @@ class ClientApi:
         ):
             raise ValueError("Повреждены данные защиты сервера в приглашении")
         self._parsed = urllib.parse.urlsplit(self.server_url)
+        self._json_connections = threading.local()
+
+    def close(self) -> None:
+        """Release the calling worker's reusable connection."""
+        connection = getattr(self._json_connections, "connection", None)
+        if connection is not None:
+            connection.close()
+            self._json_connections.connection = None
 
     def health(self, *, timeout: float = 8.0) -> dict[str, Any]:
         return self._json_request("/v1/health", timeout=timeout)
@@ -278,6 +289,15 @@ class ClientApi:
             append = existing > 0 and response.status == 206
             received = existing if append else 0
             content_range = response.getheader("Content-Range", "")
+            if response.status == 206:
+                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", content_range)
+                if (
+                    match is None
+                    or int(match[1]) != existing
+                    or int(match[2]) < int(match[1])
+                    or int(match[3]) <= int(match[2])
+                ):
+                    raise ClientConnectionError("server returned an invalid download range")
             if "/" in content_range:
                 total = int(content_range.rsplit("/", 1)[1])
             else:
@@ -285,13 +305,19 @@ class ClientApi:
             if progress:
                 progress(received, total)
             with temporary.open("ab" if append else "wb") as handle:
+                next_continue_check = 0.0
                 while chunk := response.read(1024 * 1024):
-                    if should_continue is not None and not should_continue():
-                        raise TransferInterrupted("transfer paused")
+                    now = time.monotonic()
+                    if should_continue is not None and now >= next_continue_check:
+                        if not should_continue():
+                            raise TransferInterrupted("transfer paused")
+                        next_continue_check = now + 0.25
                     handle.write(chunk)
                     received += len(chunk)
                     if progress:
                         progress(received, total)
+                if (response.getheader("Content-Length") is not None or content_range) and received != total:
+                    raise ClientConnectionError("download interrupted before the declared length")
                 handle.flush()
                 os.fsync(handle.fileno())
             if expected_sha256:
@@ -393,23 +419,44 @@ class ClientApi:
             request_headers["Content-Type"] = "application/json"
         if headers:
             request_headers.update(headers)
-        connection = self._connection(timeout=timeout)
-        try:
-            connection.request(method, route, body=request_body, headers=request_headers)
-            response = connection.getresponse()
-            content = response.read()
-            if response.status >= 400:
-                self._raise_api_error(response.status, content)
-            return json.loads(content.decode("utf-8")) if content else None
-        except (ClientApiError, CertificateMismatch):
-            raise
-        except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
-            raise ClientConnectionError(
-                "Сервер недоступен. Проверьте, что серверное ядро запущено и выбранный "
-                "способ доступа — локальная сеть или интернет — сейчас включён."
-            ) from exc
-        finally:
-            connection.close()
+        for attempt in range(2):
+            connection = getattr(self._json_connections, "connection", None)
+            if connection is not None and time.monotonic() - self._json_connections.last_used >= 2:
+                self.close()
+                connection = None
+            reused = connection is not None
+            if connection is None:
+                connection = self._connection(timeout=timeout)
+                self._json_connections.connection = connection
+            try:
+                connection.timeout = timeout
+                if connection.sock is not None:
+                    connection.sock.settimeout(timeout)
+                connection.request(method, route, body=request_body, headers=request_headers)
+                response = connection.getresponse()
+                content = response.read()
+                self._json_connections.last_used = time.monotonic()
+                if response.will_close:
+                    self.close()
+                if response.status >= 400:
+                    self._raise_api_error(response.status, content)
+                return json.loads(content.decode("utf-8")) if content else None
+            except ClientApiError:
+                raise
+            except CertificateMismatch:
+                self.close()
+                raise
+            except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+                self.close()
+                # An idle peer may have closed keep-alive. Only retry reads:
+                # blindly replaying POST/PATCH can duplicate a committed action.
+                if reused and attempt == 0 and method == "GET":
+                    continue
+                raise ClientConnectionError(
+                    "Сервер недоступен. Проверьте, что серверное ядро запущено и выбранный "
+                    "способ доступа — локальная сеть или интернет — сейчас включён."
+                ) from exc
+        raise ClientConnectionError("server connection failed")
 
     def _headers(self) -> dict[str, str]:
         # Public zrok frontends may otherwise return an HTML consent page to an API client.

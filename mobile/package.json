@@ -8,6 +8,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "typecheck": "tsc --noEmit",
+    "test:transfers": "node --test scripts/test-transfer-protocol.cjs",
     "doctor": "expo-doctor",
     "prebuild": "expo prebuild"
   },

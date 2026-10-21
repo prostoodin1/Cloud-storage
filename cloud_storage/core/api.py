@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import secrets
@@ -61,6 +60,13 @@ from cloud_storage.core.storage import (
 )
 from cloud_storage.core.support import SupportBundleService
 from cloud_storage.core.tls import TlsIdentity, lan_endpoints, load_or_create_tls_identity
+from cloud_storage.core.transfer_io import (
+    MAX_UPLOAD_CHUNK_BYTES,
+    UPLOAD_BUFFER_BYTES,
+    TransferAdmission,
+    transfer_body,
+    transfer_io,
+)
 from cloud_storage.core.tunnels import TunnelProviderRegistry
 from cloud_storage.core.web import BrowserAccess
 from cloud_storage.pairing import build_dynamic_pairing_code, verify_dynamic_pairing_code
@@ -483,6 +489,7 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
 
 def create_app(config: CoreConfig | None = None) -> FastAPI:
     runtime = build_runtime(config)
+    transfer_admission = TransferAdmission()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -2970,18 +2977,23 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     ):
         if content_type and content_type.casefold() != "application/offset+octet-stream":
             raise HTTPException(status_code=415, detail="invalid resumable chunk content type")
-        if content_length > 8 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="upload chunk exceeds 8 MiB")
-        payload = await request.body()
-        if len(payload) != content_length:
-            raise HTTPException(status_code=400, detail="upload chunk length mismatch")
-        upload = await asyncio.to_thread(
-            runtime.storage.append_resumable_upload,
-            upload_id,
-            device.user_id,
-            upload_offset,
-            payload,
-        )
+        if content_length > MAX_UPLOAD_CHUNK_BYTES:
+            raise HTTPException(status_code=413, detail="upload chunk exceeds 32 MiB")
+        with transfer_admission.slot():
+            chunks: list[bytes] = []
+            received = 0
+            async for chunk in transfer_body(request):
+                if received + len(chunk) > content_length:
+                    raise HTTPException(status_code=400, detail="upload chunk length mismatch")
+                chunks.append(chunk)
+                received += len(chunk)
+            if received != content_length:
+                raise HTTPException(status_code=400, detail="upload chunk length mismatch")
+            upload = await transfer_io(
+                lambda: runtime.storage.append_resumable_upload(
+                    upload_id, device.user_id, upload_offset, b"".join(chunks)
+                ),
+            )
         return JSONResponse(
             content=runtime.storage.resumable_to_dict(upload),
             headers={"Upload-Offset": str(upload.received_bytes)},
@@ -2992,11 +3004,12 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         upload_id: str,
         device: DeviceRecord = Depends(require_device),  # noqa: B008
     ):
-        record = await asyncio.to_thread(
-            runtime.storage.complete_resumable_upload,
-            upload_id,
-            device.user_id,
-        )
+        with transfer_admission.slot():
+            record = await transfer_io(
+                runtime.storage.complete_resumable_upload,
+                upload_id,
+                device.user_id,
+            )
         return JSONResponse(
             content=runtime.storage.to_dict(record),
             headers={"ETag": f'"sha256:{record.sha256}"'},
@@ -3021,20 +3034,38 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     ):
         if content_encoding and content_encoding.casefold() not in {"identity"}:
             raise HTTPException(status_code=415, detail="encoded request bodies are not accepted")
-        session = runtime.storage.prepare_upload(
-            space_id=space_id,
-            user_id=device.user_id,
-            logical_path=logical_path,
-            content_type=content_type,
-            expected_size=content_length,
-        )
-        try:
-            async for chunk in request.stream():
-                session.write(chunk)
-            record = await asyncio.to_thread(session.commit)
-        except Exception:
-            session.abort()
-            raise
+        with transfer_admission.slot():
+            session = runtime.storage.prepare_upload(
+                space_id=space_id,
+                user_id=device.user_id,
+                logical_path=logical_path,
+                content_type=content_type,
+                expected_size=content_length,
+            )
+            try:
+                buffer: list[memoryview] = []
+                buffered = 0
+                async for chunk in transfer_body(request):
+                    # ASGI frame sizes differ across HTTP servers and clients.
+                    # Bound our buffer even when a client sends a large frame.
+                    for start in range(0, len(chunk), UPLOAD_BUFFER_BYTES):
+                        part = memoryview(chunk)[start : start + UPLOAD_BUFFER_BYTES]
+                        if buffered + len(part) > UPLOAD_BUFFER_BYTES:
+                            await transfer_io(lambda parts=tuple(buffer): session.write(b"".join(parts)))
+                            buffer = []
+                            buffered = 0
+                        buffer.append(part)
+                        buffered += len(part)
+                        if buffered == UPLOAD_BUFFER_BYTES:
+                            await transfer_io(lambda parts=tuple(buffer): session.write(b"".join(parts)))
+                            buffer = []
+                            buffered = 0
+                if buffer:
+                    await transfer_io(lambda: session.write(b"".join(buffer)))
+                record = await transfer_io(session.commit)
+            except BaseException:
+                await transfer_io(session.abort)
+                raise
         return JSONResponse(
             status_code=201,
             content=runtime.storage.to_dict(record),

@@ -223,7 +223,7 @@ export class CloudApi {
     logicalPath: string,
     sizeBytes: number,
     contentType: string,
-  ): Promise<{ id: string; received_bytes: number; status: string }> {
+  ): Promise<{ id: string; received_bytes: number; status: string; max_chunk_bytes?: number }> {
     return this.request(`/v1/spaces/${encodeURIComponent(spaceId)}/uploads`, {
       method: 'POST',
       body: JSON.stringify({
@@ -234,7 +234,7 @@ export class CloudApi {
     });
   }
 
-  uploadStatus(uploadId: string): Promise<{ id: string; received_bytes: number; status: string }> {
+  uploadStatus(uploadId: string): Promise<{ id: string; received_bytes: number; status: string; max_chunk_bytes?: number }> {
     return this.request(`/v1/uploads/${encodeURIComponent(uploadId)}`);
   }
 

@@ -1,0 +1,60 @@
+{
+  "date": "2026-10-27",
+  "kind": "local-b3-preparation",
+  "internal_version": "0.10.8b2",
+  "base_commit": "2df2327266cff79b14227b60651c99828f425e05",
+  "python_full": {
+    "passed": 251,
+    "seconds": 105.4
+  },
+  "python_final_targeted": {
+    "passed": 29
+  },
+  "mobile_protocol": {
+    "passed": 10,
+    "native_device_test": false
+  },
+  "mobile_typecheck": true,
+  "mobile_android_ios_js_export": true,
+  "windows_package": {
+    "manager_package": true,
+    "container_manager_package": true,
+    "client_drive_module": true,
+    "system_icu_not_shadowed": true,
+    "client": true,
+    "go_core_binary": true,
+    "packaged_core_api": true,
+    "native_supervisor": true,
+    "unauthorized_shutdown_rejected": true,
+    "packaged_web_assets": true,
+    "packaged_quota": true,
+    "packaged_file_roundtrip": true,
+    "packaged_download_range": true,
+    "packaged_if_range_changed": true,
+    "packaged_unsatisfiable_range": true,
+    "packaged_client_folder": true,
+    "packaged_usage": true,
+    "packaged_browser_same_person": true,
+    "packaged_browser_folder_upload": true,
+    "packaged_public_share": true,
+    "packaged_public_share_range": true,
+    "packaged_diagnostics": true,
+    "packaged_archive_hidden": true,
+    "packaged_archive_restore": true,
+    "personal_space_isolation": true,
+    "clean_shutdown": true,
+    "restart_preserves_tokens_files_and_browser_session": true
+  },
+  "windows_mounted_drive": {
+    "core_version": true,
+    "drive_mounted": true,
+    "folder_created": true,
+    "file_roundtrip_sha256": true,
+    "server_sees_drive_upload": true,
+    "quota_is_3_gib": true,
+    "usage_recorded": true
+  },
+  "new_wan_benchmark": false,
+  "github_publication": false,
+  "installed_service_replaced": false
+}

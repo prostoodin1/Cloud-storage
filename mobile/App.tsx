@@ -29,9 +29,11 @@ import {
   saveState,
 } from './src/storage';
 import { colors } from './src/theme';
+import { claimTransfer, clearCompletedRecords, resetTransferRecord, TransferLeaseLost } from './src/transferLease';
 import {
   offlineDirectory,
   isRetryableTransferError,
+  transferRetryDelay,
   runDownloadTransfer,
   runUploadTransfer,
   safeFileName,
@@ -92,6 +94,7 @@ function MainApp() {
   const [adminError, setAdminError] = useState('');
   const activeTransfers = useRef(new Set<string>());
   const transferRetryAfter = useRef(new Map<string, number>());
+  const transferRetryAttempts = useRef(new Map<string, number>());
   const transferRef = useRef(transfers);
   const connectionRef = useRef(connection);
   const photoBackupRef = useRef(photoBackup);
@@ -252,6 +255,11 @@ function MainApp() {
         ? { ...item, status: 'paused' as const, error: 'Подключение удалено' }
         : item,
     );
+    if (connectionRef.current) {
+      for (const item of nextTransfers) {
+        if (item.status === 'paused') resetTransferRecord(connectionRef.current.serverUrl, item);
+      }
+    }
     setTransfers(nextTransfers);
     persistTransfers(nextTransfers);
     setConnection(null);
@@ -299,12 +307,19 @@ function MainApp() {
       const record = transferRef.current.find((item) => item.id === id);
       if (!record || !['queued', 'running'].includes(record.status)) return;
       activeTransfers.current.add(id);
+      let lease: ReturnType<typeof claimTransfer> = null;
       try {
+        lease = claimTransfer(api.serverUrl, id);
+        if (!lease) return;
+        const owned = lease.latest() ?? record;
+        if (!['queued','running'].includes(owned.status)) { replaceTransfer(owned); return; }
+        const update = (updated: TransferRecord) => { lease!.assertActive(); lease!.checkpoint(updated); replaceTransfer(updated); };
         const completed =
           record.direction === 'upload'
-            ? await runUploadTransfer(api, record, replaceTransfer)
-            : await runDownloadTransfer(api, record, replaceTransfer);
+            ? await runUploadTransfer(api, owned, update)
+            : await runDownloadTransfer(api, owned, update, lease.assertActive);
         transferRetryAfter.current.delete(id);
+        transferRetryAttempts.current.delete(id);
         if (completed.direction === 'upload') void loadEntries();
         if (
           completed.direction === 'download' &&
@@ -314,15 +329,23 @@ function MainApp() {
           await Sharing.shareAsync(completed.localUri);
         }
       } catch (error) {
+        if (error instanceof TransferLeaseLost) return;
         const latest = transferRef.current.find((item) => item.id === id) ?? record;
         const retryable = isRetryableTransferError(error);
-        if (retryable) transferRetryAfter.current.set(id, Date.now() + 10_000 + Math.random() * 5_000);
-        replaceTransfer({
+        if (retryable) {
+          const attempt = (transferRetryAttempts.current.get(id) ?? 0) + 1;
+          transferRetryAttempts.current.set(id, attempt);
+          transferRetryAfter.current.set(id, Date.now() + transferRetryDelay(attempt, error));
+        }
+        const failed: TransferRecord = {
           ...latest,
           status: retryable ? 'queued' : 'failed',
           error: error instanceof Error ? error.message : 'Передача не выполнена.',
-        });
+        };
+        try { lease?.checkpoint(failed); } catch (checkpointError) { if (checkpointError instanceof TransferLeaseLost) return; }
+        replaceTransfer(failed);
       } finally {
+        lease?.release();
         activeTransfers.current.delete(id);
       }
     },
@@ -380,6 +403,7 @@ function MainApp() {
       localUri: destination.uri,
       spaceId: selectedSpaceId,
       totalBytes: entry.size_bytes ?? 0,
+      expectedSha256: entry.sha256,
       completedBytes: 0,
       createdAt: new Date().toISOString(),
     };
@@ -444,10 +468,15 @@ function MainApp() {
   const retryTransfer = (id: string) => {
     const record = transferRef.current.find((item) => item.id === id);
     if (!record) return;
-    replaceTransfer({ ...record, status: 'queued', error: undefined });
+    transferRetryAfter.current.delete(id);
+    transferRetryAttempts.current.delete(id);
+    const queued: TransferRecord = { ...record, status: 'queued', error: undefined };
+    if (connection) resetTransferRecord(connection.serverUrl, queued);
+    replaceTransfer(queued);
   };
 
   const clearCompleted = () => {
+    if (connection) clearCompletedRecords(connection.serverUrl);
     const next = transferRef.current.filter((item) => item.status !== 'completed');
     setTransfers(next);
     persistTransfers(next);

@@ -200,6 +200,9 @@ def test_client_recovers_changed_lan_address_by_pinned_server_identity(
         def list_spaces(self):
             return []
 
+        def close(self):
+            pass
+
     monkeypatch.setattr("cloud_storage.client.window.ClientApi", FakeApi)
     monkeypatch.setattr(
         "cloud_storage.client.window.discover_servers",
@@ -352,3 +355,66 @@ def test_client_api_pairing_and_file_round_trip(tmp_path) -> None:
         server.should_exit = True
         thread.join(timeout=5)
         assert not thread.is_alive()
+
+
+def test_saved_public_fallback_is_probed_without_credentials_and_keeps_queued_jobs(
+    tmp_path, monkeypatch
+):
+    app = QApplication.instance() or QApplication([])
+    store = ClientSettingsStore(tmp_path)
+    profile = store.load()
+    old = "https://192.168.1.10:8766"
+    backup = "https://backup.example"
+    profile.server_url = old
+    profile.certificate_fingerprint = "ab" * 32
+    profile.trusted_endpoints = {old: "ab" * 32, backup: ""}
+    store.save(profile)
+    DeviceTokenVault(tmp_path).store("csd_" + "x" * 64)
+    window = ClientWindow(store=store, smoke_test=True)
+    tasks = []
+    observed = []
+    monkeypatch.setattr(window, "_start_task", lambda *args: tasks.append(args))
+    monkeypatch.setattr(window, "_set_spaces", lambda *a, **k: None)
+    monkeypatch.setattr(window, "_reconcile_drives", lambda: None)
+    monkeypatch.setattr("cloud_storage.client.window.discover_servers", lambda **k: [])
+
+    class FakeApi:
+        def __init__(self, url, **kwargs):
+            self.server_url = url
+            self.token = kwargs.get("token")
+
+        def health(self):
+            observed.append((self.server_url, self.token))
+            if self.server_url == old:
+                raise ClientConnectionError("unavailable")
+            return {"status": "ok"}
+
+        def pairing_status(self):
+            return {"status": "trusted"}
+
+        def list_spaces(self):
+            return []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("cloud_storage.client.window.ClientApi", FakeApi)
+    try:
+        window.refresh_connection()
+        task = tasks.pop()
+        task[1](task[0]())
+        assert store.load().server_url == backup
+        assert store.load().certificate_fingerprint == ""
+        assert next(token for url, token in observed if url == backup) is None
+        source = tmp_path / "queued.bin"
+        source.write_bytes(b"data")
+        transfer = window.transfer_store.queue_upload(old, "space", "file.bin", source)
+        used = []
+        monkeypatch.setattr(
+            window, "_run_upload_transfer", lambda api, record: used.append(api.server_url)
+        )
+        window._run_transfer(transfer.id)
+        assert used == [backup]
+    finally:
+        window.close()
+        app.processEvents()

@@ -188,6 +188,7 @@ export interface TransferRecord {
   totalBytes: number;
   completedBytes: number;
   remoteUploadId?: string;
+  expectedSha256?: string;
   sourceAssetId?: string;
   error?: string;
   createdAt: string;

@@ -11,6 +11,7 @@ import threading
 import time
 import unicodedata
 import uuid
+import weakref
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from datetime import timedelta
@@ -356,11 +357,11 @@ class StorageService:
         self.config = config
         self.database = database
         self.repository = repository
-        self._resumable_locks: dict[str, threading.RLock] = {}
+        self._resumable_locks: weakref.WeakValueDictionary[str, threading.RLock] = weakref.WeakValueDictionary()
         self._resumable_locks_guard = threading.Lock()
         self._maintenance_locks: dict[str, threading.Lock] = {}
         self._maintenance_locks_guard = threading.Lock()
-        self._transfer_locks: dict[str, threading.RLock] = {}
+        self._transfer_locks: weakref.WeakValueDictionary[str, threading.RLock] = weakref.WeakValueDictionary()
         self._transfer_locks_guard = threading.Lock()
 
     def sync_managed_roots(self, requests: list[ManagedRootRequest]) -> list[StorageRootRecord]:
@@ -1057,7 +1058,13 @@ class StorageService:
         record: FileRecord,
         physical_path: Path,
         user_id: str,
+        *,
+        offset: int = 0,
+        length: int | None = None,
     ) -> tuple[str, Iterator[bytes]]:
+        length = record.size_bytes - offset if length is None else length
+        if offset < 0 or length < 0 or offset + length > record.size_bytes:
+            raise ValueError("invalid download interval")
         transfer_id = str(uuid.uuid4())
         now = utc_text()
         with self.database.transaction() as connection:
@@ -1071,7 +1078,7 @@ class StorageService:
                 user_id=user_id,
                 logical_path=record.logical_path,
                 content_type=record.content_type,
-                total_bytes=record.size_bytes,
+                total_bytes=length,
                 staging_path=Path(),
                 temporary_path=Path(),
                 storage_root_id=record.storage_root_id,
@@ -1086,7 +1093,11 @@ class StorageService:
             )
             try:
                 with physical_path.open("rb") as handle:
-                    while chunk := handle.read(4 * 1024 * 1024):
+                    handle.seek(offset)
+                    while sent < length:
+                        chunk = handle.read(min(4 * 1024 * 1024, length - sent))
+                        if not chunk:
+                            raise OSError("stored file ended before the promised download length")
                         sent += len(chunk)
                         progress.update(sent)
                         yield chunk

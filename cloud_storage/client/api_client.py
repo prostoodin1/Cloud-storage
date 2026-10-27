@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Never
 
 from cloud_storage.client.settings import validate_server_url
+from cloud_storage.retry import retry_after_seconds
 
 
 class ClientConnectionError(ConnectionError):
@@ -21,10 +22,11 @@ class ClientConnectionError(ConnectionError):
 
 
 class ClientApiError(RuntimeError):
-    def __init__(self, status_code: int, detail: str) -> None:
+    def __init__(self, status_code: int, detail: str, retry_after: float | None = None) -> None:
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+        self.retry_after = retry_after
 
 
 class CertificateMismatch(ClientConnectionError):
@@ -273,19 +275,38 @@ class ClientApi:
         expected_sha256: str = "",
         should_continue: Callable[[], bool] | None = None,
     ) -> Path:
+        expected_sha256 = expected_sha256.casefold()
+        if expected_sha256 and not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
+            raise ValueError("invalid expected SHA-256")
         route = self._file_route(space_id, logical_path)
         connection = self._connection(timeout=30.0)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(destination.name + ".part")
         existing = temporary.stat().st_size if temporary.exists() else 0
+        if not expected_sha256:
+            existing = 0  # Without an immutable identity, joining versions is unsafe.
         headers = self._headers()
         if existing:
             headers["Range"] = f"bytes={existing}-"
+            if expected_sha256:
+                headers["If-Range"] = f'"sha256:{expected_sha256}"'
         try:
             connection.request("GET", route, headers=headers)
             response = connection.getresponse()
+            if response.status == 416 and existing and expected_sha256:
+                response.read()
+                with temporary.open("rb") as handle:
+                    complete = hashlib.file_digest(handle, "sha256").hexdigest() == expected_sha256
+                if complete:
+                    os.replace(temporary, destination)
+                    return destination
+                temporary.unlink(missing_ok=True)
+                raise ClientConnectionError("saved download fragment was invalid; retry from the beginning")
             if response.status >= 400:
-                self._raise_api_error(response.status, response.read())
+                self._raise_api_error(response.status, response.read(), response.getheader("Retry-After"))
+            actual_etag = response.getheader("ETag")
+            if expected_sha256 and actual_etag and actual_etag != f'"sha256:{expected_sha256}"':
+                raise ClientApiError(409, "Файл на сервере изменён; обновите список и повторите скачивание")
             append = existing > 0 and response.status == 206
             received = existing if append else 0
             content_range = response.getheader("Content-Range", "")
@@ -439,7 +460,7 @@ class ClientApi:
                 if response.will_close:
                     self.close()
                 if response.status >= 400:
-                    self._raise_api_error(response.status, content)
+                    self._raise_api_error(response.status, content, response.getheader("Retry-After"))
                 return json.loads(content.decode("utf-8")) if content else None
             except ClientApiError:
                 raise
@@ -493,9 +514,9 @@ class ClientApi:
         )
 
     @staticmethod
-    def _raise_api_error(status_code: int, body: bytes) -> Never:
+    def _raise_api_error(status_code: int, body: bytes, retry_after: str | None = None) -> Never:
         try:
             detail = json.loads(body.decode("utf-8")).get("detail", "request failed")
         except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
             detail = "request failed"
-        raise ClientApiError(status_code, str(detail))
+        raise ClientApiError(status_code, str(detail), retry_after_seconds(retry_after))

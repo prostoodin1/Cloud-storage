@@ -5,6 +5,21 @@ param(
   [switch]$NativeCore
 )
 $ErrorActionPreference = 'Stop'
+function Invoke-QaRange {
+  param([string]$Uri, [int]$Start, [int]$End = -1, [string]$Token = '', [string]$IfRange = '')
+  $request = [Net.HttpWebRequest]::Create($Uri)
+  $request.Timeout = 10000
+  if ($End -ge 0) { $request.AddRange($Start,$End) } else { $request.AddRange($Start) }
+  if ($Token) { $request.Headers['Authorization'] = $Token }
+  if ($IfRange) { $request.Headers['If-Range'] = $IfRange }
+  try { $response = $request.GetResponse() }
+  catch [Net.WebException] { if (-not $_.Exception.Response) { throw }; $response = $_.Exception.Response }
+  try {
+    $reader = [IO.StreamReader]::new($response.GetResponseStream())
+    try { $content = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    return @{StatusCode=[int]$response.StatusCode; Content=$content; ContentRange=$response.Headers['Content-Range']}
+  } finally { $response.Dispose() }
+}
 $releaseDist = (Resolve-Path -LiteralPath $Dist).Path
 $qaRoot = Join-Path $env:TEMP ('cloud-storage-package-qa-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $qaRoot | Out-Null
@@ -130,6 +145,11 @@ try {
   Invoke-RestMethod -Method Put -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Headers $deviceHeaders -ContentType 'text/plain' -Body $payloadText | Out-Null
   $downloaded = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Headers $deviceHeaders
   $checks['packaged_file_roundtrip'] = ($downloaded.Content -ceq $payloadText)
+  $rangeDownload = Invoke-QaRange -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Start 3 -End 8 -Token $deviceHeaders.Authorization -IfRange $downloaded.Headers['ETag']
+  $checks['packaged_download_range'] = ($rangeDownload.StatusCode -eq 206 -and $rangeDownload.Content -ceq $payloadText.Substring(3,6) -and $rangeDownload.ContentRange -eq "bytes 3-8/$($payloadText.Length)")
+  $changedDownload = Invoke-QaRange -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Start 3 -End 8 -Token $deviceHeaders.Authorization -IfRange '"sha256:changed"'
+  $checks['packaged_if_range_changed'] = ($changedDownload.StatusCode -eq 200 -and $changedDownload.Content -ceq $payloadText)
+  $checks['packaged_unsatisfiable_range'] = ((Invoke-QaRange -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/Client-folder/qa.txt" -Start 999999 -Token $deviceHeaders.Authorization).StatusCode -eq 416)
   $clientEntries = @(Invoke-RestMethod -Uri "$qaBaseUrl/v1/spaces/$spaceId/entries?directory=Client-folder" -Headers $deviceHeaders)
   $checks['packaged_client_folder'] = ($clientEntries.Count -eq 1 -and $clientEntries[0].name -eq 'qa.txt')
   $spaces = @(Invoke-RestMethod -Uri "$qaBaseUrl/v1/spaces" -Headers $deviceHeaders)
@@ -149,6 +169,8 @@ try {
   $publicOverview = Invoke-RestMethod -Uri ($qaBaseUrl + $share.url_path)
   $publicDownload = Invoke-WebRequest -UseBasicParsing -Uri ($qaBaseUrl + $share.url_path + '/download')
   $checks['packaged_public_share'] = ($publicOverview.name -eq 'browser.txt' -and $publicDownload.Content -ceq $browserPayload)
+  $publicRange = Invoke-QaRange -Uri ($qaBaseUrl + $share.url_path + '/download') -Start 0 -End 6
+  $checks['packaged_public_share_range'] = ($publicRange.StatusCode -eq 206 -and $publicRange.Content -ceq $browserPayload.Substring(0,7))
   Invoke-RestMethod -Method Delete -Uri "$qaBaseUrl/v1/shares/$($share.id)" -WebSession $qaBrowser -Headers $csrfHeaders | Out-Null
   $diagnostics = Invoke-RestMethod -Uri "$qaBaseUrl/v1/admin/diagnostics" -Headers $managerHeaders
   $checks['packaged_diagnostics'] = ($null -ne $diagnostics)

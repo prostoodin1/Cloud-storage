@@ -40,6 +40,7 @@ from cloud_storage.core.config import CoreConfig, CoreSecrets
 from cloud_storage.core.control_center import ControlCenterService
 from cloud_storage.core.database import Database
 from cloud_storage.core.diagnostics import DiagnosticsService
+from cloud_storage.core.http_ranges import UnsatisfiableRange, byte_range
 from cloud_storage.core.integrations import IntegrationRegistry
 from cloud_storage.core.notifications import NotificationService
 from cloud_storage.core.recovery import RecoveryService
@@ -2864,38 +2865,42 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     def public_share_overview(token: str) -> dict[str, Any]:
         return runtime.storage.public_share_overview(token)
 
-    def public_share_stream(token: str, relative_path: str = "") -> StreamingResponse:
+    def file_stream(record, physical_path, user_id: str, request: Request) -> Response:
+        etag = f'"sha256:{record.sha256}"'
+        headers = {
+            "ETag": etag, "Accept-Ranges": "bytes",
+            "Content-Disposition": f"attachment; filename*=utf-8''{quote(PurePosixPath(record.logical_path).name)}",
+        }
+        try:
+            selected = byte_range(request.headers.get("range"), request.headers.get("if-range"), etag, record.size_bytes)
+        except UnsatisfiableRange:
+            return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{record.size_bytes}"})
+        start, end = selected if selected else (0, record.size_bytes - 1)
+        length = end - start + 1
+        transfer_id, stream = runtime.storage.stream_download(record, physical_path, user_id, offset=start, length=length)
+        headers.update({"Content-Length": str(length), "X-Transfer-ID": transfer_id})
+        if selected:
+            headers["Content-Range"] = f"bytes {start}-{end}/{record.size_bytes}"
+        return StreamingResponse(stream, status_code=206 if selected else 200, media_type=record.content_type, headers=headers)
+
+    def public_share_stream(token: str, request: Request, relative_path: str = "") -> Response:
         share, record, physical_path = runtime.storage.resolve_public_share_download(
             token,
             relative_path,
         )
-        filename = PurePosixPath(record.logical_path).name
-        transfer_id, stream = runtime.storage.stream_download(
-            record,
-            physical_path,
-            share.owner_user_id,
-        )
-        return StreamingResponse(
-            stream,
-            media_type=record.content_type,
-            headers={
-                "ETag": f'"sha256:{record.sha256}"',
-                "Content-Length": str(record.size_bytes),
-                "Content-Disposition": f"attachment; filename*=utf-8''{quote(filename)}",
-                "X-Transfer-ID": transfer_id,
-            },
-        )
+        return file_stream(record, physical_path, share.owner_user_id, request)
 
     @app.get("/v1/public/shares/{token}/download", tags=["public-share"])
-    def download_public_shared_file(token: str) -> StreamingResponse:
-        return public_share_stream(token)
+    def download_public_shared_file(token: str, request: Request) -> Response:
+        return public_share_stream(token, request)
 
     @app.get("/v1/public/shares/{token}/files/{relative_path:path}", tags=["public-share"])
     def download_public_shared_directory_file(
         token: str,
+        request: Request,
         relative_path: Annotated[str, Path(min_length=1, max_length=1024)],
-    ) -> StreamingResponse:
-        return public_share_stream(token, relative_path)
+    ) -> Response:
+        return public_share_stream(token, request, relative_path)
 
     @app.post(
         "/v1/spaces/{space_id}/directories",
@@ -3075,28 +3080,14 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     @app.get("/v1/spaces/{space_id}/files/{logical_path:path}", tags=["files"])
     def download_file(
         space_id: str,
+        request: Request,
         logical_path: Annotated[str, Path(min_length=1, max_length=1024)],
         device: DeviceRecord = Depends(require_device),  # noqa: B008
     ):
         record, physical_path = runtime.storage.resolve_download(
             space_id, device.user_id, logical_path
         )
-        filename = PurePosixPath(record.logical_path).name
-        transfer_id, stream = runtime.storage.stream_download(
-            record,
-            physical_path,
-            device.user_id,
-        )
-        return StreamingResponse(
-            stream,
-            media_type=record.content_type,
-            headers={
-                "ETag": f'"sha256:{record.sha256}"',
-                "Content-Length": str(record.size_bytes),
-                "Content-Disposition": f"attachment; filename*=utf-8''{quote(filename)}",
-                "X-Transfer-ID": transfer_id,
-            },
-        )
+        return file_stream(record, physical_path, device.user_id, request)
 
     @app.delete("/v1/spaces/{space_id}/files/{logical_path:path}", tags=["files"])
     def delete_file(

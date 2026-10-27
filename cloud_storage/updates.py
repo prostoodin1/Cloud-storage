@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -21,6 +22,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from cloud_storage import __version__
+from cloud_storage.file_lock import file_lock
 
 UPDATE_PUBLIC_KEY = "6MAV324wKv/5LwvAnKMyCk+djeST6b5ufaMBVfe3XWQ="
 DEFAULT_FEEDS = {
@@ -323,6 +325,19 @@ class UpdateService:
         return self.list_versions(channel)[0]
 
     def download(self, info: UpdateInfo) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{64}", info.package.sha256):
+            raise UpdateError("неверный SHA-256 пакета")
+        self.download_directory.mkdir(parents=True, exist_ok=True)
+        lock = self.download_directory / f".{info.package.sha256}.lock"
+        if self.download_directory.resolve() not in lock.resolve().parents:
+            raise UpdateError("небезопасный каталог блокировки")
+        try:
+            with file_lock(lock):
+                return self._download_locked(info)
+        except BlockingIOError as exc:
+            raise UpdateError("этот пакет уже скачивается другим процессом") from exc
+
+    def _download_locked(self, info: UpdateInfo) -> Path:
         if info.product != self.product:
             raise UpdateError("пакет предназначен для другого приложения")
         self.download_directory.mkdir(parents=True, exist_ok=True)
@@ -341,31 +356,64 @@ class UpdateService:
             if size_bytes == info.package.size_bytes and sha256 == info.package.sha256:
                 self._write_state(info, destination)
                 return destination
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix="update-", suffix=".download", dir=self.download_directory
-        )
-        os.close(descriptor)
-        temporary = Path(temporary_name)
+        temporary = destination.with_name(f".{info.package.sha256}.download")
+        if self.download_directory.resolve() not in temporary.resolve().parents:
+            raise UpdateError("небезопасный временный файл")
+        if temporary.exists() and temporary.stat().st_size > info.package.size_bytes:
+            temporary.unlink()
         digest = hashlib.sha256()
         received = 0
+        if temporary.exists():
+            with temporary.open("rb") as partial:
+                while chunk := partial.read(4 * 1024**2):
+                    digest.update(chunk)
+                    received += len(chunk)
+        if received == info.package.size_bytes and digest.hexdigest() == info.package.sha256:
+            with temporary.open("r+b") as completed:
+                os.fsync(completed.fileno())
+            os.replace(temporary, destination)
+            self._write_state(info, destination)
+            return destination
+        if received == info.package.size_bytes:
+            temporary.unlink()
+            received = 0
+            digest = hashlib.sha256()
+        headers = {"User-Agent": f"CloudStorage/{__version__} ({self.product}; Windows)"}
+        if received:
+            headers["Range"] = f"bytes={received}-"
         request = urllib.request.Request(
             info.package.url,
-            headers={"User-Agent": f"CloudStorage/{__version__} ({self.product}; Windows)"},
+            headers=headers,
         )
+        discard = False
         try:
-            with self._open_verified(request, timeout=60) as response, temporary.open("wb") as out:
+            with self._open_verified(request, timeout=60) as response:
                 _https_url(response.geturl())
-                while chunk := response.read(1024 * 1024):
-                    received += len(chunk)
-                    if received > info.package.size_bytes or received > MAX_INSTALLER_BYTES:
-                        raise UpdateError("размер скачанного пакета превышает манифест")
-                    digest.update(chunk)
-                    out.write(chunk)
-                out.flush()
-                os.fsync(out.fileno())
+                status = response.status
+                if status == 206:
+                    content_range = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("Content-Range", ""))
+                    if not content_range or int(content_range[1]) != received or int(content_range[3]) != info.package.size_bytes or not received <= int(content_range[2]) < info.package.size_bytes:
+                        discard = True
+                        raise UpdateError("сервер вернул неверный диапазон обновления")
+                elif status == 200:
+                    received = 0
+                    digest = hashlib.sha256()
+                else:
+                    raise UpdateError("сервер не принял запрос пакета обновления")
+                with temporary.open("ab" if received else "wb") as out:
+                    while chunk := response.read(1024 * 1024):
+                        received += len(chunk)
+                        if received > info.package.size_bytes or received > MAX_INSTALLER_BYTES:
+                            discard = True
+                            raise UpdateError("размер скачанного пакета превышает манифест")
+                        digest.update(chunk)
+                        out.write(chunk)
+                    out.flush()
+                    os.fsync(out.fileno())
             if received != info.package.size_bytes:
                 raise UpdateError("пакет обновления скачан не полностью")
             if digest.hexdigest() != info.package.sha256:
+                discard = True
                 raise UpdateError("SHA-256 пакета обновления не совпадает")
             try:
                 os.replace(temporary, destination)
@@ -385,11 +433,12 @@ class UpdateService:
             return destination
         except UpdateError:
             raise
-        except (OSError, urllib.error.URLError) as exc:
+        except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
             raise UpdateError("не удалось скачать пакет обновления") from exc
         finally:
             try:
-                temporary.unlink(missing_ok=True)
+                if discard:
+                    temporary.unlink(missing_ok=True)
             except OSError:
                 # Antivirus scanners can briefly retain the temporary file.
                 # It has a random name and is never considered an installer.

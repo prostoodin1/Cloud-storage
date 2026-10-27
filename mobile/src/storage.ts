@@ -2,11 +2,14 @@ import { File, Paths } from 'expo-file-system';
 import * as SecureStore from 'expo-secure-store';
 
 import type { PersistedState, PhotoBackupSettings } from './types';
+import { mergeTransferRecords, registerTransferRecords } from './transferLease';
 
 const STATE_FILE = new File(Paths.document, 'cloud-storage-mobile.json');
 const PHOTO_INDEX_FILE = new File(Paths.document, 'cloud-storage-photo-index.json');
 const DEVICE_TOKEN_KEY = 'cloud-storage-device-token-v1';
 const REMOTE_SESSION_KEY = 'cloud-storage-remote-session-v1';
+let lastBackupAt = 0;
+let lastBackupMetadata = '';
 
 export const defaultPhotoBackup: PhotoBackupSettings = {
   enabled: false,
@@ -33,21 +36,30 @@ export function loadState(): PersistedState {
       return emptyState;
     }
     const parsed = JSON.parse(STATE_FILE.textSync()) as Partial<PersistedState>;
-    return {
+    const state: PersistedState = {
       connection: parsed.connection ?? null,
       transfers: Array.isArray(parsed.transfers) ? parsed.transfers : [],
       photoBackup: { ...defaultPhotoBackup, ...(parsed.photoBackup ?? {}) },
     };
+    if (state.connection) {
+      try { state.transfers = mergeTransferRecords(state.connection.serverUrl, state.transfers); } catch { /* Preserve the JSON backup if SQLite is unavailable. */ }
+    }
+    return state;
   } catch {
     return emptyState;
   }
 }
 
 export function saveState(state: PersistedState): void {
+  if (state.connection) registerTransferRecords(state.connection.serverUrl, state.transfers);
+  const metadata = JSON.stringify({ connection: state.connection, photoBackup: state.photoBackup });
+  if (STATE_FILE.exists && metadata === lastBackupMetadata && Date.now() - lastBackupAt < 1000) return;
   if (!STATE_FILE.exists) {
     STATE_FILE.create({ intermediates: true });
   }
   STATE_FILE.write(JSON.stringify(state));
+  lastBackupAt = Date.now();
+  lastBackupMetadata = metadata;
 }
 
 export function loadPhotoAssetIds(): Set<string> {

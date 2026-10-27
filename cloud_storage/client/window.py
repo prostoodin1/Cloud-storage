@@ -69,6 +69,7 @@ from cloud_storage.google_oauth import authorize_google_identity
 from cloud_storage.help.knowledge import KnowledgeBase
 from cloud_storage.help.page import HelpPage
 from cloud_storage.pairing import build_pairing_uri, parse_pairing_uri
+from cloud_storage.retry import retry_delay
 from cloud_storage.services.audit_log import AuditLog
 from cloud_storage.ui.theme import create_app_icon
 from cloud_storage.ui.update_page import UpdatePage
@@ -149,6 +150,7 @@ class ClientWindow(QMainWindow):
         self._active_transfer_ids: set[str] = set()
         self._transfer_widgets: dict[str, dict[str, QWidget]] = {}
         self._transfer_retry_after: dict[str, float] = {}
+        self._transfer_retry_attempts: dict[str, int] = {}
         self._open_after_transfer_ids: set[str] = set()
         self._connection_check_running = False
         self._profile_checks_running: set[str] = set()
@@ -1003,13 +1005,14 @@ class ClientWindow(QMainWindow):
         self.connect_button.setEnabled(False)
         self.connection_detail.setText("Проверяем сервер и отправляем запрос на подключение…")
         profile_id = self.profile.profile_id
+        invitation_fingerprint = self.fingerprint.text().strip()
 
         def pair() -> dict[str, Any]:
             candidates = [server_url, *alternate_addresses]
             errors: list[str] = []
             for candidate in dict.fromkeys(candidates):
                 candidate_fingerprint = (
-                    self.fingerprint.text()
+                    invitation_fingerprint
                     if self._needs_pinned_server_certificate(candidate)
                     else ""
                 )
@@ -1035,6 +1038,10 @@ class ClientWindow(QMainWindow):
                     "profile_id": profile_id,
                     "server_url": candidate,
                     "fingerprint": candidate_fingerprint,
+                    "trusted_endpoints": {
+                        address: invitation_fingerprint if self._needs_pinned_server_certificate(address) else ""
+                        for address in dict.fromkeys(candidates)
+                    },
                 }
             raise ClientConnectionError(
                 "Подключение не принято ни по одному адресу из кода. "
@@ -1123,6 +1130,7 @@ class ClientWindow(QMainWindow):
         self.fingerprint.setText(selected_fingerprint)
         self.profile.server_url = selected_url
         self.profile.certificate_fingerprint = selected_fingerprint
+        self.profile.trusted_endpoints = dict(payload.get("trusted_endpoints") or {selected_url: selected_fingerprint})
         health = payload.get("health", {})
         self.profile.server_name = str(health.get("server_name") or "Домашнее облако")
         self.profile.device_id = str(device.get("id", ""))
@@ -1342,11 +1350,23 @@ class ClientWindow(QMainWindow):
             candidates: list[tuple[str, str, bool]] = [
                 (profile.server_url, profile.certificate_fingerprint, False)
             ]
+            candidates.extend(
+                (url, fingerprint, True) for url, fingerprint in profile.trusted_endpoints.items()
+                if url.rstrip("/") != profile.server_url.rstrip("/")
+            )
             errors: list[str] = []
             discovery_attempted = False
             while candidates:
                 server_url, fingerprint, recovered_address = candidates.pop(0)
                 try:
+                    if recovered_address:
+                        # Only origins explicitly saved during pairing (or a
+                        # discovery result with the pinned certificate) are used.
+                        probe = ClientApi(server_url, certificate_fingerprint=fingerprint)
+                        try:
+                            probe.health()  # No device credential in this probe.
+                        finally:
+                            probe.close()
                     api = ClientApi(
                         server_url,
                         token=token,
@@ -1387,7 +1407,8 @@ class ClientWindow(QMainWindow):
                     except OSError as exc:
                         errors.append(str(exc))
                         discovered = []
-                    expected_fingerprint = profile.certificate_fingerprint.replace(
+                    identity_pin = profile.certificate_fingerprint or next((pin for pin in profile.trusted_endpoints.values() if pin), "")
+                    expected_fingerprint = identity_pin.replace(
                         ":", ""
                     ).casefold()
                     if not expected_fingerprint:
@@ -1546,7 +1567,10 @@ class ClientWindow(QMainWindow):
         recovered_fingerprint = str(payload.get("fingerprint") or "").strip()
         if recovered_url:
             profile.server_url = recovered_url
-        if recovered_fingerprint:
+            profile.trusted_endpoints[recovered_url] = recovered_fingerprint
+            while len(profile.trusted_endpoints) > 8:
+                del profile.trusted_endpoints[next(iter(profile.trusted_endpoints))]
+        if "fingerprint" in payload:
             profile.certificate_fingerprint = recovered_fingerprint
         if status == "reconnect_required":
             DeviceTokenVault(self.store.data_directory, profile_id).clear()
@@ -1566,6 +1590,7 @@ class ClientWindow(QMainWindow):
         self._connection_check_running = False
         self.profile.server_url = profile.server_url
         self.profile.certificate_fingerprint = profile.certificate_fingerprint
+        self.profile.trusted_endpoints = profile.trusted_endpoints
         self.profile.device_status = status
         self.api = payload.get("api") if status == "trusted" else None
         if status == "reconnect_required":
@@ -2014,7 +2039,7 @@ class ClientWindow(QMainWindow):
                 continue
             if self._transfer_retry_after.get(transfer.id, 0) > now:
                 continue
-            if transfer.server_url.rstrip("/") != current_server:
+            if transfer.server_url.rstrip("/") not in {current_server, *self.profile.trusted_endpoints}:
                 self.transfer_store.set_status(
                     transfer.id,
                     "paused",
@@ -2040,7 +2065,7 @@ class ClientWindow(QMainWindow):
             self.transfer_store.set_status(transfer_id, "paused", "Нет подключения")
             return {"id": transfer_id, "network_error": False}
         api = ClientApi(
-            transfer.server_url,
+            self.profile.server_url if transfer.server_url.rstrip("/") in {self.profile.server_url.rstrip("/"), *self.profile.trusted_endpoints} else transfer.server_url,
             token=token,
             certificate_fingerprint=self.profile.certificate_fingerprint,
             remote_session=self.remote_session,
@@ -2077,7 +2102,7 @@ class ClientWindow(QMainWindow):
             self.transfer_store.set_status(
                 transfer_id, "queued" if retryable else "failed", str(exc)
             )
-            return {"id": transfer_id, "network_error": retryable}
+            return {"id": transfer_id, "network_error": retryable, "retry_after": exc.retry_after}
         except (OSError, ValueError, KeyError) as exc:
             self.transfer_store.set_status(transfer_id, "failed", str(exc))
             return {"id": transfer_id, "network_error": False}
@@ -2209,9 +2234,12 @@ class ClientWindow(QMainWindow):
         transfer_id = str(payload.get("id", ""))
         self._active_transfer_ids.discard(transfer_id)
         if payload.get("network_error"):
-            self._transfer_retry_after[transfer_id] = time.monotonic() + 10
+            attempt = self._transfer_retry_attempts.get(transfer_id, 0) + 1
+            self._transfer_retry_attempts[transfer_id] = attempt
+            self._transfer_retry_after[transfer_id] = time.monotonic() + retry_delay(attempt, payload.get("retry_after"))
         else:
             self._transfer_retry_after.pop(transfer_id, None)
+            self._transfer_retry_attempts.pop(transfer_id, None)
         try:
             transfer = self.transfer_store.get(transfer_id)
         except KeyError:
@@ -2269,6 +2297,7 @@ class ClientWindow(QMainWindow):
         if transfer.status in {"paused", "failed"}:
             self.transfer_store.set_status(transfer_id, "queued")
             self._transfer_retry_after.pop(transfer_id, None)
+            self._transfer_retry_attempts.pop(transfer_id, None)
             self._refresh_transfer_cards()
             self._start_queued_transfers()
 

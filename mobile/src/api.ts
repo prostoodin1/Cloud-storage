@@ -15,6 +15,7 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -23,6 +24,12 @@ export class ApiError extends Error {
   get needsInternetLogin(): boolean {
     return this.status === 403 && this.message.toLocaleLowerCase().includes('internet login');
   }
+}
+
+export function retryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const delay = /^\d+$/.test(value.trim()) ? Number(value) * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, Math.min(3_600_000, delay)) : undefined;
 }
 
 export function normalizeServerUrl(value: string): string {
@@ -94,7 +101,7 @@ export class CloudApi {
           typeof payload === 'object' && payload && 'detail' in payload
             ? String(payload.detail ?? `Ошибка сервера ${response.status}`)
             : `Ошибка сервера ${response.status}`;
-        throw new ApiError(response.status, detail);
+        throw new ApiError(response.status, detail, retryAfterMs(response.headers.get('Retry-After')));
       }
       return payload as T;
     } catch (error) {
@@ -102,9 +109,9 @@ export class CloudApi {
         throw error;
       }
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error('Сервер не ответил за 20 секунд.');
+        throw new TypeError('Сервер не ответил за 20 секунд.');
       }
-      throw new Error('Не удалось подключиться к серверу. Проверьте адрес, HTTPS и интернет.');
+      throw new TypeError('Не удалось подключиться к серверу. Проверьте адрес, HTTPS и интернет.');
     } finally {
       clearTimeout(timeout);
     }
@@ -239,22 +246,27 @@ export class CloudApi {
   }
 
   async uploadChunk(uploadId: string, offset: number, chunk: Blob): Promise<number> {
-    const response = await fetch(`${this.serverUrl}/v1/uploads/${encodeURIComponent(uploadId)}`, {
-      method: 'PATCH',
-      headers: {
-        ...this.authorizationHeaders(),
-        Accept: 'application/json',
-        'Content-Type': 'application/offset+octet-stream',
-        'Upload-Offset': String(offset),
-        'Content-Length': String(chunk.size),
-      },
-      body: chunk,
-    });
-    const payload = (await response.json()) as { received_bytes?: number; detail?: string };
-    if (!response.ok) {
-      throw new ApiError(response.status, payload.detail ?? `Ошибка загрузки ${response.status}`);
-    }
-    return Number(payload.received_bytes ?? offset + chunk.size);
+    const controller = new AbortController();
+    const budget = Math.max(60_000, Math.min(600_000, chunk.size / (32 * 1024) * 1000 + 30_000));
+    const timer = setTimeout(() => controller.abort(), budget);
+    try {
+      const response = await fetch(`${this.serverUrl}/v1/uploads/${encodeURIComponent(uploadId)}`, {
+        method: 'PATCH', signal: controller.signal,
+        headers: { ...this.authorizationHeaders(), Accept: 'application/json',
+          'Content-Type': 'application/offset+octet-stream', 'Upload-Offset': String(offset),
+          'Content-Length': String(chunk.size) }, body: chunk,
+      });
+      const text = await response.text();
+      let payload: { received_bytes?: number; detail?: string } = {};
+      try { payload = text ? JSON.parse(text) : {}; } catch {
+        if (response.ok) throw new TypeError('Сервер вернул неверное подтверждение загрузки.');
+      }
+      if (!response.ok) throw new ApiError(response.status, payload.detail ?? `Ошибка загрузки ${response.status}`, retryAfterMs(response.headers.get('Retry-After')));
+      return Number(payload.received_bytes ?? offset + chunk.size);
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new TypeError('Соединение прервано при загрузке; передача будет продолжена.');
+    } finally { clearTimeout(timer); }
   }
 
   completeUpload(uploadId: string): Promise<Record<string, unknown>> {
@@ -269,6 +281,20 @@ export class CloudApi {
 
   fileHeaders(): Record<string, string> {
     return this.authorizationHeaders();
+  }
+
+  async downloadRange(spaceId: string, logicalPath: string, offset: number, length: number, sha256: string) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      return await fetch(this.fileUrl(spaceId, logicalPath), {
+        headers: { ...this.fileHeaders(), Range: `bytes=${offset}-${offset + length - 1}`,
+          ...(sha256 ? { 'If-Range': `"sha256:${sha256}"` } : {}) },
+        signal: controller.signal,
+      });
+    } catch {
+      throw new TypeError('Соединение прервано при скачивании.');
+    } finally { clearTimeout(timer); }
   }
 
   mobileAdminOverview(): Promise<MobileAdminOverview> {

@@ -7,9 +7,10 @@ const { test } = require('node:test');
 const ts = require('typescript');
 const MiB = 1024 ** 2;
 
-function load(total = 40 * MiB, downloadSize = total, downloadFailure = false) {
+function load(total = 40 * MiB, downloadSize = total, downloadFailure = false, remoteBytes = null) {
   const files = new Map([['source', total], ['destination', 99]]);
-  class ApiError extends Error { constructor(status) { super(String(status)); this.status = status; } }
+  const contents = new Map();
+  class ApiError extends Error { constructor(status,message=String(status),retryAfterMs) { super(message); this.status = status; this.retryAfterMs=retryAfterMs; } }
   class File {
     constructor(uri) { this.uri = uri; }
     get exists() { return files.has(this.uri); }
@@ -17,10 +18,26 @@ function load(total = 40 * MiB, downloadSize = total, downloadFailure = false) {
     get type() { return 'application/octet-stream'; }
     slice(start, end) { return { size: end - start }; }
     delete() { files.delete(this.uri); }
-    async move(target) { files.set(target.uri, this.size); files.delete(this.uri); this.uri = target.uri; }
+    create() { files.set(this.uri, 0); contents.set(this.uri, Buffer.alloc(0)); }
+    open() {
+      let offset = 0;
+      const uri = this.uri;
+      return {
+        get offset() { return offset; }, set offset(n) { offset = n; }, close() {},
+        readBytes(n) { const b = contents.get(uri).subarray(offset, offset+n); offset += b.length; return b; },
+        writeBytes(bytes) {
+          const old = contents.get(uri) ?? Buffer.alloc(0);
+          const next = Buffer.alloc(Math.max(old.length, offset + bytes.length));
+          old.copy(next); Buffer.from(bytes).copy(next, offset); offset += bytes.length;
+          contents.set(uri,next); files.set(uri,next.length);
+        },
+      };
+    }
+    async move(target) { files.set(target.uri, this.size); if(contents.has(this.uri)) contents.set(target.uri,contents.get(this.uri)); files.delete(this.uri); this.uri = target.uri; }
     static createDownloadTask(url, target) {
       return { downloadAsync: async () => {
         files.set(target.uri, downloadSize);
+        if (remoteBytes) contents.set(target.uri, remoteBytes);
         if (downloadFailure) throw new TypeError('network lost');
         return target;
       } };
@@ -30,12 +47,13 @@ function load(total = 40 * MiB, downloadSize = total, downloadFailure = false) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   const exports = {};
-  vm.runInNewContext(code, { exports, TypeError, require(name) {
+  vm.runInNewContext(code, { exports, TypeError, setTimeout, clearTimeout, require(name) {
+    if (name === '@noble/hashes/sha2.js') return require(name);
     if (name === 'expo-file-system') return { File, Directory: class {}, Paths: {} };
     if (name === './api') return { ApiError };
     throw new Error(name);
   } });
-  return { ...exports, files, ApiError };
+  return { ...exports, files, contents, ApiError };
 }
 
 const initial = { id: 'job', direction: 'upload', localUri: 'source', logicalPath: 'file.bin',
@@ -99,4 +117,92 @@ test('only a complete download replaces the existing file', async () => {
     { ...initial, direction: 'download', localUri: 'destination' }, () => {});
   assert.equal(result.status, 'completed');
   assert.equal(mod.files.get('destination'), 40 * MiB);
+});
+
+function responseRange(bytes, offset, total, fail = false) {
+  let delivered = false;
+  return { status:206, headers: { get: name => name === 'Content-Range' ? `bytes ${offset}-${total-1}/${total}` : null },
+    body: { getReader: () => ({
+      async read() {
+        if (!delivered) { delivered=true; return {done:false,value:fail ? bytes.subarray(0,2) : bytes}; }
+        if (fail) throw new TypeError('network interrupted');
+        return {done:true};
+      }, async cancel() {}, releaseLock() {},
+    }) },
+  };
+}
+
+test('mobile download resumes the actual saved bytes and checks SHA-256', async () => {
+  const payload=Buffer.from('0123456789');
+  const mod=load(payload.length);
+  const record={...initial,direction:'download',localUri:'destination',totalBytes:payload.length,
+    expectedSha256:require('node:crypto').createHash('sha256').update(payload).digest('hex')};
+  let fail=true;
+  const offsets=[];
+  const api={downloadRange:async (_,__,offset) => {
+    offsets.push(offset); const current=fail; fail=false;
+    return responseRange(payload.subarray(offset),offset,payload.length,current);
+  }};
+  await assert.rejects(mod.runDownloadTransfer(api,record,()=>{}));
+  assert.equal(mod.files.get('destination'),99);
+  const result=await mod.runDownloadTransfer(api,record,()=>{});
+  assert.deepEqual(offsets,[0,2]);
+  assert.equal(result.status,'completed');
+  assert.equal(mod.contents.get('destination').toString(),payload.toString());
+});
+
+test('same-size corrupt mobile download cannot replace an existing copy', async () => {
+  const payload=Buffer.from('0123456789');
+  const mod=load(payload.length);
+  const record={...initial,direction:'download',localUri:'destination',totalBytes:payload.length,
+    expectedSha256:require('node:crypto').createHash('sha256').update(payload).digest('hex')};
+  const api={downloadRange:async ()=>responseRange(Buffer.from('corruption'),0,payload.length)};
+  await assert.rejects(mod.runDownloadTransfer(api,record,()=>{}),/SHA-256/);
+  assert.equal(mod.files.get('destination'),99);
+});
+
+test('SQLite lease excludes foreground/background duplication and recovers expiry', t => {
+  const { DatabaseSync }=require('node:sqlite');
+  const os=require('node:os');
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cloud-storage-leases-'));
+  const handles=[],timers=[]; let now=1000;
+  t.after(()=>{timers.forEach(clearInterval);handles.forEach(d=>d.close());fs.rmSync(dir,{recursive:true});});
+  const code=ts.transpileModule(fs.readFileSync(path.join(__dirname,'../src/transferLease.ts'),'utf8'),{
+    compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022},
+  }).outputText;
+  function runtime() {
+    const exports={};
+    vm.runInNewContext(code,{exports,Date:{now:()=>now},setInterval:(...args)=>{const id=setInterval(...args);timers.push(id);return id;},clearInterval,
+      require:()=>({openDatabaseSync:()=>{
+        const d=new DatabaseSync(path.join(dir,'leases.db'));handles.push(d);
+        return {execSync:q=>d.exec(q),runSync:(q,...args)=>d.prepare(q).run(...args),
+          getFirstSync:(q,...args)=>d.prepare(q).get(...args),getAllSync:(q,...args)=>d.prepare(q).all(...args),closeSync:()=>d.close()};
+      }}),
+    });return exports;
+  }
+  const foreground=runtime(),background=runtime();
+  const first=foreground.claimTransfer('https://cloud.example','one');
+  assert.ok(first);
+  first.checkpoint({...initial,id:'one',completedBytes:3});
+  background.mergeTransferRecords('https://cloud.example',[{...initial,id:'two'}]);
+  foreground.mergeTransferRecords('https://cloud.example',[{...initial,id:'one',completedBytes:0}]);
+  assert.equal(background.mergeTransferRecords('https://cloud.example',[]).length,2);
+  assert.equal(background.mergeTransferRecords('https://cloud.example',[]).find(x=>x.id==='one').completedBytes,3);
+  assert.equal(background.claimTransfer('https://cloud.example','one'),null);
+  now+=61000;
+  const second=background.claimTransfer('https://cloud.example','one');
+  assert.ok(second);
+  assert.equal(second.latest().completedBytes,3);
+  assert.throws(()=>first.assertActive());
+  assert.throws(()=>first.checkpoint({...initial,id:'one'}));
+  second.checkpoint({...initial,id:'one',status:'completed'});
+  first.release();
+  assert.equal(foreground.claimTransfer('https://cloud.example','one'),null);
+  second.release();
+  foreground.clearCompletedRecords('https://cloud.example');
+  foreground.mergeTransferRecords('https://cloud.example',[{...initial,id:'one'}]);
+  assert.equal(foreground.mergeTransferRecords('https://cloud.example',[]).find(x=>x.id==='one'),undefined);
+  foreground.resetTransferRecord('https://cloud.example',{...initial,id:'one'});
+  const third=foreground.claimTransfer('https://cloud.example','one');
+  assert.ok(third);third.release();
 });

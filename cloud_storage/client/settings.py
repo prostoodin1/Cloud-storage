@@ -27,6 +27,7 @@ class ClientProfile:
     drive_enabled: bool = True
     drive_letter: str = "S"
     drive_letters: dict[str, str] = field(default_factory=dict)
+    trusted_endpoints: dict[str, str] = field(default_factory=dict)
     cache_limit_gib: int = 10
     extra_fields: dict = field(default_factory=dict, repr=False)
 
@@ -38,7 +39,7 @@ class ClientProfile:
         }
         fields = {}
         for key, dataclass_field in allowed.items():
-            if key == "drive_letters":
+            if key in {"drive_letters", "trusted_endpoints"}:
                 continue
             raw = value.get(key, dataclass_field.default)
             if isinstance(dataclass_field.default, bool):
@@ -62,6 +63,18 @@ class ClientProfile:
             else {}
         )
         fields["extra_fields"] = {key: item for key, item in value.items() if key not in allowed}
+        endpoints = value.get("trusted_endpoints")
+        fields["trusted_endpoints"] = {}
+        if isinstance(endpoints, dict):
+            for url, fingerprint in list(endpoints.items())[:8]:
+                try:
+                    url = validate_server_url(str(url))
+                    fingerprint = str(fingerprint).replace(":", "").casefold()
+                    if fingerprint and not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+                        continue
+                    fields["trusted_endpoints"][url] = fingerprint
+                except ValueError:
+                    continue
         return cls(**fields)
 
 

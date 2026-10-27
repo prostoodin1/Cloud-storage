@@ -7,7 +7,8 @@ param(
     [string]$PrivateKey = "",
     [string]$NotesFile = "",
     [switch]$IncludeMobile,
-    [switch]$Prerelease
+    [switch]$Prerelease,
+    [switch]$Resume
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,11 +20,23 @@ $payloads = if ($PayloadDirectory) { $PayloadDirectory } else { Join-Path $proje
 $key = if ($PrivateKey) { $PrivateKey } else { Join-Path (Split-Path $projectRoot -Parent) "private\cloud-storage-update-ed25519.pem" }
 $notes = if ($NotesFile) { $NotesFile } else { Join-Path $projectRoot "RELEASE_NOTES_$Version.md" }
 $tag = "v$Version"
+if ($Resume) {
+    $existingInfo = & gh release view $tag --repo $Repository --json isDraft,targetCommitish | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'Resume requested but the release could not be read' }
+    if (-not $existingInfo.isDraft) {
+        & (Join-Path $PSScriptRoot 'repair-release-catalogs.ps1') -Version $Version -Repository $Repository -Python $python
+        return
+    }
+}
 $isPrerelease = $Prerelease -or $Version -match '(?i)(a|b|rc|alpha|beta)'
 $targetCommit = (& git -C $projectRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $targetCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Could not resolve the release source commit"
 }
+$dirty = @(& git -C $projectRoot status --porcelain)
+if ($LASTEXITCODE -ne 0 -or $dirty.Count) { throw 'Release requires a clean committed source tree' }
+$sourceVersion = (& $python -c 'from cloud_storage import __version__; print(__version__)').Trim()
+if ($LASTEXITCODE -ne 0 -or $sourceVersion -ne $Version) { throw 'Requested release version does not match the source version' }
 $expectedUserFiles = @(
     "CloudStorage-Server-Installer-windows-x64.exe",
     "CloudStorage-Client-Installer-windows-x64.exe",
@@ -68,7 +81,8 @@ if ($unexpected.Count -or $missing.Count -or $actualUserFiles.Count -ne $expecte
 & gh auth status | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "GitHub CLI is not authenticated" }
 $existingRelease = & gh release list --repo $Repository --limit 100 --json tagName | ConvertFrom-Json
-if ($existingRelease.tagName -contains $tag) { throw "Release $tag already exists" }
+if (($existingRelease.tagName -contains $tag) -and -not $Resume) { throw "Release $tag already exists; use -Resume to recover a draft or its published feeds" }
+if ($Resume -and $existingInfo.targetCommitish -ne $targetCommit) { throw 'Draft was created from a different source commit; recovery refused' }
 $catalogHostTag = (& gh release view --repo $Repository --json tagName --jq '.tagName').Trim()
 if ($LASTEXITCODE -ne 0 -or -not $catalogHostTag) {
     throw "Could not resolve the stable release that hosts the public update catalogs"
@@ -107,12 +121,16 @@ try {
 
     $releaseCreateArgs = @('release', 'create', $tag, '--repo', $Repository, '--target', $targetCommit, '--title', "Cloud Storage $Version", '--notes-file', $notes, '--draft')
     if ($isPrerelease) { $releaseCreateArgs += '--prerelease' }
-    & gh @releaseCreateArgs
-    if ($LASTEXITCODE -ne 0) { throw "Draft release could not be created" }
+    if (-not $Resume) {
+        & gh @releaseCreateArgs
+        if ($LASTEXITCODE -ne 0) { throw "Draft release could not be created" }
+    }
     $assets = @($expectedUserFiles | ForEach-Object { Join-Path $output $_ }) + `
         @($payloadNames | ForEach-Object { Join-Path $payloads $_ }) + `
         @($clientCatalog, $serverCatalog)
-    & gh release upload $tag --repo $Repository @assets
+    $uploadOptions = @()
+    if ($Resume) { $uploadOptions += '--clobber' }
+    & gh release upload $tag --repo $Repository @uploadOptions @assets
     if ($LASTEXITCODE -ne 0) { throw "Release asset upload failed; the release remains a draft" }
 
     $publishedAssets = & gh release view $tag --repo $Repository --json assets | ConvertFrom-Json
@@ -134,18 +152,22 @@ try {
         if ($localSize -ne $remoteSize) { throw "Uploaded payload size mismatch for $file" }
     }
 
+    $downloaded = Join-Path $temporary 'uploaded-assets'
+    New-Item -ItemType Directory -Path $downloaded | Out-Null
+    & gh release download $tag --repo $Repository --dir $downloaded
+    if ($LASTEXITCODE -ne 0) { throw 'Uploaded assets could not be downloaded for verification; release remains a draft' }
+    foreach ($localFile in $assets) {
+        $remoteFile = Join-Path $downloaded ([IO.Path]::GetFileName($localFile))
+        if ((Get-FileHash -LiteralPath $localFile -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $remoteFile -Algorithm SHA256).Hash) { throw 'Uploaded asset SHA-256 mismatch; release remains a draft' }
+    }
     $releaseEditArgs = @('release', 'edit', $tag, '--repo', $Repository, '--draft=false')
     if ($isPrerelease) { $releaseEditArgs += '--prerelease' } else { $releaseEditArgs += '--latest' }
     & gh @releaseEditArgs
     if ($LASTEXITCODE -ne 0) { throw "Draft is complete but could not be published" }
     if ($isPrerelease) {
-        & gh release upload $catalogHostTag --repo $Repository --clobber $clientCatalog $serverCatalog
-        if ($LASTEXITCODE -ne 0) {
-            throw "Release $tag is public, but its signed catalogs could not be published through releases/latest"
-        }
-        Write-Host "Updated signed beta catalogs on $catalogHostTag for the releases/latest feed."
+        & (Join-Path $PSScriptRoot 'repair-release-catalogs.ps1') -Version $Version -Repository $Repository -Python $python
     }
-    Write-Host "Published $tag atomically with $expectedUserFileCount user files, two setup payloads and two signed catalogs."
+    Write-Host "Published $tag with verified SHA-256 assets and synchronized catalogs. If feed recovery was interrupted, rerun with -Resume."
 }
 finally {
     if (Test-Path -LiteralPath $temporary) {

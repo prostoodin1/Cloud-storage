@@ -1,10 +1,10 @@
 param(
   [Parameter(Mandatory=$true)][string]$Dist,
-  [string]$ExpectedVersion = '0.10.8b2'
+  [string]$ExpectedVersion = '0.10.8b4'
 )
 $ErrorActionPreference = 'Stop'
 $releaseDist = (Resolve-Path -LiteralPath $Dist).Path
-$qaRoot = Join-Path (Split-Path $releaseDist -Parent) ('drive-qa-' + [guid]::NewGuid().ToString('N'))
+$qaRoot = Join-Path $env:TEMP ('drive-qa-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $qaRoot | Out-Null
 
 function Get-FreeQaPort {

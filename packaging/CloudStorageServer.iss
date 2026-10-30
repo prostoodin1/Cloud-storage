@@ -1,6 +1,6 @@
 #define AppName "Cloud Storage Server"
-#define AppVersion "0.10.8b2"
-#define AppFileVersion "0.10.8.2"
+#define AppVersion "0.10.8b4"
+#define AppFileVersion "0.10.8.4"
 #define AppPublisher "Cloud Storage"
 #ifndef BuildRoot
   #define BuildRoot GetEnv("CLOUD_STORAGE_BUILD_DIST")

@@ -1,0 +1,154 @@
+{
+  "date": "2026-10-30",
+  "version": "0.10.8b4",
+  "release_tag": "v0.10.8b4",
+  "product_change_commit": "c46eb7c",
+  "status": "beta packages built and verified; large-file WAN qualification remains open",
+  "python": {
+    "passed": 261,
+    "failed": 0,
+    "runtime": "3.13.0",
+    "seconds": 182.7
+  },
+  "mobile": {
+    "protocol_passed": 12,
+    "protocol_failed": 0,
+    "typecheck_passed": true,
+    "evidence": "unchanged mobile code validated in b4-preparation-20261030.json; no native mobile package published"
+  },
+  "go": {
+    "core_test_passed": true,
+    "core_vet_passed": true,
+    "drive_test_passed": true,
+    "drive_vet_passed": true,
+    "toolchain": "go1.27.3 windows/amd64"
+  },
+  "windows_packages": {
+    "passed": true,
+    "legacy_core": {
+      "passed": 28,
+      "failed": 0,
+      "checks": {
+        "manager_package": true,
+        "container_manager_package": true,
+        "client_drive_module": true,
+        "system_icu_not_shadowed": true,
+        "client": true,
+        "go_core_binary": true,
+        "packaged_core_api": true,
+        "packaged_web_assets": true,
+        "packaged_quota": true,
+        "packaged_file_roundtrip": true,
+        "packaged_download_range": true,
+        "packaged_if_range_changed": true,
+        "packaged_unsatisfiable_range": true,
+        "packaged_client_folder": true,
+        "packaged_usage": true,
+        "packaged_async_completion_sha256": true,
+        "packaged_completion_idempotent": true,
+        "packaged_resumable_roundtrip": true,
+        "packaged_browser_same_person": true,
+        "packaged_browser_folder_upload": true,
+        "packaged_public_share": true,
+        "packaged_public_share_range": true,
+        "packaged_diagnostics": true,
+        "packaged_archive_hidden": true,
+        "packaged_archive_restore": true,
+        "personal_space_isolation": true,
+        "clean_shutdown": true,
+        "restart_preserves_tokens_files_and_browser_session": true
+      }
+    },
+    "native_core": {
+      "passed": 30,
+      "failed": 0,
+      "checks": {
+        "manager_package": true,
+        "container_manager_package": true,
+        "client_drive_module": true,
+        "system_icu_not_shadowed": true,
+        "client": true,
+        "go_core_binary": true,
+        "packaged_core_api": true,
+        "native_supervisor": true,
+        "unauthorized_shutdown_rejected": true,
+        "packaged_web_assets": true,
+        "packaged_quota": true,
+        "packaged_file_roundtrip": true,
+        "packaged_download_range": true,
+        "packaged_if_range_changed": true,
+        "packaged_unsatisfiable_range": true,
+        "packaged_client_folder": true,
+        "packaged_usage": true,
+        "packaged_async_completion_sha256": true,
+        "packaged_completion_idempotent": true,
+        "packaged_resumable_roundtrip": true,
+        "packaged_browser_same_person": true,
+        "packaged_browser_folder_upload": true,
+        "packaged_public_share": true,
+        "packaged_public_share_range": true,
+        "packaged_diagnostics": true,
+        "packaged_archive_hidden": true,
+        "packaged_archive_restore": true,
+        "personal_space_isolation": true,
+        "clean_shutdown": true,
+        "restart_preserves_tokens_files_and_browser_session": true
+      }
+    },
+    "real_mounted_drive": {
+      "passed": 7,
+      "failed": 0,
+      "checks": {
+        "core_version": true,
+        "drive_mounted": true,
+        "folder_created": true,
+        "file_roundtrip_sha256": true,
+        "server_sees_drive_upload": true,
+        "quota_is_3_gib": true,
+        "usage_recorded": true
+      }
+    }
+  },
+  "installers": [
+    {
+      "name": "CloudStorage-Client-Setup-0.10.8b4-windows-x64.exe",
+      "bytes": 41723566,
+      "file_version": "0.10.8.4",
+      "signature": "NotSigned"
+    },
+    {
+      "name": "CloudStorage-Server-Setup-0.10.8b4-windows-x64.exe",
+      "bytes": 90120433,
+      "file_version": "0.10.8.4",
+      "signature": "NotSigned"
+    }
+  ],
+  "packaging": {
+    "all_windows_components_rebuilt": true,
+    "winfsp_msi_sha256": "073a70e00f77423e34bed98b86e600def93393ba5822204fac57a29324db9f7a",
+    "authenticode_cloud_storage": false,
+    "setup_execution_over_installed_service_tested": false,
+    "source_archive_identity": "exact source commit in release target_commitish and publication manifest"
+  },
+  "qualification_notes": [
+    "New resumable roundtrip probe initially compared an octet-stream byte array to a string; fixture now declares text/plain and both package modes pass",
+    "QA uses private temporary data on F: to avoid the normal fill guard on C:; no throughput comparison made from these checks",
+    "Runtime databases, certificates, tokens, QA directories and private keys are excluded from publication artifacts",
+    "Installed Cloud Storage service and user settings were not replaced or restarted by this release task"
+  ],
+  "limitations": {
+    "large_file_1_10_20_30_GB_rerun": false,
+    "real_internet_devices_tested": false,
+    "native_android_ios_tested": false,
+    "minimum_60_MB_s_confirmed": false,
+    "target_100_200_MB_s_confirmed": false,
+    "long_duration_soak_tested": false
+  },
+  "delivery": {
+    "channel": "beta prerelease",
+    "assets": "versioned offline Windows Setup EXEs, portable ZIPs, exact source archive, SHA256SUMS, release notes, validation report",
+    "stable_update_catalog_changed": false,
+    "beta_update_catalog_changed": false,
+    "generic_online_bootstrappers_published": false
+  }
+}

@@ -1,3 +1,3 @@
 """Cloud Storage Server App."""
 
-__version__ = "0.10.8b2"
+__version__ = "0.10.8b4"

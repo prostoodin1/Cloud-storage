@@ -1,7 +1,7 @@
 param(
   [Parameter(Mandatory=$true)][string]$Dist,
   [string]$InstallerDirectory = '',
-  [string]$ExpectedVersion = '0.10.8b2',
+  [string]$ExpectedVersion = '0.10.8b4',
   [switch]$NativeCore
 )
 $ErrorActionPreference = 'Stop'
@@ -154,6 +154,26 @@ try {
   $checks['packaged_client_folder'] = ($clientEntries.Count -eq 1 -and $clientEntries[0].name -eq 'qa.txt')
   $spaces = @(Invoke-RestMethod -Uri "$qaBaseUrl/v1/spaces" -Headers $deviceHeaders)
   $checks['packaged_usage'] = ($spaces[0].used_bytes -eq $payloadText.Length -and $spaces[0].free_bytes -eq (3GB - $payloadText.Length))
+  $resumableText = 'Packaged beta4 resumable verification'
+  $resumableBytes = [Text.Encoding]::UTF8.GetBytes($resumableText)
+  $hasher = [Security.Cryptography.SHA256]::Create()
+  try { $resumableHash = [BitConverter]::ToString($hasher.ComputeHash($resumableBytes)).Replace('-', '').ToLowerInvariant() }
+  finally { $hasher.Dispose() }
+  $resumable = Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/spaces/$spaceId/uploads" -Headers $deviceHeaders -ContentType 'application/json' -Body (@{logical_path='resumable-beta4.txt';size_bytes=$resumableBytes.Length;sha256=$resumableHash;content_type='text/plain'} | ConvertTo-Json)
+  $patchHeaders = @{Authorization=$deviceHeaders.Authorization; 'Upload-Offset'='0'}
+  Invoke-RestMethod -Method Patch -Uri "$qaBaseUrl/v1/uploads/$($resumable.id)" -Headers $patchHeaders -ContentType 'application/offset+octet-stream' -Body $resumableBytes | Out-Null
+  $completeHeaders = @{Authorization=$deviceHeaders.Authorization; Prefer='respond-async'}
+  $completionDeadline = (Get-Date).AddSeconds(60)
+  do {
+    $completed = Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/uploads/$($resumable.id)/complete" -Headers $completeHeaders -TimeoutSec 10
+    if ($completed.completion_pending) { Start-Sleep -Milliseconds 200 }
+  } while ($completed.completion_pending -and (Get-Date) -lt $completionDeadline)
+  $checks['packaged_async_completion_sha256'] = (-not $completed.completion_pending -and $completed.sha256 -eq $resumableHash)
+  $completedAgain = Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/uploads/$($resumable.id)/complete" -Headers $completeHeaders -TimeoutSec 10
+  $checks['packaged_completion_idempotent'] = ($completedAgain.id -eq $completed.id -and $completedAgain.version -eq $completed.version)
+  $resumableDownload = Invoke-WebRequest -UseBasicParsing -Uri "$qaBaseUrl/v1/spaces/$spaceId/files/resumable-beta4.txt" -Headers $deviceHeaders
+  $resumableStatus = Invoke-RestMethod -Uri "$qaBaseUrl/v1/uploads/$($resumable.id)" -Headers $deviceHeaders
+  $checks['packaged_resumable_roundtrip'] = ($resumableDownload.Content -ceq $resumableText -and $resumableStatus.status -eq 'completed')
   $existingCode = Invoke-RestMethod -Uri "$qaBaseUrl/v1/admin/dynamic-pairing-code?user_id=$userId" -Headers $managerHeaders
   $web = Invoke-RestMethod -Method Post -Uri "$qaBaseUrl/v1/web/pair" -ContentType 'application/json' -Headers @{Origin=$qaBaseUrl} -Body (@{code=$existingCode.code} | ConvertTo-Json) -SessionVariable qaBrowser
   $webSpaces = @(Invoke-RestMethod -Uri "$qaBaseUrl/v1/spaces" -WebSession $qaBrowser)

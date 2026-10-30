@@ -91,7 +91,7 @@ jobs:
         run: |
           mkdir -p release
           cp android/app/build/outputs/apk/release/app-release.apk "release/$MOBILE_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.14-android-release
           path: mobile/release/*
@@ -152,7 +152,7 @@ jobs:
             sleep 8
             mkdir -p mobile/screenshots
             adb exec-out screencap -p > mobile/screenshots/CloudStorage-Mobile-${{ matrix.variant }}-0.9.14-android.png
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.14-android-screenshot
           path: mobile/screenshots/*.png
@@ -265,7 +265,7 @@ jobs:
             xcrun simctl io "$DEVICE_ID" screenshot "screenshots/CloudStorage-Mobile-$MOBILE_VARIANT-0.9.14-$FAMILY.png"
             xcrun simctl shutdown "$DEVICE_ID" || true
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: CloudStorage-Mobile-${{ matrix.variant }}-0.9.14-apple-simulator
           path: |

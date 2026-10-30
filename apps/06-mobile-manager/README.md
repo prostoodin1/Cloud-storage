@@ -1,13 +1,19 @@
-# 6. Телефонный менеджер
+# 6. Мобильный менеджер
 
-Административная часть мобильного приложения: пользователи и пароли, подтверждение устройств, диагностика, режим только чтения, накопители, резервные копии, автоматизация, zrok и перезапуск Core.
+Административные операции для подтверждённого устройства с правами администратора. Исходники Expo/React Native для Android/iOS.
+Версия мобильного пакета — `0.9.14`, она отделена от номера Windows-релиза.
 
-- [Скачать телефонный менеджер для Android](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Mobile-Manager-0.9.14-android.apk)
-- [Скачать iPhone/iPad Simulator](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Mobile-Manager-0.9.14-apple-simulator.zip)
-- [Экран управления сервером](../../mobile/src/screens/ServerControlScreen.tsx)
-- [Клиент защищённого API](../../mobile/src/api.ts)
-- [Серверные подтверждения](../../cloud_storage/core/api.py)
-- [Скриншот iPhone](../../screenshots/CloudStorage-Mobile-manager-0.9.9-iPhone.png)
-- [История изменений раздела](https://github.com/prostoodin1/Cloud-storage/commits/codex/cloud-storage-alpha-0.4.0a2/apps/06-mobile-manager)
+**APK/IPA не входят в Windows b4.** Старые файлы в истории релизов не представляют
+текущие исходники и не подтверждают их работу на физическом телефоне.
+Состояние зависимостей и канал сообщений об уязвимостях: [SECURITY.md](../../SECURITY.md).
 
-Менеджер имеет отдельный package ID и принимает только административный режим. Опасные операции требуют пароль, биометрию при наличии и одноразовое серверное подтверждение.
+## Исходники
+
+- [mobile/src/screens/ServerControlScreen.tsx](../../mobile/src/screens/ServerControlScreen.tsx)
+- [mobile/src/api.ts](../../mobile/src/api.ts)
+- [mobile/App.tsx](../../mobile/App.tsx)
+- [cloud_storage/core/api.py](../../cloud_storage/core/api.py)
+
+[Мобильная разработка](../../mobile/README.md) ·
+[Текущий Windows-релиз](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b4) ·
+[Поддержка](../../SUPPORT.md)

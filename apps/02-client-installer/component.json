@@ -1,13 +1,20 @@
 {
   "id": "client-installer",
   "name": "Cloud Storage Client Setup",
-  "version": "0.9.14",
-  "platforms": ["windows-x64"],
+  "version": "0.10.8b4",
+  "platforms": [
+    "windows-x64"
+  ],
   "source_paths": [
     "packaging/CloudStorageClient.iss",
     "packaging/CloudStorageClient.spec",
     "scripts/build-client-installer.ps1",
     "drive_windows"
   ],
-  "release_asset": "CloudStorage-Client-Installer-windows-x64.exe"
+  "release_asset": "CloudStorage-Client-Setup-0.10.8b4-windows-x64.exe",
+  "release_tag": "v0.10.8b4",
+  "release_status": "beta",
+  "published_platforms": [
+    "windows-x64"
+  ]
 }

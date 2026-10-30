@@ -1,13 +1,20 @@
 # 3. Клиент на ПК
 
-Desktop Client подключается к домашнему серверу, показывает личные и общие пространства, управляет приёмом/отправкой, хранит офлайн-индекс и подключает облако как диск в Проводнике Windows.
+Файлы, пространства, подключение к серверу, очередь передач и виртуальный диск Windows.
 
-- Desktop Client входит в релиз 0.10.4 вместе с постоянным установщиком и подписанным каталогом обновлений.
-- [Исходники Desktop Client](../../cloud_storage/client)
-- [Исходники Windows Drive](../../drive_windows)
-- [Общие обновления](../../cloud_storage/updates.py)
-- [Тесты клиента](../../tests/test_client.py)
-- [Скриншот](../../screenshots/CloudStorage-Desktop-Client-0.9.5.png)
-- [История изменений раздела](https://github.com/prostoodin1/Cloud-storage/commits/codex/cloud-storage-alpha-0.4.0a2/apps/03-desktop-client)
+**Windows b4, beta:** [скачать CloudStorage-Desktop-Client-0.10.8b4-windows-x64.zip](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b4/CloudStorage-Desktop-Client-0.10.8b4-windows-x64.zip).
+[Все файлы и SHA-256](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b4).
 
-Запуск из исходников: `python -m cloud_storage.client`.
+ZIP является переносным комплектом, а versioned Setup — полным установщиком.
+Старые постоянные сетевые установщики используют отдельный каталог версий.
+
+## Исходники
+
+- [cloud_storage/client](../../cloud_storage/client)
+- [cloud_storage/updates.py](../../cloud_storage/updates.py)
+- [drive_windows](../../drive_windows)
+
+[Первое подключение](../../docs/getting-started.md) ·
+[Разработка и сборка](../../docs/development.md) ·
+[Поддержка](../../SUPPORT.md) ·
+[История раздела](https://github.com/prostoodin1/Cloud-storage/commits/main/apps/03-desktop-client)

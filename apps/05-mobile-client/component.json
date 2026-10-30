@@ -2,7 +2,10 @@
   "id": "mobile-client",
   "name": "Cloud Storage Mobile Client",
   "version": "0.9.14",
-  "platforms": ["android", "ios"],
+  "platforms": [
+    "android",
+    "ios"
+  ],
   "role": "user",
   "source_paths": [
     "mobile/src/screens/FilesScreen.tsx",
@@ -11,7 +14,10 @@
     "mobile/src/photoBackup.ts",
     "mobile/src/transfers.ts"
   ],
-  "release_assets": [
+  "release_status": "source-only-in-windows-b4",
+  "published_in_windows_b4": false,
+  "release_assets": [],
+  "historical_assets": [
     "CloudStorage-Mobile-Client-0.9.14-android.apk",
     "CloudStorage-Mobile-Client-0.9.14-apple-simulator.zip",
     "CloudStorage-Mobile-Client-0.9.14-unsigned.ipa"

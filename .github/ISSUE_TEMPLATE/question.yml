@@ -1,0 +1,20 @@
+name: Вопрос / Question
+description: Настройка, подключение или использование Cloud Storage.
+title: "[Question]: "
+body:
+  - type: markdown
+    attributes:
+      value: "Сначала посмотрите README и SUPPORT.md. Срок ответа не гарантируется."
+  - type: input
+    id: version
+    attributes:
+      label: Версия приложения и ОС
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Вопрос и что уже пробовали
+      description: "Не публикуйте пароли, токены, приглашения и личные данные."
+    validations:
+      required: true

@@ -1,15 +1,23 @@
-# 4. Менеджер на ПК
+# 4. Менеджер сервера
 
-Server Manager — главное административное приложение: пользователи, подключение по единому коду, накопители, объединённые очереди приёма/отправки, обновления, диагностика и Cloudflare Tunnel. В линейке 0.10.x выключены фоновые автоматизации; отдельный Container Manager входит в дистрибутив.
+Пользователи, устройства, накопители, передачи, состояние ядра и диагностика. Container Manager поставляется отдельным компонентом.
 
-- Server Manager входит в релиз 0.10.4 вместе с постоянным установщиком и подписанным каталогом обновлений.
-- [Интерфейс Manager](../../cloud_storage/ui)
-- [Службы Manager](../../cloud_storage/services)
-- [Core API](../../cloud_storage/core)
-- [Менеджер контейнерных боксов](../../cloud_storage/container_manager)
-- [Нативный Go Core и Windows Service](../../core_go)
-- [База справки](../../cloud_storage/help)
-- [Скриншот](../../screenshots/CloudStorage-Server-Manager-0.9.5.png)
-- [История изменений раздела](https://github.com/prostoodin1/Cloud-storage/commits/codex/cloud-storage-alpha-0.4.0a2/apps/04-server-manager)
+**Windows b4, beta:** [скачать CloudStorage-Server-Manager-0.10.8b4-windows-x64.zip](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b4/CloudStorage-Server-Manager-0.10.8b4-windows-x64.zip).
+[Все файлы и SHA-256](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b4).
 
-Запуск из исходников: `python -m cloud_storage`.
+ZIP является переносным комплектом, а versioned Setup — полным установщиком.
+Старые постоянные сетевые установщики используют отдельный каталог версий.
+
+## Исходники
+
+- [cloud_storage/ui](../../cloud_storage/ui)
+- [cloud_storage/services](../../cloud_storage/services)
+- [cloud_storage/core](../../cloud_storage/core)
+- [cloud_storage/container_manager](../../cloud_storage/container_manager)
+- [core_go](../../core_go)
+- [cloud_storage/help](../../cloud_storage/help)
+
+[Первое подключение](../../docs/getting-started.md) ·
+[Разработка и сборка](../../docs/development.md) ·
+[Поддержка](../../SUPPORT.md) ·
+[История раздела](https://github.com/prostoodin1/Cloud-storage/commits/main/apps/04-server-manager)

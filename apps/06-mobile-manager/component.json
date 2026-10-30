@@ -2,7 +2,10 @@
   "id": "mobile-manager",
   "name": "Cloud Storage Mobile Manager",
   "version": "0.9.14",
-  "platforms": ["android", "ios"],
+  "platforms": [
+    "android",
+    "ios"
+  ],
   "role": "admin",
   "source_paths": [
     "mobile/src/screens/ServerControlScreen.tsx",
@@ -10,7 +13,10 @@
     "mobile/App.tsx",
     "cloud_storage/core/api.py"
   ],
-  "release_assets": [
+  "release_status": "source-only-in-windows-b4",
+  "published_in_windows_b4": false,
+  "release_assets": [],
+  "historical_assets": [
     "CloudStorage-Mobile-Manager-0.9.14-android.apk",
     "CloudStorage-Mobile-Manager-0.9.14-apple-simulator.zip",
     "CloudStorage-Mobile-Manager-0.9.14-unsigned.ipa"

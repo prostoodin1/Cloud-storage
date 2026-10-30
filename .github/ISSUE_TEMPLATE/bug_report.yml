@@ -1,0 +1,58 @@
+name: Ошибка / Bug report
+description: Воспроизводимая ошибка клиента, сервера или передачи файлов.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: "Уязвимости сообщайте через Security → Advisories. Не прикладывайте токены, пароли, приглашения, приватные ключи и сырые базы."
+  - type: dropdown
+    id: component
+    attributes:
+      label: Компонент
+      options:
+        - Desktop Client
+        - Server Manager / Core
+        - Windows Drive / WinFsp
+        - Installer / Update
+        - Mobile source
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия или commit клиента и сервера
+      placeholder: "Например: Client 0.10.8b4, Server 0.10.8b4"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: ОС и окружение
+      placeholder: "Версия Windows/другой ОС, тип устройства, LAN или интернет"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      description: "Что делали, какой результат ожидали и что произошло?"
+    validations:
+      required: true
+  - type: textarea
+    id: transfer
+    attributes:
+      label: Условия передачи, если проблема связана с файлами или скоростью
+      description: "Размер в байтах, направление, время, МБ/с или Мбит/с, тип диска/сети, RTT, один ПК или разные устройства, повторяемость."
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Обезличенная ошибка или журнал
+      description: "Скройте секреты как [REDACTED_SECRET]. Не отправляйте каталог данных целиком."
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Проверка вложений
+      options:
+        - label: "Я проверил сообщение и вложения: в них нет паролей, токенов, приглашений, приватных ключей и пользовательских файлов."
+          required: true

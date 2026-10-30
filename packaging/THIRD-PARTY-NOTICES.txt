@@ -1,6 +1,19 @@
 Cloud Storage third-party notices
 =================================
 
+The original Cloud Storage project code is MIT licensed. That license does not
+replace the licenses of third-party components. This file is a summary, not a
+complete software bill of materials or a full license-compliance audit.
+
+PySide6 / Shiboken6 / Qt
+Open-source and commercial license options; individual Qt modules and bundled
+components may have their own terms. Preserve the notices for the actual build.
+License information: https://doc.qt.io/qtforpython-6/licenses.html
+
+Python runtime
+Python Software Foundation license and additional bundled third-party notices.
+License information: https://docs.python.org/3/license.html
+
 WinFsp 2025 (2.1.25156)
 Copyright (C) Bill Zissimopoulos / Navimatics LLC.
 License: GPLv3 with the WinFsp licensing exception for Free/Libre and Open Source Software.
@@ -11,5 +24,9 @@ Copyright (c) 2017-2022 aegistudio and contributors.
 License: MIT.
 Source and license: https://github.com/winfsp/go-winfsp
 
-The complete Python dependency set and its license metadata remain available in the
-source distribution at https://github.com/prostoodin1/Cloud-storage.
+Additional major components and upstream license references:
+https://github.com/prostoodin1/Cloud-storage/blob/main/THIRD-PARTY-NOTICES.md
+
+Exact Python package licenses are supplied in installed package metadata and
+license files. Go modules and the mobile dependency tree have separate notices.
+Review the license texts shipped with the specific release being redistributed.

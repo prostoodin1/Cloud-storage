@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,8 +8,10 @@ version = "0.10.8b4"
 description = "Safe cross-platform home cloud server control application"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE", "THIRD-PARTY-NOTICES.md", "packaging/THIRD-PARTY-NOTICES.txt"]
 authors = [{ name = "Cloud Storage contributors" }]
+keywords = ["cloud-storage", "self-hosted", "file-transfer", "windows", "pyside6"]
 dependencies = [
   "PySide6>=6.8,<7",
   "psutil>=5.9,<8",
@@ -36,6 +38,13 @@ cloud-storage-server = "cloud_storage.main:main"
 cloud-storage-core = "cloud_storage.core.main:main"
 cloud-storage-client = "cloud_storage.client.main:main"
 cloud-storage-containers = "cloud_storage.container_manager.main:main"
+
+[project.urls]
+Repository = "https://github.com/prostoodin1/Cloud-storage"
+Documentation = "https://github.com/prostoodin1/Cloud-storage/blob/main/README.md"
+Issues = "https://github.com/prostoodin1/Cloud-storage/issues"
+Changelog = "https://github.com/prostoodin1/Cloud-storage/blob/main/CHANGELOG.md"
+Security = "https://github.com/prostoodin1/Cloud-storage/security/policy"
 
 [tool.setuptools.packages.find]
 include = ["cloud_storage*"]

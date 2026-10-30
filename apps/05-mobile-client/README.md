@@ -1,13 +1,20 @@
-# 5. Телефонный клиент
+# 5. Мобильный клиент
 
-Пользовательская часть мобильного приложения: вход, личные и общие пространства, поиск, загрузка и скачивание, возобновляемая очередь, временные ссылки и автоматическая копия фото/видео.
+Пользовательские файлы, фото и передачи. Исходники Expo/React Native для Android/iOS.
+Версия мобильного пакета — `0.9.14`, она отделена от номера Windows-релиза.
 
-- [Скачать телефонный клиент для Android](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Mobile-Client-0.9.14-android.apk)
-- [Скачать iPhone/iPad Simulator](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.9.14/CloudStorage-Mobile-Client-0.9.14-apple-simulator.zip)
-- [Экран файлов](../../mobile/src/screens/FilesScreen.tsx)
-- [Экран передач](../../mobile/src/screens/TransfersScreen.tsx)
-- [Автокопия фото](../../mobile/src/photoBackup.ts)
-- [Скриншот Android](../../screenshots/CloudStorage-Mobile-client-0.9.9-android.png)
-- [История изменений раздела](https://github.com/prostoodin1/Cloud-storage/commits/codex/cloud-storage-alpha-0.4.0a2/apps/05-mobile-client)
+**APK/IPA не входят в Windows b4.** Старые файлы в истории релизов не представляют
+текущие исходники и не подтверждают их работу на физическом телефоне.
+Состояние зависимостей и канал сообщений об уязвимостях: [SECURITY.md](../../SECURITY.md).
 
-Телефонный клиент имеет отдельный package ID и не показывает административную вкладку даже администратору.
+## Исходники
+
+- [mobile/src/screens/FilesScreen.tsx](../../mobile/src/screens/FilesScreen.tsx)
+- [mobile/src/screens/TransfersScreen.tsx](../../mobile/src/screens/TransfersScreen.tsx)
+- [mobile/src/screens/SettingsScreen.tsx](../../mobile/src/screens/SettingsScreen.tsx)
+- [mobile/src/photoBackup.ts](../../mobile/src/photoBackup.ts)
+- [mobile/src/transfers.ts](../../mobile/src/transfers.ts)
+
+[Мобильная разработка](../../mobile/README.md) ·
+[Текущий Windows-релиз](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b4) ·
+[Поддержка](../../SUPPORT.md)

@@ -1,0 +1,23 @@
+name: Предложение / Feature request
+description: Предложить улучшение или новый пользовательский сценарий.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую проблему нужно решить?
+      description: "Опишите конкретный сценарий и то, что сейчас мешает."
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Как должен выглядеть результат?
+      description: "Как пользователь поймёт, что задача решена?"
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Компонент, устройства и дополнительные примеры
+      description: "Макеты и примеры приветствуются. Не прикладывайте личные файлы и секреты."

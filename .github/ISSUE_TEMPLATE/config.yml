@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Сообщить об уязвимости приватно
+    url: https://github.com/prostoodin1/Cloud-storage/security/advisories/new
+    about: Секреты и детали уязвимостей не публикуются в обычных issue.
+  - name: Документация и поддержка
+    url: https://github.com/prostoodin1/Cloud-storage/blob/main/SUPPORT.md
+    about: Установка, диагностика и выбор канала обращения.

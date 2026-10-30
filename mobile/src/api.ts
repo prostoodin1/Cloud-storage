@@ -269,10 +269,16 @@ export class CloudApi {
     } finally { clearTimeout(timer); }
   }
 
-  completeUpload(uploadId: string): Promise<Record<string, unknown>> {
-    return this.request(`/v1/uploads/${encodeURIComponent(uploadId)}/complete`, {
-      method: 'POST',
-    });
+  async completeUpload(uploadId: string, assertActive: () => void = () => {}): Promise<Record<string, unknown>> {
+    while (true) {
+      assertActive();
+      const result = await this.request<Record<string, unknown>>(`/v1/uploads/${encodeURIComponent(uploadId)}/complete`, {
+        method: 'POST', headers: { Prefer: 'respond-async' },
+      });
+      assertActive();
+      if (result.completion_pending !== true) return result;
+      await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+    }
   }
 
   fileUrl(spaceId: string, logicalPath: string): string {

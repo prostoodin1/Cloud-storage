@@ -38,7 +38,7 @@ from cloud_storage.core.automation import AutomationService
 from cloud_storage.core.backup_automation import BackupAutomationService
 from cloud_storage.core.config import CoreConfig, CoreSecrets
 from cloud_storage.core.control_center import ControlCenterService
-from cloud_storage.core.database import Database
+from cloud_storage.core.database import Database, is_database_busy
 from cloud_storage.core.diagnostics import DiagnosticsService
 from cloud_storage.core.http_ranges import UnsatisfiableRange, byte_range
 from cloud_storage.core.integrations import IntegrationRegistry
@@ -69,6 +69,7 @@ from cloud_storage.core.transfer_io import (
     transfer_io,
 )
 from cloud_storage.core.tunnels import TunnelProviderRegistry
+from cloud_storage.core.upload_completion import UploadCompletion
 from cloud_storage.core.web import BrowserAccess
 from cloud_storage.pairing import build_dynamic_pairing_code, verify_dynamic_pairing_code
 
@@ -491,6 +492,7 @@ def build_runtime(config: CoreConfig | None = None) -> CoreRuntime:
 def create_app(config: CoreConfig | None = None) -> FastAPI:
     runtime = build_runtime(config)
     transfer_admission = TransferAdmission()
+    upload_completion = UploadCompletion(runtime.storage, transfer_admission)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -501,6 +503,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         try:
             yield
         finally:
+            await upload_completion.close()
             runtime.control.stop()
             runtime.diagnostics.stop_monitor()
 
@@ -966,6 +969,16 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     @app.exception_handler(StorageCapacityError)
     async def capacity_handler(request: Request, exc: StorageCapacityError) -> JSONResponse:
         return JSONResponse(status_code=507, content={"detail": str(exc)})
+
+    @app.exception_handler(sqlite3.OperationalError)
+    async def database_operational_error(request: Request, exc: sqlite3.OperationalError):
+        if not is_database_busy(exc):
+            raise exc
+        return JSONResponse(
+            status_code=503,
+            content={"code": "database_busy", "detail": "storage metadata is busy; retry later"},
+            headers={"Retry-After": "2"},
+        )
 
     @app.get("/v1/health", tags=["system"])
     def health() -> dict[str, Any]:
@@ -2965,9 +2978,13 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         upload_id: str,
         device: DeviceRecord = Depends(require_device),  # noqa: B008
     ):
-        upload = runtime.storage.get_resumable_upload(upload_id, device.user_id)
+        pending = upload_completion.pending(upload_id, device.user_id)
+        upload = pending or runtime.storage.get_resumable_upload(upload_id, device.user_id)
+        payload = runtime.storage.resumable_to_dict(upload)
+        if pending:
+            payload.update(status="verifying", completion_pending=True)
         return JSONResponse(
-            content=runtime.storage.resumable_to_dict(upload),
+            content=payload,
             headers={"Upload-Offset": str(upload.received_bytes)},
         )
 
@@ -3008,12 +3025,19 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     async def complete_resumable_upload(
         upload_id: str,
         device: DeviceRecord = Depends(require_device),  # noqa: B008
+        prefer: Annotated[str | None, Header()] = None,
     ):
-        with transfer_admission.slot():
-            record = await transfer_io(
-                runtime.storage.complete_resumable_upload,
-                upload_id,
-                device.user_id,
+        respond_async = "respond-async" in {
+            value.strip().casefold() for value in (prefer or "").split(",")
+        }
+        record = await upload_completion.complete(
+            upload_id, device.user_id, respond_async=respond_async,
+        )
+        if record is None:
+            return JSONResponse(
+                status_code=202,
+                content={"id": upload_id, "status": "verifying", "completion_pending": True},
+                headers={"Retry-After": "2", "Preference-Applied": "respond-async"},
             )
         return JSONResponse(
             content=runtime.storage.to_dict(record),

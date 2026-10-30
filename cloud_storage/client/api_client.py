@@ -406,12 +406,28 @@ class ClientApi:
             timeout=30.0,
         )
 
-    def complete_resumable_upload(self, upload_id: str) -> dict[str, Any]:
-        return self._json_request(
-            f"/v1/uploads/{urllib.parse.quote(upload_id, safe='')}/complete",
-            method="POST",
-            timeout=30.0,
-        )
+    def complete_resumable_upload(
+        self, upload_id: str, *, should_continue: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        # Every poll is bounded; hashing a large file is not bounded by the
+        # request timeout. Only this idempotent completion endpoint is polled.
+        while True:
+            if should_continue and not should_continue():
+                raise TransferInterrupted("transfer paused during verification")
+            result = self._json_request(
+                f"/v1/uploads/{urllib.parse.quote(upload_id, safe='')}/complete",
+                method="POST",
+                headers={"Prefer": "respond-async"},
+                timeout=30.0,
+            )
+            if not isinstance(result, dict):
+                raise ClientConnectionError("Сервер вернул неверный результат проверки файла")
+            if result.get("completion_pending") is not True:
+                return result  # Includes synchronous replies from older cores.
+            for _ in range(10):
+                if should_continue and not should_continue():
+                    raise TransferInterrupted("transfer paused during verification")
+                time.sleep(0.2)
 
     def cancel_resumable_upload(self, upload_id: str) -> bool:
         result = self._json_request(

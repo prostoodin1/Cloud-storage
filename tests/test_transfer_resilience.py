@@ -326,7 +326,7 @@ def test_desktop_queue_negotiates_blocks_and_checks_acknowledgements(tmp_path, a
             chunks.append(len(chunk))
             return {"received_bytes": offset + len(chunk)}
 
-        def complete_resumable_upload(self, upload_id):
+        def complete_resumable_upload(self, upload_id, **kwargs):
             return {}
 
     window = SimpleNamespace(transfer_store=store, _transfer_should_continue=lambda _: True,

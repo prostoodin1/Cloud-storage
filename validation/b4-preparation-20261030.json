@@ -1,0 +1,39 @@
+{
+  "date": "2026-10-30",
+  "status": "source fixes validated; release qualification pending",
+  "base_commit": "4e171ec",
+  "previous_benchmark_product_commit": "6ccb0754413f5a08c9b8fd22a385e7eab88268ec",
+  "internal_application_version": "0.10.8b2",
+  "published_in_this_iteration": false,
+  "checks": {
+    "python_full_suite": {"passed": 261, "failed": 0, "exit_code": 0, "new_regressions": 8, "log": "outputs/b4-full-tests.log"},
+    "mobile_protocol": {"passed": 12, "failed": 0, "exit_code": 0, "log": "outputs/b4-mobile-tests.log"},
+    "mobile_typecheck": {"command": "tsc --noEmit", "exit_code": 0},
+    "ruff": {"exit_code": 0},
+    "git_diff_check": {"exit_code": 0},
+    "long_completion": {"transport": "real loopback HTTP, uvicorn and ClientApi", "file": "small synthetic payload", "injected_hash_delay_seconds": 31.1, "sha256_verified": true, "hash_invocations": 1, "successful": true},
+    "database_contention": {"actual_sqlite_writer_transaction_held": true, "device_authentication_remained_available": true, "revoked_device_rejected": true, "intermediate_progress_busy_skipped": true, "non_busy_io_errors_preserved": true},
+    "completion_safety": {"concurrent_polls_deduplicated": true, "disconnected_waiter_did_not_cancel_worker": true, "bad_hash_not_published": true, "admission_capacity_enforced": true}
+  },
+  "runtime": {
+    "platform": "Windows, repository Python virtual environment; mobile Node native/HTTP stubs",
+    "python_test_data_drive": "F:",
+    "reason_for_test_drive": "C: had about 50 GB free and triggered the normal configured storage-fill guard in initial tests",
+    "throughput_benchmark": false
+  },
+  "remaining_release_gates": [
+    "Repeat isolated routed-network uploads/downloads at decimal 1/10/20/30 GB and injected outages using the fixed source",
+    "Verify unattended desktop queue recovery, not only API recovery under a lab driver",
+    "Build and validate new Windows Client, Server and Core packages, drive integration and update flow",
+    "Align release versions, package hashes and release notes before publishing",
+    "Independent physical devices and actual internet tests before claiming their measured performance or reliability"
+  ],
+  "limitations": {
+    "large_file_benchmark_repeated": false,
+    "new_windows_packages_built": false,
+    "physical_mobile_devices_tested": false,
+    "real_wan_tested": false,
+    "new_minimum_throughput_claimed": false,
+    "installed_applications_or_update_channels_replaced": false
+  }
+}

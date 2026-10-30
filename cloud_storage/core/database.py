@@ -6,6 +6,14 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+
+def is_database_busy(exc: sqlite3.Error) -> bool:
+    """Include extended BUSY/LOCKED codes without hiding other SQLite failures."""
+    return getattr(exc, "sqlite_errorcode", 0) & 0xFF in {
+        sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
+    }
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -507,6 +515,9 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._backup_before_0100_upgrade()
         with self.connection() as connection:
+            # Journal mode persists in the file. Changing it on every request
+            # can require a lock even when that request only needs a WAL reader.
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(SCHEMA)
             root_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(storage_roots)").fetchall()
@@ -833,18 +844,20 @@ class Database:
         finally:
             connection.execute("PRAGMA foreign_keys = ON")
 
-    def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 10000")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = FULL")
-        return connection
+    def connect(self, *, timeout: float = 10.0) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=timeout, isolation_level=None)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA synchronous = FULL")
+            return connection
+        except Exception:
+            connection.close()
+            raise
 
     @contextmanager
-    def connection(self) -> Iterator[sqlite3.Connection]:
-        connection = self.connect()
+    def connection(self, *, timeout: float = 10.0) -> Iterator[sqlite3.Connection]:
+        connection = self.connect(timeout=timeout)
         try:
             yield connection
         finally:

@@ -19,7 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
 from cloud_storage.core.config import CoreConfig
-from cloud_storage.core.database import Database
+from cloud_storage.core.database import Database, is_database_busy
 from cloud_storage.core.repository import (
     ConflictError,
     CoreRepository,
@@ -1253,15 +1253,21 @@ class StorageService:
         )
 
     def _update_transfer_network(self, transfer_id: str, transferred: int) -> None:
-        with self.database.transaction() as connection:
-            connection.execute(
-                """
-                UPDATE transfer_jobs
-                SET network_bytes = ?, updated_at = ?
-                WHERE id = ? AND status IN ('receiving', 'sending')
-                """,
-                (max(0, transferred), utc_text(), transfer_id),
-            )
+        try:
+            # Intermediate progress is replaceable telemetry. Durable chunk
+            # offsets and final completion still use normal transactions.
+            with self.database.connection(timeout=0) as connection:
+                connection.execute(
+                    """
+                    UPDATE transfer_jobs
+                    SET network_bytes = ?, updated_at = ?
+                    WHERE id = ? AND status IN ('receiving', 'sending')
+                    """,
+                    (max(0, transferred), utc_text(), transfer_id),
+                )
+        except sqlite3.OperationalError as exc:
+            if not is_database_busy(exc):
+                raise
 
     def _prepare_inbound_move(
         self,

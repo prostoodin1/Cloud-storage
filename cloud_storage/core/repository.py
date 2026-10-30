@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from cloud_storage.core.database import Database
+from cloud_storage.core.database import Database, is_database_busy
 from cloud_storage.core.security import CredentialService, InvalidCredential
 
 
@@ -947,16 +947,28 @@ class CoreRepository:
 
     def authenticate_device(self, token: str, allow_pending: bool = False) -> DeviceRecord:
         token_hash = self.credentials.device_token_hash(token)
-        with self.database.transaction() as connection:
+        # Read current device trust on every request; no credential cache.
+        with self.database.connection() as connection:
             row = self._device_query(connection, "d.token_hash = ?", (token_hash,))
             if row is None or row["status"] == "revoked":
                 raise PermissionDeniedError("device token is invalid")
             if row["status"] != "trusted" and not allow_pending:
                 raise PermissionDeniedError("device is waiting for administrator approval")
-            connection.execute(
-                "UPDATE devices SET last_seen_at = ? WHERE id = ?",
-                (utc_text(), row["id"]),
-            )
+        now = utc_now()
+        cutoff = utc_text(now - timedelta(seconds=60))
+        if row["last_seen_at"] is None or row["last_seen_at"] < cutoff:
+            # Presence is telemetry, not an authentication requirement. Never
+            # wait for a writer or roll back a valid read because it is busy.
+            try:
+                with self.database.connection(timeout=0) as connection:
+                    connection.execute(
+                        "UPDATE devices SET last_seen_at = ? WHERE id = ? "
+                        "AND (last_seen_at IS NULL OR last_seen_at < ?)",
+                        (utc_text(now), row["id"], cutoff),
+                    )
+            except sqlite3.OperationalError as exc:
+                if not is_database_busy(exc):
+                    raise
         return self._device(row)
 
     def list_devices(self) -> list[DeviceRecord]:

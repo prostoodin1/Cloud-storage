@@ -2173,7 +2173,9 @@ class ClientWindow(QMainWindow):
                     raise ValueError("Сервер подтвердил неверное смещение загрузки")
                 offset = acknowledged
                 self.transfer_store.update_progress(transfer.id, offset)
-        api.complete_resumable_upload(upload_id)
+        api.complete_resumable_upload(
+            upload_id, should_continue=lambda: self._transfer_should_continue(transfer.id),
+        )
         self.transfer_store.update_progress(transfer.id, transfer.total_bytes)
         self.transfer_store.set_status(transfer.id, "completed")
 
@@ -2434,6 +2436,11 @@ class ClientWindow(QMainWindow):
             "failed": "Ошибка",
             "cancelled": "Отменено",
         }
+        if (
+            transfer.status == "running" and transfer.direction == "upload"
+            and transfer.transferred_bytes == transfer.total_bytes
+        ):
+            labels["running"] = "Проверка файла на сервере"
         detail = (
             f"{format_bytes(transfer.transferred_bytes)} из {format_bytes(transfer.total_bytes)}"
         )

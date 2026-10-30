@@ -7,6 +7,52 @@ const { test } = require('node:test');
 const ts = require('typescript');
 const MiB = 1024 ** 2;
 
+function loadApi(fetch) {
+  const code = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../src/api.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const exports = {};
+  vm.runInNewContext(code, { exports, URL, AbortController, TypeError,
+    setTimeout: (fn, ms) => ms === 2000 ? (queueMicrotask(fn), 0) : setTimeout(fn, ms),
+    clearTimeout,
+    require(name) {
+      if (name === 'expo/fetch') return { fetch };
+      throw new Error(name);
+    },
+  });
+  return exports;
+}
+
+test('mobile completion polls verification and keeps its owner active', async () => {
+  const calls = [];
+  const replies = [{ completion_pending: true }, { completion_pending: true }, { id: 'file' }];
+  const { CloudApi } = loadApi(async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, text: async () => JSON.stringify(replies.shift()) };
+  });
+  let activeChecks = 0;
+  const api = new CloudApi('https://cloud.example');
+  const result = await api.completeUpload('session', () => { activeChecks += 1; });
+  assert.equal(result.id, 'file');
+  assert.equal(calls.length, 3);
+  assert.equal(activeChecks, 6);
+  assert.ok(calls.every(c => c.init.headers.Prefer === 'respond-async'));
+});
+
+test('mobile finalization stops when its queue owner is lost', async () => {
+  let requests = 0;
+  const { CloudApi } = loadApi(async () => {
+    requests += 1;
+    return { ok: true, text: async () => JSON.stringify({ completion_pending: true }) };
+  });
+  const api = new CloudApi('https://cloud.example');
+  let activeChecks = 0;
+  await assert.rejects(api.completeUpload('session', () => {
+    if (++activeChecks === 3) throw new Error('lease lost');
+  }), /lease lost/);
+  assert.equal(requests, 1);
+});
+
 function load(total = 40 * MiB, downloadSize = total, downloadFailure = false, remoteBytes = null) {
   const files = new Map([['source', total], ['destination', 99]]);
   const contents = new Map();

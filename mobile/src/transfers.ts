@@ -89,7 +89,7 @@ export async function runUploadTransfer(
     onUpdate(record);
     return record;
   }
-  await api.completeUpload(remoteUploadId);
+  await api.completeUpload(remoteUploadId, () => onUpdate(record));
   record = { ...record, completedBytes: totalBytes, status: 'completed', error: undefined };
   onUpdate(record);
   source.delete();

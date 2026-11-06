@@ -24,15 +24,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cloud_storage import __version__
 from cloud_storage.file_lock import file_lock
 
-UPDATE_PUBLIC_KEY = "6MAV324wKv/5LwvAnKMyCk+djeST6b5ufaMBVfe3XWQ="
+LEGACY_UPDATE_PUBLIC_KEY = "6MAV324wKv/5LwvAnKMyCk+djeST6b5ufaMBVfe3XWQ="
+UPDATE_PUBLIC_KEY = "tVzyLB1xSRAz+16fbX0xNH8EeFrKfIh0qxriWD/KJkw="
 DEFAULT_FEEDS = {
     "client": (
         "https://github.com/prostoodin1/Cloud-storage/releases/latest/download/"
-        "cloud-storage-client-catalog.json"
+        "cloud-storage-client-catalog-v2.json"
     ),
     "server": (
         "https://github.com/prostoodin1/Cloud-storage/releases/latest/download/"
-        "cloud-storage-server-catalog.json"
+        "cloud-storage-server-catalog-v2.json"
     ),
 }
 MAX_MANIFEST_BYTES = 1024 * 1024
@@ -69,8 +70,8 @@ class UpdateInfo:
 
 @dataclass(frozen=True, slots=True)
 class UpdatePreferences:
-    policy: str = "manual"
-    channel: str = "stable"
+    policy: str = "install"
+    channel: str = "beta" if re.search(r"(?:a|b|rc)\d+$", __version__) else "stable"
 
     def __post_init__(self) -> None:
         if self.policy not in UPDATE_POLICIES or self.channel not in UPDATE_CHANNELS:
@@ -256,8 +257,12 @@ class UpdateService:
                 policy=str(value.get("policy", "manual")),
                 channel=str(value.get("channel", "stable")),
             )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except FileNotFoundError:
             return UpdatePreferences()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            # An unreadable/invalid explicit preference must never opt a user
+            # into unattended installation. Only a fresh profile gets defaults.
+            return UpdatePreferences(policy="manual", channel="stable")
 
     def save_preferences(self, preferences: UpdatePreferences) -> None:
         self.download_directory.mkdir(parents=True, exist_ok=True)

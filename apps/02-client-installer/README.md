@@ -2,8 +2,8 @@
 
 Ставит Desktop Client и компонент WinFsp для диска в Проводнике Windows.
 
-**Windows b4, beta:** [скачать CloudStorage-Client-Setup-0.10.8b4-windows-x64.exe](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b4/CloudStorage-Client-Setup-0.10.8b4-windows-x64.exe).
-[Все файлы и SHA-256](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b4).
+**Windows b5, beta:** [скачать CloudStorage-Client-Setup-0.10.8b5-windows-x64.exe](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b5/CloudStorage-Client-Setup-0.10.8b5-windows-x64.exe).
+[Все файлы и SHA-256](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b5).
 
 ZIP является переносным комплектом, а versioned Setup — полным установщиком.
 Старые постоянные сетевые установщики используют отдельный каталог версий.

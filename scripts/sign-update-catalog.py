@@ -45,7 +45,13 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
-    private_key = serialization.load_pem_private_key(args.key.read_bytes(), password=None)
+    key_bytes = args.key.read_bytes()
+    if args.key.suffix == ".dpapi":
+        import win32crypt
+        key_bytes = win32crypt.CryptUnprotectData(
+            key_bytes, b"CloudStorage-Update-Signing-v2", None, None, 1,
+        )[1]
+    private_key = serialization.load_pem_private_key(key_bytes, password=None)
     if not isinstance(private_key, Ed25519PrivateKey):
         raise TypeError("the update key must be an Ed25519 private key")
     versions: list[dict[str, object]] = []

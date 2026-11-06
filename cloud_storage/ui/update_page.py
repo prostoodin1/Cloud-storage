@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -48,12 +49,16 @@ class _Task(QRunnable):
     def run(self) -> None:
         try:
             self.signals.success.emit(self.function())
-        except (OSError, UpdateError, ValueError) as exc:
+        except Exception as exc:
+            # A failed background update must not leave the application busy
+            # indefinitely (including unexpected catalog/network errors).
             self.signals.failure.emit(str(exc))
 
 
 class UpdatePage(QWidget):
     """Signed update center shared by Server Manager and Desktop Client."""
+
+    status_changed = Signal(str)
 
     def __init__(
         self,
@@ -61,11 +66,13 @@ class UpdatePage(QWidget):
         data_directory: Path,
         *,
         before_install: Callable[[], None] | None = None,
+        can_auto_install: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__()
         self.service = UpdateService(product, data_directory)
         self.product = product
         self.before_install = before_install
+        self.can_auto_install = can_auto_install
         self.preferences = self.service.load_preferences()
         self.versions: list[UpdateInfo] = []
         self.info: UpdateInfo | None = None
@@ -73,8 +80,18 @@ class UpdatePage(QWidget):
         self._automatic = False
         self._tasks: set[_Task] = set()
         self._build_ui()
-        if is_frozen_windows() and self.preferences.policy != "manual":
-            QTimer.singleShot(8000, self._auto_check)
+        self.install_retry_timer = QTimer(self)
+        self.install_retry_timer.setInterval(30_000)
+        self.install_retry_timer.timeout.connect(self._try_auto_install)
+        self.startup_timer = QTimer(self)
+        self.startup_timer.setSingleShot(True)
+        self.startup_timer.timeout.connect(self._auto_check)
+        if (
+            is_frozen_windows()
+            and self.preferences.policy != "manual"
+            and "--smoke-test" not in sys.argv
+        ):
+            self.startup_timer.start(1500)
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -195,6 +212,9 @@ class UpdatePage(QWidget):
         outer.addWidget(scroll)
 
     def _preferences_changed(self) -> None:
+        self.install_retry_timer.stop()
+        self.startup_timer.stop()
+        self._automatic = False
         self.preferences = UpdatePreferences(
             policy=str(self.policy_combo.currentData()),
             channel=str(self.channel_combo.currentData()),
@@ -211,7 +231,9 @@ class UpdatePage(QWidget):
         self.install_button.setEnabled(False)
         self.reveal_button.setEnabled(False)
         self.notes.clear()
-        self.status_label.setText("Настройка сохранена. Нажмите «Проверить версии».")
+        self._set_status("Настройка сохранена.")
+        if is_frozen_windows() and self.preferences.policy != "manual":
+            self.startup_timer.start(1500)
 
     def _update_policy_help(self) -> None:
         descriptions = {
@@ -222,12 +244,15 @@ class UpdatePage(QWidget):
             ),
             "install": (
                 "При запуске новая версия будет проверена, скачана и установлена автоматически. "
-                "Server Manager перед установкой корректно остановит Core."
+                "Во время передачи файлов установка откладывается. После установки приложение "
+                "запустится снова. Windows может запросить разрешение администратора."
             ),
         }
         self.policy_help.setText(descriptions[str(self.policy_combo.currentData())])
 
     def check(self) -> None:
+        self.startup_timer.stop()
+        self.install_retry_timer.stop()
         self._automatic = False
         self._start_check()
 
@@ -247,7 +272,7 @@ class UpdatePage(QWidget):
         if not isinstance(result, list) or not all(
             isinstance(item, UpdateInfo) for item in result
         ):
-            self.status_label.setText("Сервер обновлений вернул неизвестный ответ.")
+            self._set_status("Сервер обновлений вернул неизвестный ответ.")
             return
         self.versions = result
         self.version_combo.blockSignals(True)
@@ -296,22 +321,25 @@ class UpdatePage(QWidget):
                 f"Выбрана старая версия {self.info.version}. Это откат; установка потребует "
                 "отдельного подтверждения."
             )
-        self.status_label.setText(message)
+        self._set_status(message)
 
     def download(self, _checked: bool = False, *, automatic: bool = False) -> None:
         if self.info is None:
             return
+        self.startup_timer.stop()
+        self.install_retry_timer.stop()
         self._automatic = automatic
         self._busy(f"Скачиваем версию {self.info.version} и проверяем SHA-256…")
-        self._run(lambda: self.service.download(self.info), self._downloaded)
+        info = self.info
+        self._run(lambda: self.service.download(info), self._downloaded)
 
     def _downloaded(self, result: object) -> None:
         self._idle()
         if not isinstance(result, Path):
-            self.status_label.setText("Не удалось определить скачанный установщик.")
+            self._set_status("Не удалось определить скачанный установщик.")
             return
         self.installer = result
-        self.status_label.setText(
+        self._set_status(
             f"Версия {self.info.version if self.info else '—'} скачана. "
             f"Подпись каталога и SHA-256 проверены. Файл: {result}"
         )
@@ -319,13 +347,39 @@ class UpdatePage(QWidget):
         self.install_button.setEnabled(is_frozen_windows())
         self.reveal_button.setEnabled(True)
         if not is_frozen_windows():
-            self.status_label.setText(
+            self._set_status(
                 self.status_label.text() + " Установка доступна в собранном Windows-приложении."
             )
         elif self._automatic and self.preferences.policy == "install":
-            self._launch_install(require_confirmation=False)
+            self._try_auto_install()
+
+    def _try_auto_install(self) -> None:
+        if (
+            not self._automatic
+            or self.preferences.policy != "install"
+            or self.info is None
+            or not self.info.newer_than_current
+            or self.installer is None
+        ):
+            self.install_retry_timer.stop()
+            return
+        try:
+            ready = self.can_auto_install is None or self.can_auto_install()
+        except (OSError, RuntimeError):
+            ready = False
+        if not ready:
+            self._set_status(
+                "Обновление скачано. Ожидаем завершения передач и доступности сервера; "
+                "повторная проверка через 30 секунд."
+            )
+            self.install_retry_timer.start()
+            return
+        self.install_retry_timer.stop()
+        self._launch_install(require_confirmation=False)
 
     def install(self) -> None:
+        self.startup_timer.stop()
+        self.install_retry_timer.stop()
         self._launch_install(require_confirmation=True)
 
     def reveal_installer(self) -> None:
@@ -356,6 +410,7 @@ class UpdatePage(QWidget):
                 self.before_install()
             self.service.launch_installer(self.installer, self.info)
         except (OSError, UpdateError) as exc:
+            self._set_status(f"Установка не запущена: {exc}. Приложение продолжает работу.")
             QMessageBox.warning(self, "Обновление не запущено", str(exc))
             return
         app = QApplication.instance()
@@ -363,17 +418,25 @@ class UpdatePage(QWidget):
             app.quit()
 
     def _busy(self, text: str) -> None:
-        self.status_label.setText(text)
+        self._set_status(text)
         self.progress.show()
         self.check_button.setEnabled(False)
         self.version_combo.setEnabled(False)
         self.download_button.setEnabled(False)
         self.install_button.setEnabled(False)
         self.reveal_button.setEnabled(False)
+        self.policy_combo.setEnabled(False)
+        self.channel_combo.setEnabled(False)
+
+    def _set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+        self.status_changed.emit(text)
 
     def _idle(self) -> None:
         self.progress.hide()
         self.check_button.setEnabled(True)
+        self.policy_combo.setEnabled(True)
+        self.channel_combo.setEnabled(True)
         self.version_combo.setEnabled(bool(self.versions))
         self.reveal_button.setEnabled(self.installer is not None and self.installer.is_file())
 
@@ -388,4 +451,4 @@ class UpdatePage(QWidget):
 
     def _failed(self, message: str) -> None:
         self._idle()
-        self.status_label.setText(f"Проверка не выполнена: {message}")
+        self._set_status(f"Обновление не выполнено: {message}. Приложение продолжает работу.")

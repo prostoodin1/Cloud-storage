@@ -45,7 +45,7 @@ def write_catalog(folder, product, versions, key, repository="test/cloud"):
         )
     value = {"schema_version": 2, "product": product, "versions": entries}
     value["signature"] = base64.b64encode(key.sign(canonical_manifest_payload(value))).decode()
-    (folder / f"cloud-storage-{product}-catalog.json").write_text(
+    (folder / f"cloud-storage-{product}-catalog-v2.json").write_text(
         json.dumps(value), encoding="utf-8"
     )
 
@@ -73,7 +73,7 @@ def test_feed_recovery_verifies_signature_payload_and_preserves_newer_versions(t
     with pytest.raises(UpdateError, match="remove or change"):
         module.verify(release, existing, "test/cloud", "1.1.0b1", public)
     write_catalog(existing, "server", ["1.0.0"], key)
-    path = release / "cloud-storage-client-catalog.json"
+    path = release / "cloud-storage-client-catalog-v2.json"
     path.write_text(
         path.read_text().replace('"release_notes": "test"', '"release_notes": "tampered"')
     )
@@ -92,8 +92,8 @@ def test_publication_repair_recovers_half_published_feed_without_network(tmp_pat
     feed = tmp_path / "feed"
     feed.mkdir()
     for product in ("client", "server"):
-        (release / f"cloud-storage-{product}-catalog.json").write_text("new:" + product)
-        (feed / f"cloud-storage-{product}-catalog.json").write_text("old:" + product)
+        (release / f"cloud-storage-{product}-catalog-v2.json").write_text("new:" + product)
+        (feed / f"cloud-storage-{product}-catalog-v2.json").write_text("old:" + product)
     fake = tmp_path / "verify.ps1"
     fake.write_text("$global:LASTEXITCODE=0\n", encoding="utf-8")
     harness = tmp_path / "mock.ps1"
@@ -141,13 +141,13 @@ function global:gh {
     ]
     failed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
     assert failed.returncode != 0, failed.stdout
-    assert (feed / "cloud-storage-client-catalog.json").read_text() == "new:client"
-    assert (feed / "cloud-storage-server-catalog.json").read_text() == "old:server"
+    assert (feed / "cloud-storage-client-catalog-v2.json").read_text() == "new:client"
+    assert (feed / "cloud-storage-server-catalog-v2.json").read_text() == "old:server"
     env["REPAIR_FAILS"] = "0"
     recovered = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
     assert recovered.returncode == 0, recovered.stdout + recovered.stderr
-    assert (feed / "cloud-storage-server-catalog.json").read_text() == "new:server"
+    assert (feed / "cloud-storage-server-catalog-v2.json").read_text() == "new:server"
     assert (tmp_path / "uploads.log").read_text().splitlines() == [
-        "cloud-storage-client-catalog.json",
-        "cloud-storage-server-catalog.json",
+        "cloud-storage-client-catalog-v2.json",
+        "cloud-storage-server-catalog-v2.json",
     ]

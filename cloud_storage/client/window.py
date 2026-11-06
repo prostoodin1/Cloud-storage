@@ -228,7 +228,11 @@ class ClientWindow(QMainWindow):
         self.transfers_page = self._make_transfers_page()
         self.offline_page = self._make_offline_page()
         self.account_page = self._make_account_page()
-        self.update_page = UpdatePage("client", self.store.data_directory)
+        self.update_page = UpdatePage(
+            "client", self.store.data_directory,
+            can_auto_install=lambda: not self._active_transfer_ids and not self._workers,
+        )
+        self.update_page.status_changed.connect(self.statusBar().showMessage)
         self.help_page = HelpPage(self.knowledge, "client")
         self.help_page.open_logs_requested.connect(self.open_logs_directory)
         self.nav_buttons: list[QPushButton] = []

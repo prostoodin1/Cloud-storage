@@ -115,7 +115,15 @@ def test_update_preferences_are_persistent_and_invalid_values_are_safe(tmp_path)
     assert service.load_preferences() == UpdatePreferences(policy="download", channel="beta")
 
     service.preferences_path.write_text('{"schema_version":1,"policy":"broken"}')
-    assert service.load_preferences() == UpdatePreferences()
+    assert service.load_preferences() == UpdatePreferences(policy="manual", channel="stable")
+
+
+def test_fresh_profile_uses_auto_install_but_preserves_explicit_manual(tmp_path) -> None:
+    service = UpdateService("client", tmp_path)
+    assert service.load_preferences().policy == "install"
+    assert service.load_preferences().channel == UpdatePreferences().channel
+    service.save_preferences(UpdatePreferences(policy="manual", channel="stable"))
+    assert service.load_preferences() == UpdatePreferences(policy="manual", channel="stable")
 
 
 def test_download_reuses_an_existing_verified_setup(tmp_path, monkeypatch) -> None:

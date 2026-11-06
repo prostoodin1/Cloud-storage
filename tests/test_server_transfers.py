@@ -73,6 +73,28 @@ def configure_ssd_staging(client, manager_headers, tmp_path):
     return staging
 
 
+def test_upgrade_guard_counts_active_transfers_outside_history_page(tmp_path) -> None:
+    app, client, manager_headers, _headers, _space = provision(tmp_path)
+    with app.state.runtime.database.transaction() as connection:
+        connection.executemany(
+            """INSERT INTO transfer_jobs
+               (id, direction, status, logical_path, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [
+                ("old-active", "inbound", "receiving", "old.bin", "2026-01-01", "2026-01-01"),
+                ("new-done", "inbound", "completed", "new.bin", "2026-02-01", "2026-02-01"),
+                ("old-failed", "outbound", "failed", "failed.bin", "2026-01-01", "2026-01-01"),
+                ("new-out", "outbound", "completed", "out.bin", "2026-02-01", "2026-02-01"),
+            ],
+        )
+    response = client.get("/v1/admin/transfers?limit=1", headers=manager_headers)
+    assert response.status_code == 200
+    overview = response.json()
+    assert len(overview["inbound"]) == 1
+    assert overview["inbound"][0]["status"] == "completed"
+    assert overview["counts"] == {"inbound_active": 1, "outbound_active": 0, "failed": 1}
+
+
 def test_inbound_uses_ssd_then_moves_to_storage_and_outbound_is_tracked(tmp_path) -> None:
     app, client, manager_headers, device_headers, space = provision(tmp_path)
     staging = configure_ssd_staging(client, manager_headers, tmp_path)

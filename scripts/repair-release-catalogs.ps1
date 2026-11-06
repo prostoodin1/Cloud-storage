@@ -29,20 +29,20 @@ $existing = Join-Path $temporary 'existing'
 $verified = Join-Path $temporary 'verified'
 New-Item -ItemType Directory -Force -Path $recovered,$existing,$verified | Out-Null
 try {
-    Invoke-RepairGh -Arguments @('release','download',$tag,'--repo',$Repository,'--pattern','cloud-storage-*-catalog.json','--dir',$recovered) | Out-Null
+    Invoke-RepairGh -Arguments @('release','download',$tag,'--repo',$Repository,'--pattern','cloud-storage-*-catalog-v2.json','--dir',$recovered) | Out-Null
     Invoke-RepairGh -Arguments @('release','download',$tag,'--repo',$Repository,'--pattern',"CloudStorage-*-Setup-$Version-windows-x64.exe",'--dir',$recovered) | Out-Null
-    Invoke-RepairGh -Arguments @('release','download',$hostTag,'--repo',$Repository,'--pattern','cloud-storage-*-catalog.json','--dir',$existing) | Out-Null
+    Invoke-RepairGh -Arguments @('release','download',$hostTag,'--repo',$Repository,'--pattern','cloud-storage-*-catalog-v2.json','--dir',$existing) | Out-Null
     & $Python (Join-Path $PSScriptRoot 'verify-release-catalogs.py') --release $recovered --existing $existing --repository $Repository --version $Version
     if ($LASTEXITCODE -ne 0) { throw 'Catalog validation failed; no feed files were changed' }
     foreach ($product in @('client','server')) {
-        $name = "cloud-storage-$product-catalog.json"
+        $name = "cloud-storage-$product-catalog-v2.json"
         $file = Join-Path $recovered $name
         if ((Get-FileHash -LiteralPath $file).Hash -eq (Get-FileHash -LiteralPath (Join-Path $existing $name)).Hash) { continue }
         Invoke-RepairGh -Arguments @('release','upload',$hostTag,'--repo',$Repository,'--clobber',$file) | Out-Null
     }
-    Invoke-RepairGh -Arguments @('release','download',$hostTag,'--repo',$Repository,'--pattern','cloud-storage-*-catalog.json','--dir',$verified) | Out-Null
+    Invoke-RepairGh -Arguments @('release','download',$hostTag,'--repo',$Repository,'--pattern','cloud-storage-*-catalog-v2.json','--dir',$verified) | Out-Null
     foreach ($product in @('client','server')) {
-        $name = "cloud-storage-$product-catalog.json"
+        $name = "cloud-storage-$product-catalog-v2.json"
         if ((Get-FileHash -LiteralPath (Join-Path $recovered $name)).Hash -ne (Get-FileHash -LiteralPath (Join-Path $verified $name)).Hash) { throw "Published feed verification failed: $name" }
     }
     $currentHost = (Invoke-RepairGh -Arguments @('release','view','--repo',$Repository,'--json','tagName','--jq','.tagName') | Out-String).Trim()

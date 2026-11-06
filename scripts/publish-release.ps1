@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.10.8b4",
+    [string]$Version = "0.10.8b5",
     [string]$MobileVersion = "0.9.14",
     [string]$Repository = "prostoodin1/Cloud-storage",
     [string]$OutputDirectory = "",
@@ -17,7 +17,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = if ($env:CLOUD_STORAGE_PYTHON) { (Resolve-Path -LiteralPath $env:CLOUD_STORAGE_PYTHON).Path } else { Join-Path $projectRoot ".venv\Scripts\python.exe" }
 $output = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $projectRoot "output" }
 $payloads = if ($PayloadDirectory) { $PayloadDirectory } else { Join-Path $projectRoot "outputs" }
-$key = if ($PrivateKey) { $PrivateKey } else { Join-Path (Split-Path $projectRoot -Parent) "private\cloud-storage-update-ed25519.pem" }
+$key = if ($PrivateKey) { $PrivateKey } else { Join-Path $env:LOCALAPPDATA "CloudStorageRelease\update-signing-v2.dpapi" }
 $notes = if ($NotesFile) { $NotesFile } else { Join-Path $projectRoot "RELEASE_NOTES_$Version.md" }
 $tag = "v$Version"
 if ($Resume) {
@@ -52,8 +52,8 @@ $payloadNames = @(
     "CloudStorage-Client-Setup-$Version-windows-x64.exe"
 )
 $catalogNames = @(
-    "cloud-storage-client-catalog.json",
-    "cloud-storage-server-catalog.json"
+    "cloud-storage-client-catalog-v2.json",
+    "cloud-storage-server-catalog-v2.json"
 )
 
 foreach ($required in @($python, $key, $notes)) {
@@ -91,7 +91,7 @@ if ($LASTEXITCODE -ne 0 -or -not $catalogHostTag) {
 $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("cloud-storage-release-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $temporary | Out-Null
 try {
-    & gh release download --repo $Repository --pattern "cloud-storage-*-catalog.json" --dir $temporary
+    & gh release download --repo $Repository --pattern "cloud-storage-*-catalog-v2.json" --dir $temporary
     if ($LASTEXITCODE -ne 0) { throw "Existing signed catalogs could not be downloaded" }
 
     $clientInstaller = Join-Path $payloads "CloudStorage-Client-Setup-$Version-windows-x64.exe"
@@ -108,10 +108,10 @@ try {
 
     $clientCatalog = Join-Path $temporary $catalogNames[0]
     $serverCatalog = Join-Path $temporary $catalogNames[1]
-    $oldClientCatalog = Join-Path $temporary "cloud-storage-client-catalog.json"
-    $oldServerCatalog = Join-Path $temporary "cloud-storage-server-catalog.json"
-    $oldClientCopy = Join-Path $temporary "old-client-catalog.json"
-    $oldServerCopy = Join-Path $temporary "old-server-catalog.json"
+    $oldClientCatalog = Join-Path $temporary "cloud-storage-client-catalog-v2.json"
+    $oldServerCatalog = Join-Path $temporary "cloud-storage-server-catalog-v2.json"
+    $oldClientCopy = Join-Path $temporary "old-client-catalog-v2.json"
+    $oldServerCopy = Join-Path $temporary "old-server-catalog-v2.json"
     Copy-Item -LiteralPath $oldClientCatalog -Destination $oldClientCopy
     Copy-Item -LiteralPath $oldServerCatalog -Destination $oldServerCopy
     & $python (Join-Path $PSScriptRoot "sign-update-catalog.py") --key $key --product client --existing-catalog $oldClientCopy --manifest $clientManifest --output $clientCatalog

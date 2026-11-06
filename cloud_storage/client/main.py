@@ -48,6 +48,7 @@ def main() -> int:
     window = ClientWindow(smoke_test=smoke_test)
     instance.set_activation_handler(lambda: _activate(window))
     app.aboutToQuit.connect(instance.close)
+    app.aboutToQuit.connect(window._prepare_shutdown)
     if smoke_test:
         window.reconnect_timer.stop()
         QTimer.singleShot(250, app.quit)

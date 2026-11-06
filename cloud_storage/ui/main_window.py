@@ -249,8 +249,9 @@ class MainWindow(QMainWindow):
         self.update_page = UpdatePage(
             "server",
             self.store.data_directory,
-            before_install=self._prepare_server_update,
+            can_auto_install=self._can_auto_update_server,
         )
+        self.update_page.status_changed.connect(self.statusBar().showMessage)
         self.help_page = HelpPage(self.knowledge, "server")
         self.help_page.open_logs_requested.connect(self.open_logs_directory)
         for label, page in (
@@ -431,16 +432,15 @@ class MainWindow(QMainWindow):
         self.settings_page.connection_generation_requested.connect(self.generate_connection_code)
         self.settings_page.open_logs_requested.connect(self.open_logs_directory)
 
-    def _prepare_server_update(self) -> None:
-        if self.core_health is None:
-            return
+    def _can_auto_update_server(self) -> bool:
+        # Query current state rather than a possibly stale UI snapshot. The
+        # elevated installer stops Core after UAC approval; cancelling UAC must
+        # not leave the running server stopped by the manager.
         try:
-            stopped = self.core_supervisor.stop()
-        except (CoreApiError, CoreUnavailable, OSError) as exc:
-            raise OSError(f"Не удалось остановить сервер перед обновлением: {exc}") from exc
-        if not stopped:
-            raise OSError("Сервер не остановился перед обновлением")
-        self.core_health = None
+            counts = self.core_client.transfers(limit=100)["counts"]
+            return int(counts["inbound_active"]) == 0 and int(counts["outbound_active"]) == 0
+        except (CoreApiError, CoreUnavailable, OSError, KeyError, TypeError, ValueError):
+            return False
 
     def _show_page(self, page: QWidget) -> None:
         self.stack.setCurrentWidget(page)

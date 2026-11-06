@@ -2,8 +2,8 @@
 
 Файлы, пространства, подключение к серверу, очередь передач и виртуальный диск Windows.
 
-**Windows b4, beta:** [скачать CloudStorage-Desktop-Client-0.10.8b4-windows-x64.zip](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b4/CloudStorage-Desktop-Client-0.10.8b4-windows-x64.zip).
-[Все файлы и SHA-256](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b4).
+**Windows b5, beta:** [скачать CloudStorage-Desktop-Client-0.10.8b5-windows-x64.zip](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b5/CloudStorage-Desktop-Client-0.10.8b5-windows-x64.zip).
+[Все файлы и SHA-256](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b5).
 
 ZIP является переносным комплектом, а versioned Setup — полным установщиком.
 Старые постоянные сетевые установщики используют отдельный каталог версий.

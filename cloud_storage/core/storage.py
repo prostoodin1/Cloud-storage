@@ -943,16 +943,25 @@ class StorageService:
     def transfer_overview(self, *, limit: int = 100) -> dict[str, Any]:
         inbound = self.list_transfers("inbound", limit=limit)
         outbound = self.list_transfers("outbound", limit=limit)
-        active_statuses = {"receiving", "moving", "sending"}
+        # Counts also gate unattended upgrades. They must cover every transfer,
+        # including an older active entry outside the paginated UI history.
+        with self.database.connection() as connection:
+            counts = connection.execute(
+                """
+                SELECT
+                    COALESCE(SUM(direction = 'inbound' AND status IN
+                        ('receiving', 'moving', 'sending')), 0) AS inbound_active,
+                    COALESCE(SUM(direction = 'outbound' AND status IN
+                        ('receiving', 'moving', 'sending')), 0) AS outbound_active,
+                    COALESCE(SUM(status = 'failed'), 0) AS failed
+                FROM transfer_jobs
+                """
+            ).fetchone()
         return {
             "settings": self.transfer_settings(),
             "inbound": [self.transfer_to_dict(item) for item in inbound],
             "outbound": [self.transfer_to_dict(item) for item in outbound],
-            "counts": {
-                "inbound_active": sum(item.status in active_statuses for item in inbound),
-                "outbound_active": sum(item.status in active_statuses for item in outbound),
-                "failed": sum(item.status == "failed" for item in (*inbound, *outbound)),
-            },
+            "counts": dict(counts),
         }
 
     def list_transfers(self, direction: str, *, limit: int = 100) -> list[TransferRecord]:

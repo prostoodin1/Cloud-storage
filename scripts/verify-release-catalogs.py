@@ -10,7 +10,7 @@ from cloud_storage.updates import UPDATE_PUBLIC_KEY, UpdateError, parse_signed_c
 
 def verify(release: Path, existing: Path, repository: str, version: str, public_key: str = UPDATE_PUBLIC_KEY) -> None:
     for product in ("client", "server"):
-        name = f"cloud-storage-{product}-catalog.json"
+        name = f"cloud-storage-{product}-catalog-v2.json"
         candidates = parse_signed_catalog((release / name).read_bytes(), expected_product=product, public_key=public_key)
         previous = parse_signed_catalog((existing / name).read_bytes(), expected_product=product, public_key=public_key)
         indexed = {item.version: item for item in candidates}

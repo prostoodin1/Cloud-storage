@@ -1,13 +1,13 @@
 # Cloud Storage
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b4)
+[![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b5)
 
 Собственное облачное хранилище: сервер на вашем компьютере, клиент для файлов
 и передач, управление пользователями и подключение пространства как диска Windows.
 Данные передаются по HTTPS; сервер хранит файлы на выбранных вами накопителях.
 
-**Текущий опубликованный Windows-релиз: [0.10.8b4, beta](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b4).**
+**Текущий опубликованный Windows-релиз: [0.10.8b5, beta](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b5).**
 Проект развивается; готовность исходников, собранного пакета и реального устройства
 проверяется отдельно. Стабильная скорость 60–200 МБ/с через интернет пока не подтверждена.
 
@@ -15,16 +15,17 @@
 
 | Windows x64 | Назначение | Загрузка |
 |---|---|---|
-| Клиент | Полный установщик; включает компонент WinFsp для виртуального диска | [Client Setup b4](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b4/CloudStorage-Client-Setup-0.10.8b4-windows-x64.exe) |
-| Сервер | Полный установщик менеджеров, ядра и службы | [Server Setup b4](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b4/CloudStorage-Server-Setup-0.10.8b4-windows-x64.exe) |
-| Переносной клиент | ZIP; для диска нужен установленный WinFsp | [Client ZIP b4](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b4/CloudStorage-Desktop-Client-0.10.8b4-windows-x64.zip) |
-| Серверные компоненты | ZIP для ручного размещения и тестирования | [Server ZIP b4](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b4/CloudStorage-Server-Manager-0.10.8b4-windows-x64.zip) |
+| Клиент | Полный установщик; включает компонент WinFsp для виртуального диска | [Client Setup b5](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b5/CloudStorage-Client-Setup-0.10.8b5-windows-x64.exe) |
+| Сервер | Полный установщик менеджеров, ядра и службы | [Server Setup b5](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b5/CloudStorage-Server-Setup-0.10.8b5-windows-x64.exe) |
+| Переносной клиент | ZIP; для диска нужен установленный WinFsp | [Client ZIP b5](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b5/CloudStorage-Desktop-Client-0.10.8b5-windows-x64.zip) |
+| Серверные компоненты | ZIP для ручного размещения и тестирования | [Server ZIP b5](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b5/CloudStorage-Server-Manager-0.10.8b5-windows-x64.zip) |
 
-[Все файлы, исходники и SHA256SUMS](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b4) ·
-[Изменения b4](RELEASE_NOTES_0.10.8b4.md) · [Первое подключение](docs/getting-started.md)
+[Все файлы, исходники и SHA256SUMS](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b5) ·
+[Изменения b5](RELEASE_NOTES_0.10.8b5.md) · [Первое подключение](docs/getting-started.md)
 
-Для b4 используйте **versioned Setup** из таблицы: старые постоянные сетевые
+Для первого перехода на b5 используйте **versioned Setup** из таблицы: старые постоянные сетевые
 установщики получают отдельные каталоги версий и могут предлагать другую сборку.
+После перехода b5 проверяет подписанный канал v2 при запуске и устанавливает обновления автоматически, если не сохранён ручной режим.
 Cloud Storage EXE не имеют Authenticode-подписи издателя; контрольные суммы приложены к релизу.
 
 ## Что входит в проект
@@ -33,7 +34,7 @@ Cloud Storage EXE не имеют Authenticode-подписи издателя; 
 - **Server Manager:** пользователи, приглашения, устройства, накопители и диагностика.
 - **Server Core:** защищённый API, файловые операции, SQLite и проверка целостности.
 - **Нативный Go-процесс:** Windows-служба, контроль compatibility engine и проксирование API.
-- **Mobile:** исходники Expo/React Native для Android/iOS; APK/IPA не входят в b4.
+- **Mobile:** исходники Expo/React Native для Android/iOS; APK/IPA не входят в b5.
 - **Container Manager:** отдельный административный компонент в серверном комплекте.
 
 Полная карта компонентов: [apps/README.md](apps/README.md).
@@ -52,13 +53,14 @@ WebDAV или tus. Транспорт использует стандартны�
 
 | Платформа | Состояние |
 |---|---|
-| Windows x64 | Опубликованы Client/Server Setup и ZIP b4; проверены компоненты и настоящий виртуальный диск |
+| Windows x64 | Опубликованы Client/Server Setup и ZIP b5; проверены компоненты и настоящий виртуальный диск |
 | Linux/macOS | Есть исходники, сценарии сборки и CI-конфигурация; Windows-проверки не подтверждают работу на этих ОС |
 | Android/iOS | Отдельные исходники mobile; проверены протокол и TypeScript, не физические устройства; требуется работа с зависимостями |
 
-В b4 пройдены **261 Python-тест**, **12 мобильных протокольных тестов**,
-Go test/vet, **28/28** проверок compatibility engine, **30/30** через нативное
-ядро и **7/7** проверок настоящего виртуального диска.
+В b5 пройдены **273 Python-теста**, **28/28** проверок compatibility engine,
+**30/30** через нативное ядро и **7/7** проверок настоящего виртуального диска.
+[Отчёт b5](validation/b5-release-20261106.json). Исторические проверки b4 включали
+12 мобильных протокольных тестов и Go test/vet; физические телефоны в b5 не проверялись.
 
 Повторные передачи **1/10/20/30 ГБ на b4**, длительная нагрузка и реальный
 интернет между независимыми устройствами ещё требуют проверки. Измерения

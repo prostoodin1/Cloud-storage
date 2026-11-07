@@ -15,5 +15,5 @@
 - [cloud_storage/core/api.py](../../cloud_storage/core/api.py)
 
 [Мобильная разработка](../../mobile/README.md) ·
-[Текущий Windows-релиз](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b5) ·
+[Текущий Windows-релиз](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b6) ·
 [Поддержка](../../SUPPORT.md)

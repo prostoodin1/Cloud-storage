@@ -146,8 +146,10 @@ def test_partial_write_failure_does_not_publish_file_or_kill_server(server, monk
         raise OSError("simulated disk write failure")
 
     monkeypatch.setattr(UploadSession, "write", fail)
-    with pytest.raises(OSError, match="simulated disk write failure"):
-        client.put(f"/v1/spaces/{space}/files/broken.bin", headers=headers, content=b"abcdef")
+    response = client.put(f"/v1/spaces/{space}/files/broken.bin", headers=headers, content=b"abcdef")
+    assert response.status_code == 503
+    assert response.json()["code"] == "io_unavailable"
+    assert response.headers["Retry-After"] == "5"
     assert client.get(f"/v1/spaces/{space}/files/broken.bin", headers=headers).status_code == 404
     assert client.get("/v1/health").status_code == 200
     monkeypatch.setattr(UploadSession, "write", original)

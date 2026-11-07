@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.10.8b5",
+    [string]$Version = "0.10.8b6",
     [string]$MobileVersion = "0.9.14",
     [string]$Repository = "prostoodin1/Cloud-storage",
     [string]$OutputDirectory = "",
@@ -7,6 +7,7 @@ param(
     [string]$PrivateKey = "",
     [string]$NotesFile = "",
     [switch]$IncludeMobile,
+    [switch]$IncludeCLI,
     [switch]$Prerelease,
     [switch]$Resume
 )
@@ -47,6 +48,7 @@ if ($IncludeMobile) {
     $expectedUserFiles += "CloudStorage-Mobile-Client-$MobileVersion-android.apk"
     $expectedUserFiles += "CloudStorage-Mobile-Manager-$MobileVersion-android.apk"
 }
+if ($IncludeCLI) { $expectedUserFiles += 'CloudStorageCLI.exe' }
 $payloadNames = @(
     "CloudStorage-Server-Setup-$Version-windows-x64.exe",
     "CloudStorage-Client-Setup-$Version-windows-x64.exe"

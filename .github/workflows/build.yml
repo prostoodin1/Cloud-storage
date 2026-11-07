@@ -77,6 +77,8 @@ jobs:
             dist/CloudStorageLegacyCore/
             dist/CloudStorageServerService/
             dist/CloudStorageClient/
+            dist/CloudStorageCLI.exe
+            dist/CloudStorageCLI
             dist/Cloud Storage Server Manager.app/
             dist/Cloud Storage Client.app/
             dist/macos-release/*.dmg

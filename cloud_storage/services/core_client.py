@@ -338,6 +338,9 @@ class CoreClient:
             payload={"roots": roots},
         )
 
+    def storage_readiness(self) -> dict[str, Any]:
+        return self._manager_request("/v1/admin/storage-readiness")
+
     def list_storage_roots(self) -> list[dict[str, Any]]:
         return self._manager_request("/v1/admin/storage-roots")
 

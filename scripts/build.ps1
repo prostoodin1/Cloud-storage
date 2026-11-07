@@ -26,4 +26,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Native Go Core build failed.' }
 & $python (Join-Path $PSScriptRoot 'package-app.py') --noconfirm --clean --distpath $distRoot --workpath $workRoot (Join-Path $projectRoot 'packaging\CloudStorageClient.spec')
 if ($LASTEXITCODE -ne 0) { throw 'Desktop Client build failed.' }
 
+& (Join-Path $PSScriptRoot 'build-cli.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'CLI build failed.' }
 Write-Host "Build ready: $distRoot"

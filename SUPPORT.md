@@ -1,6 +1,6 @@
 # Поддержка
 
-Сначала проверьте [текущий beta-релиз](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b5),
+Сначала проверьте [текущий beta-релиз](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b6),
 [первое подключение](docs/getting-started.md) и раздел «Помощь» в приложении.
 Теги и SHA-256 релиза позволяют точно указать проверяемую сборку.
 

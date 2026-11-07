@@ -163,6 +163,7 @@ class MainWindow(QMainWindow):
         self.core_devices: list[dict] = []
         self.core_audit: list[dict] = []
         self.core_storage_roots: list[dict] = []
+        self.core_storage_readiness: dict = {}
         self.core_maintenance_jobs: list[dict] = []
         self.core_backup_jobs: list[dict] = []
         self.core_restore_jobs: list[dict] = []
@@ -620,6 +621,9 @@ class MainWindow(QMainWindow):
         self.dashboard_page.set_setup_banner_visible(
             not self.settings.setup_complete and not self._setup_banner_hidden
         )
+        self.dashboard_page.set_storage_readiness(
+            self.core_storage_readiness, online=self.core_health is not None,
+        )
         self.disks_page.update_data(
             self.disks,
             self.settings,
@@ -693,6 +697,7 @@ class MainWindow(QMainWindow):
         self.core_devices = []
         self.core_audit = []
         self.core_storage_roots = []
+        self.core_storage_readiness = {}
         self.core_maintenance_jobs = []
         self.core_backup_jobs = []
         self.core_restore_jobs = []
@@ -738,6 +743,11 @@ class MainWindow(QMainWindow):
             self.audit.record(
                 "core.read.failed", f"Не удалось прочитать состояние ядра: {exc}", "warning"
             )
+        try:
+            self.core_storage_readiness = self.core_client.storage_readiness()
+        except (CoreApiError, CoreUnavailable):
+            # An older Core may lack this endpoint; other pages keep working.
+            self.core_storage_readiness = {}
 
     def refresh_core(self) -> None:
         self._refresh_core_state()

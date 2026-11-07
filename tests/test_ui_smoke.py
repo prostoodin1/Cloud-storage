@@ -30,6 +30,29 @@ class FakeDiskService:
         ]
 
 
+def test_dashboard_reports_blocked_uploads_even_when_core_is_running():
+    from cloud_storage.ui.pages import DashboardPage
+
+    app = QApplication.instance() or QApplication([])
+    page = DashboardPage()
+    page.set_storage_readiness({"ready": False, "roots": [{
+        "reason": "storage_capacity", "path": "C:/storage", "free_bytes": 20 * 1024**3,
+        "used_percent": 98, "max_fill_percent": 90,
+    }]}, online=True)
+    text = page.storage_readiness_label.text()
+    assert "Загрузка файлов сейчас недоступна" in text
+    assert "98%" in text and "90%" in text
+    page.set_storage_readiness({"ready": False, "roots": [{
+        "reason": "storage_unavailable", "path": "D:/CloudStorageData",
+    }]}, online=True)
+    assert "D:/CloudStorageData" in page.storage_readiness_label.text()
+    assert "подключение и питание" in page.storage_readiness_label.text()
+    page.set_storage_readiness({"ready": True, "roots": []}, online=True)
+    assert "готово к записи" in page.storage_readiness_label.text()
+    page.close()
+    app.processEvents()
+
+
 class FakeContainerClient:
     def control_center(self):
         return {

@@ -214,6 +214,12 @@ class DashboardPage(QWidget):
         banner_layout.addWidget(begin)
         self.layout.addWidget(self.setup_banner)
 
+        self.storage_readiness_label = QLabel()
+        self.storage_readiness_label.setWordWrap(True)
+        self.storage_readiness_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.storage_readiness_label.setProperty("emptyState", True)
+        self.layout.addWidget(self.storage_readiness_label)
+
         metrics = QHBoxLayout()
         metrics.setSpacing(12)
         self.server_card = StatCard("Сервер", "Ожидает настройки", "Ядро — следующий этап")
@@ -319,6 +325,31 @@ class DashboardPage(QWidget):
 
     def set_setup_banner_visible(self, visible: bool) -> None:
         self.setup_banner.setVisible(visible)
+
+    def set_storage_readiness(self, readiness: dict, *, online: bool) -> None:
+        if not online:
+            text = "Ядро не запущено: возможность загрузки не проверена."
+        elif not readiness:
+            text = "⚠ Проверка хранилища недоступна. Проверьте связь с ядром и версии программ."
+        elif readiness.get("ready") is True:
+            text = "✓ По объёму хранилище готово к записи. Права и квоты проверяются отдельно."
+        else:
+            details = []
+            for root in readiness.get("roots", []):
+                reason = root.get("reason")
+                path = root.get("path", "хранилище")
+                if reason == "storage_unavailable":
+                    details.append(f"Недоступен накопитель {path}. Проверьте подключение и питание.")
+                elif reason == "storage_capacity":
+                    details.append(
+                        f"{path}: заполнено {root.get('used_percent', '—')}% "
+                        f"при лимите {root.get('max_fill_percent', '—')}%; "
+                        f"свободно {root.get('free_bytes', 0) / 1024**3:.1f} ГБ."
+                    )
+            text = "⚠ Загрузка файлов сейчас недоступна. " + (
+                " ".join(details) if details else "Нет основного хранилища с разрешённой записью."
+            ) + " Откройте раздел «Диски» и проверьте настройки."
+        self.storage_readiness_label.setText(text)
 
     def update_data(
         self,

@@ -1,7 +1,7 @@
 # Первое подключение
 
-Актуальные файлы Windows b5 находятся на [странице релиза](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b5).
-Для обычной установки выберите `Client-Setup-0.10.8b5` и `Server-Setup-0.10.8b5`.
+Актуальные файлы Windows b6 находятся на [странице релиза](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b6).
+Для обычной установки выберите `Client-Setup-0.10.8b6` и `Server-Setup-0.10.8b6`.
 Перед обновлением сохраните собственную резервную копию важных данных и серверной базы.
 
 ## Сервер и клиент

@@ -532,7 +532,16 @@ class ClientApi:
     @staticmethod
     def _raise_api_error(status_code: int, body: bytes, retry_after: str | None = None) -> Never:
         try:
-            detail = json.loads(body.decode("utf-8")).get("detail", "request failed")
+            error = json.loads(body.decode("utf-8"))
+            detail = error.get("detail", "request failed")
+            if detail == "no configured storage root has enough safe free space":
+                detail = "На сервере нет хранилища с достаточным безопасным запасом места. Проверьте диски в Server Manager."
+            elif isinstance(detail, str) and detail in {"personal storage quota is exhausted", "upload exceeds personal storage quota"}:
+                detail = "Квота пользователя или пространства исчерпана. Обратитесь к администратору сервера."
+            elif error.get("code") in {"io_unavailable", "metadata_io_unavailable"}:
+                detail = "Хранилище сервера временно недоступно. Проверьте подключение диска и права доступа; повторите передачу после восстановления."
+            elif error.get("code") in {"storage_full", "metadata_full"}:
+                detail = "На сервере закончилось место. Освободите место или выберите другое хранилище."
         except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
             detail = "request failed"
         raise ClientApiError(status_code, str(detail), retry_after_seconds(retry_after))

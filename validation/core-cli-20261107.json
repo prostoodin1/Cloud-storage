@@ -1,0 +1,43 @@
+{
+  "status": "local development build, not published",
+  "base_version": "0.10.8b5",
+  "date": "2026-11-07",
+  "full_regression": {
+    "passed": 289,
+    "warnings": 1
+  },
+  "final_focused_regressions": {
+    "passed": 18,
+    "warnings": 1
+  },
+  "packaged_checks": {
+    "isolated_native_wrapper": true,
+    "machine_capabilities": true,
+    "verified_upload": true,
+    "idempotent_upload": true,
+    "authoritative_progress": true,
+    "verified_resumed_download": true,
+    "local_admin_doctor": true,
+    "capacity_failure_is_structured": true,
+    "healthy_process_after_storage_error": true,
+    "secrets_absent_from_checkpoint": true
+  },
+  "cli_bytes": 8133050,
+  "cli_sha256": "fd1263220c5229d99e75a619f28f333546f02ccad2c50bb5a5f756d1733182ba",
+  "cli_no_qt": true,
+  "fault_tests": [
+    "os._exit after rename followed by fresh Core boot",
+    "failure after metadata commit",
+    "transaction rollback before state completion",
+    "late mirror error after concurrent overwrite",
+    "lost HTTP chunk reply and resumed upload",
+    "partial download with SHA-256 verification",
+    "storage unavailable/full readiness and SQLite I/O errors"
+  ],
+  "limits": [
+    "Installed service was not replaced",
+    "No power-loss or physical drive fault testing",
+    "New tus/SFTP/S3 transports are not implemented",
+    "Exact user-reported error text not yet supplied"
+  ]
+}

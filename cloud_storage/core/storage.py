@@ -671,11 +671,27 @@ class StorageService:
         if row is None:
             raise NotFoundError("upload session not found")
         record = self._resumable_upload(row)
+        if record.status == "active":
+            committed = self._committed_inbound_result(upload_id)
+            if committed is not None:
+                self._finish_upload_state(upload_id, committed.id)
+                return self.get_resumable_upload(upload_id, user_id)
         if record.status == "active" and record.expires_at < utc_text():
             self.cancel_resumable_upload(upload_id, user_id)
             raise NotFoundError("upload session expired")
         if record.status == "active":
-            path = self._resumable_path(record)
+            try:
+                path = self._resumable_path(record)
+            except NotFoundError:
+                # A process may have died after rename but before metadata
+                # commit. Completion will verify the retained destination.
+                transfer = self.get_transfer(upload_id)
+                final = self._inbound_destination(transfer)
+                if (transfer.status in {"moving", "failed"}
+                        and transfer.network_bytes == record.expected_size
+                        and transfer.sha256 and final.is_file()):
+                    return record
+                raise
             actual_size = path.stat().st_size
             if actual_size > record.expected_size:
                 raise ConflictError("partial upload exceeds expected size")
@@ -748,7 +764,7 @@ class StorageService:
         with self._resumable_lock(upload_id):
             record = self.get_resumable_upload(upload_id, user_id)
             if record.status == "completed":
-                result = self.find_file(record.space_id, record.logical_path)
+                result = self._committed_inbound_result(upload_id)
                 if result is None or result.id != record.result_file_id:
                     raise ConflictError("completed upload metadata is unavailable")
                 return result
@@ -757,7 +773,10 @@ class StorageService:
                     f"upload is incomplete; expected {record.expected_size}, "
                     f"received {record.received_bytes}"
                 )
-            temporary_path = self._resumable_path(record)
+            try:
+                temporary_path = self._resumable_path(record)
+            except NotFoundError:
+                return self._finalize_inbound_transfer(upload_id)
             digest = self._file_sha256(temporary_path)
             if record.expected_sha256 and digest != record.expected_sha256:
                 self._fail_transfer(upload_id, "SHA-256 принятого файла не совпадает")
@@ -772,21 +791,62 @@ class StorageService:
             except Exception as exc:
                 self._fail_transfer(upload_id, str(exc))
                 raise
-            with self.database.transaction() as connection:
-                connection.execute(
-                    """
-                    UPDATE upload_sessions
-                    SET status = 'completed', result_file_id = ?, updated_at = ?, expires_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        result.id,
-                        utc_text(),
-                        utc_text(utc_now() + timedelta(hours=24)),
-                        upload_id,
-                    ),
-                )
         return result
+
+    def _committed_inbound_result(self, transfer_id: str) -> FileRecord | None:
+        """Match this exact object, never a later overwrite of the same name."""
+        with self.database.connection() as connection:
+            row = connection.execute(
+                """SELECT f.* FROM files f JOIN transfer_jobs t
+                   ON f.space_id = t.space_id AND f.logical_path = t.logical_path
+                   AND f.storage_root_id = t.storage_root_id AND f.object_path = t.object_path
+                   AND f.sha256 = t.sha256 AND f.size_bytes = t.total_bytes
+                   WHERE t.id = ? AND t.direction = 'inbound' AND f.deleted_at IS NULL""",
+                (transfer_id,),
+            ).fetchone()
+        return self._file(row) if row is not None else None
+
+    def _finish_upload_state(self, transfer_id: str, file_id: str, connection=None) -> None:
+        if connection is None:
+            with self.database.transaction() as transaction:
+                self._finish_upload_state(transfer_id, file_id, transaction)
+            return
+        now = utc_text()
+        connection.execute(
+            """UPDATE transfer_jobs SET status = 'completed', file_id = ?,
+               network_bytes = total_bytes, storage_bytes = total_bytes,
+               error = '', updated_at = ?, completed_at = ? WHERE id = ?""",
+            (file_id, now, now, transfer_id),
+        )
+        connection.execute(
+            """UPDATE upload_sessions SET status = 'completed', result_file_id = ?,
+               received_bytes = expected_size, updated_at = ?, expires_at = ? WHERE id = ?""",
+            (file_id, now, utc_text(utc_now() + timedelta(hours=24)), transfer_id),
+        )
+
+    def _inbound_was_published(self, transfer_id: str) -> bool:
+        """Also protect archived/deleted versions from a late rollback."""
+        with self.database.connection() as connection:
+            row = connection.execute(
+                """SELECT 1 FROM files f JOIN transfer_jobs t
+                   ON f.space_id = t.space_id AND f.storage_root_id = t.storage_root_id
+                   AND f.object_path = t.object_path AND f.sha256 = t.sha256
+                   AND f.size_bytes = t.total_bytes WHERE t.id = ?
+                   UNION ALL
+                   SELECT 1 FROM file_versions v JOIN files f ON f.id = v.file_id
+                   JOIN transfer_jobs t ON f.space_id = t.space_id
+                   AND v.storage_root_id = t.storage_root_id AND v.object_path = t.object_path
+                   AND v.sha256 = t.sha256 AND v.size_bytes = t.total_bytes
+                   WHERE t.id = ? LIMIT 1""", (transfer_id, transfer_id),
+            ).fetchone()
+        return row is not None
+
+    def _inbound_destination(self, transfer: TransferRecord) -> Path:
+        root = self._root_by_id(transfer.storage_root_id)
+        final = (root.path / transfer.object_path).resolve()
+        if root.path not in final.parents:
+            raise PermissionDeniedError("destination failed containment validation")
+        return final
 
     def cancel_resumable_upload(self, upload_id: str, user_id: str) -> bool:
         with self._resumable_lock(upload_id):
@@ -816,8 +876,13 @@ class StorageService:
             ).fetchall()
         cleaned = 0
         for row in rows:
-            if self.cancel_resumable_upload(row["id"], row["user_id"]):
-                cleaned += 1
+            try:
+                if self.cancel_resumable_upload(row["id"], row["user_id"]):
+                    cleaned += 1
+            except OSError:
+                # A disconnected/locked disk must not prevent Core startup.
+                # Retain the session so cleanup can retry after it returns.
+                continue
         return cleaned
 
     def cleanup_root_temporary(self, root_id: str) -> dict[str, int]:
@@ -996,20 +1061,6 @@ class StorageService:
         if transfer.network_bytes != transfer.total_bytes or not transfer.sha256:
             raise ConflictError("the incoming file was not received completely")
         self._finalize_inbound_transfer(transfer_id)
-        with self.database.transaction() as connection:
-            connection.execute(
-                """
-                UPDATE upload_sessions
-                SET status = 'completed', result_file_id = ?, updated_at = ?, expires_at = ?
-                WHERE id = ?
-                """,
-                (
-                    transfer.file_id,
-                    utc_text(),
-                    utc_text(utc_now() + timedelta(hours=24)),
-                    transfer_id,
-                ),
-            )
         return self.transfer_to_dict(self.get_transfer(transfer_id))
 
     def queue_transfer_retry(self, transfer_id: str) -> dict[str, Any]:
@@ -1302,6 +1353,12 @@ class StorageService:
     def _finalize_inbound_transfer(self, transfer_id: str) -> FileRecord:
         with self._transfer_lock(transfer_id):
             transfer = self.get_transfer(transfer_id)
+            committed = self._committed_inbound_result(transfer_id)
+            if committed is not None:
+                self._finish_upload_state(transfer_id, committed.id)
+                return committed
+            if transfer.status == "completed":
+                raise ConflictError("completed upload was superseded or deleted")
             if transfer.direction != "inbound" or transfer.status not in {"moving", "failed"}:
                 raise ConflictError("incoming transfer is not ready for storage")
             if transfer.network_bytes != transfer.total_bytes or not transfer.sha256:
@@ -1315,18 +1372,28 @@ class StorageService:
                     """,
                     (utc_text(), transfer_id),
                 )
-            source = self._transfer_staging_file(transfer)
             root = self._root_by_id(transfer.storage_root_id)
-            object_relative = Path(transfer.object_path)
-            final_path = (root.path / object_relative).resolve()
-            if root.path not in final_path.parents:
-                raise PermissionDeniedError("destination failed containment validation")
+            final_path = self._inbound_destination(transfer)
+            if final_path.is_file() and self._inbound_was_published(transfer_id):
+                raise ConflictError("completed upload was superseded or deleted")
+            try:
+                source = self._transfer_staging_file(transfer)
+            except NotFoundError:
+                if not final_path.is_file():
+                    raise
+                source = None
             final_path.parent.mkdir(parents=True, exist_ok=True)
             same_root = Path(transfer.staging_path).resolve() == root.path.resolve()
             destination_staging = root.path / ".staging" / f"{transfer.file_id}.incoming"
             destination_staging.unlink(missing_ok=True)
             try:
-                if same_root:
+                if final_path.is_file():
+                    if (final_path.stat().st_size != transfer.total_bytes
+                            or self._file_sha256(final_path) != transfer.sha256):
+                        raise ConflictError("recovered upload SHA-256 does not match")
+                elif source is None:
+                    raise NotFoundError("staged upload data is unavailable")
+                elif same_root:
                     os.replace(source, final_path)
                     self._update_transfer_storage(transfer_id, transfer.total_bytes)
                 else:
@@ -1345,6 +1412,7 @@ class StorageService:
                     os.replace(destination_staging, final_path)
                 make_managed_file_inert(final_path, root.path)
                 result = self._commit_upload(
+                    transfer_id=transfer_id,
                     file_id=transfer.file_id,
                     root=root,
                     space_id=transfer.space_id,
@@ -1356,8 +1424,16 @@ class StorageService:
                     content_type=transfer.content_type,
                 )
             except Exception as exc:
+                # Metadata may already be durable even if a later operation
+                # (including mirrors) failed. Never undo/delete published data.
+                committed = self._committed_inbound_result(transfer_id)
+                if committed is not None:
+                    self._finish_upload_state(transfer_id, committed.id)
+                    return committed
+                if self._inbound_was_published(transfer_id):
+                    raise ConflictError("completed upload was superseded or deleted") from exc
                 destination_staging.unlink(missing_ok=True)
-                if final_path.exists():
+                if final_path.exists() and source is not None:
                     self._make_staging_file_writable(final_path)
                     if same_root and not source.exists():
                         os.replace(final_path, source)
@@ -1365,19 +1441,11 @@ class StorageService:
                         final_path.unlink(missing_ok=True)
                 self._fail_transfer(transfer_id, str(exc))
                 raise
-            if not same_root:
-                source.unlink(missing_ok=True)
-            now = utc_text()
-            with self.database.transaction() as connection:
-                connection.execute(
-                    """
-                    UPDATE transfer_jobs
-                    SET status = 'completed', network_bytes = total_bytes,
-                        storage_bytes = total_bytes, error = '', updated_at = ?, completed_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, now, transfer_id),
-                )
+            if not same_root and source is not None:
+                try:
+                    source.unlink(missing_ok=True)
+                except OSError:
+                    pass  # Committed data is valid; temporary cleanup can retry.
             return result
 
     def _transfer_staging_file(self, transfer: TransferRecord) -> Path:
@@ -1487,8 +1555,12 @@ class StorageService:
             ).fetchall()
         result = []
         for row in rows:
-            path = Path(row["path"]).resolve()
-            if path.is_dir():
+            try:
+                path = Path(row["path"]).resolve()
+                available = path.is_dir()
+            except OSError:
+                continue
+            if available:
                 result.append(
                     StorageRootRecord(
                         id=row["id"],
@@ -1502,6 +1574,38 @@ class StorageService:
                     )
                 )
         return result
+
+    def storage_readiness(self) -> dict[str, Any]:
+        """Read-only checks in the service's own filesystem namespace."""
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM storage_roots WHERE enabled = 1"
+            ).fetchall()
+        roots = []
+        for row in rows:
+            item = {"id": row["id"], "path": row["path"], "purpose": row["purpose"],
+                    "ready": False, "reason": "writes_disabled"}
+            if not row["write_enabled"] or row["purpose"] != "primary":
+                roots.append(item)
+                continue
+            try:
+                path = Path(row["path"]).resolve(strict=True)
+                if not path.is_dir():
+                    raise FileNotFoundError("storage root is not a directory")
+                usage = shutil.disk_usage(path)
+                used_percent = usage.used / usage.total * 100 if usage.total else 100
+                item.update(free_bytes=usage.free, total_bytes=usage.total,
+                            used_percent=round(used_percent, 2),
+                            max_fill_percent=row["max_fill_percent"],
+                            min_free_bytes=row["min_free_bytes"])
+                item["ready"] = (usage.free > row["min_free_bytes"]
+                                 and used_percent < row["max_fill_percent"])
+                item["reason"] = "ready" if item["ready"] else "storage_capacity"
+            except OSError as exc:
+                item.update(reason="storage_unavailable", os_error=exc.errno,
+                            windows_error=getattr(exc, "winerror", None))
+            roots.append(item)
+        return {"scope": "storage", "ready": any(r["ready"] for r in roots), "roots": roots}
 
     def space_usage(self, space_id: str) -> int:
         with self.database.connection() as connection:
@@ -2169,6 +2273,7 @@ class StorageService:
         self,
         *,
         file_id: str,
+        transfer_id: str,
         root: StorageRootRecord,
         space_id: str,
         user_id: str,
@@ -2281,6 +2386,7 @@ class StorageService:
                     ),
                 )
                 action = "file.created"
+            self._finish_upload_state(transfer_id, effective_id, connection)
             self.repository._audit_tx(
                 connection,
                 actor_type="user",
@@ -2290,9 +2396,10 @@ class StorageService:
                 target_id=effective_id,
                 detail=f"Сохранён файл {logical_path}, версия {version}",
             )
-        record = self.find_file(space_id, logical_path)
-        if record is None:
-            raise ConflictError("file metadata commit failed")
+            committed_row = connection.execute(
+                "SELECT * FROM files WHERE id = ?", (effective_id,),
+            ).fetchone()
+        record = self._file(committed_row)
         self.sync_file_to_mirrors(record)
         return record
 

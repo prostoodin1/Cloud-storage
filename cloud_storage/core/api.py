@@ -972,12 +972,34 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
 
     @app.exception_handler(sqlite3.OperationalError)
     async def database_operational_error(request: Request, exc: sqlite3.OperationalError):
+        error_code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+        if error_code in {sqlite3.SQLITE_IOERR, sqlite3.SQLITE_FULL,
+                          sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_READONLY}:
+            full = error_code == sqlite3.SQLITE_FULL
+            return JSONResponse(
+                status_code=507 if full else 503,
+                content={"code": "metadata_full" if full else "metadata_io_unavailable",
+                         "detail": "metadata storage is full" if full else
+                         "metadata storage is unavailable; check disk and permissions"},
+                headers={} if full else {"Retry-After": "5"},
+            )
         if not is_database_busy(exc):
             raise exc
         return JSONResponse(
             status_code=503,
             content={"code": "database_busy", "detail": "storage metadata is busy; retry later"},
             headers={"Retry-After": "2"},
+        )
+
+    @app.exception_handler(OSError)
+    async def io_error_handler(request: Request, exc: OSError) -> JSONResponse:
+        full = exc.errno in {28, 122} or getattr(exc, "winerror", None) == 112
+        return JSONResponse(
+            status_code=507 if full else 503,
+            content={"code": "storage_full" if full else "io_unavailable",
+                     "detail": "storage is full" if full else
+                     "I/O operation failed; check storage availability and permissions"},
+            headers={} if full else {"Retry-After": "5"},
         )
 
     @app.get("/v1/health", tags=["system"])
@@ -1686,6 +1708,11 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         limit: int = Query(default=100, ge=1, le=500),
     ) -> dict[str, Any]:
         return runtime.storage.transfer_overview(limit=limit)
+
+    @app.get("/v1/admin/storage-readiness", tags=["manager"],
+             dependencies=[Depends(require_manager)])
+    def storage_readiness() -> dict[str, Any]:
+        return runtime.storage.storage_readiness()
 
     @app.put(
         "/v1/admin/transfers/settings",

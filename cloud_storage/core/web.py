@@ -169,6 +169,9 @@ class BrowserAccess:
         def asset(name: str):
             allowed = {
                 "app.js": "text/javascript",
+                "app.webmanifest": "application/manifest+json",
+                "icon-192.png": "image/png",
+                "icon-512.png": "image/png",
                 "app.css": "text/css",
                 "account.css": "text/css",
                 "share.js": "text/javascript",

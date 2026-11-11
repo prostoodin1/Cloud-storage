@@ -206,7 +206,7 @@ def test_startup_cleanup_skips_unavailable_disk_and_retains_session(sandbox, mon
     with s.runtime.database.transaction() as db:
         db.execute("UPDATE upload_sessions SET expires_at='2000-01-01' WHERE id=?", (upload,))
 
-    def unavailable(*args):
+    def unavailable(*args, **kwargs):
         raise OSError("device unavailable")
 
     monkeypatch.setattr(s.storage, "cancel_resumable_upload", unavailable)

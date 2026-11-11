@@ -161,7 +161,11 @@ def test_desktop_client_window_smoke(tmp_path) -> None:
     assert window.remote_login_button.text() == "Войти через интернет"
     assert window.account_login_button.text() == "Войти по логину"
     assert window.server_selector.count() == 1
-    assert window.nav_buttons[1].isEnabled() is False
+    assert window.nav_actions[1].isEnabled() is False
+    assert not window.nav_actions[3].isVisible()
+    window.nav_actions[2].trigger()
+    assert window.stack.currentWidget() is window.transfers_page
+    assert "Передачи" in window.navigation.text()
     window.add_server()
     assert window.server_selector.count() == 2
     assert window.profile.profile_id != "default"
@@ -228,7 +232,13 @@ def test_client_recovers_changed_lan_address_by_pinned_server_identity(
         app.processEvents()
 
 
-def test_client_distinguishes_invalid_device_token_from_offline(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("detail", "expected_status"),
+    [("device token is invalid", "reconnect_required"), ("request failed", "offline")],
+)
+def test_client_distinguishes_invalid_device_token_from_offline(
+    tmp_path, monkeypatch, detail, expected_status,
+) -> None:
     app = QApplication.instance() or QApplication([])
     store = ClientSettingsStore(tmp_path)
     profile = store.load()
@@ -238,6 +248,8 @@ def test_client_distinguishes_invalid_device_token_from_offline(tmp_path, monkey
     DeviceTokenVault(tmp_path).store("csd_" + "y" * 64)
     window = ClientWindow(store=store, smoke_test=True)
     tasks = []
+    resumed = []
+    monkeypatch.setattr(window, "_start_queued_transfers", lambda: resumed.append(True))
     monkeypatch.setattr(window, "_start_task", lambda *args: tasks.append(args))
     monkeypatch.setattr(window, "_set_spaces", lambda *args, **kwargs: None)
     monkeypatch.setattr(window, "_reconcile_drives", lambda: None)
@@ -250,17 +262,36 @@ def test_client_distinguishes_invalid_device_token_from_offline(tmp_path, monkey
             return {"status": "ok"}
 
         def pairing_status(self):
-            raise ClientApiError(403, "device token is invalid")
+            raise ClientApiError(403, detail)
+
+        def close(self):
+            pass
 
     monkeypatch.setattr("cloud_storage.client.window.ClientApi", FakeApi)
     try:
         window.refresh_connection()
         task = tasks.pop()
-        task[1](task[0]())
-        assert store.load().device_status == "reconnect_required"
-        assert DeviceTokenVault(tmp_path).load() is None
-        assert window.sidebar_state.text() == "НУЖНО ПОДКЛЮЧЕНИЕ"
-        assert "заново" in window.connection_title.text().casefold()
+        assert window.sidebar_state.text() == "ПЕРЕПОДКЛЮЧЕНИЕ"
+        if expected_status == "offline":
+            with pytest.raises(ClientConnectionError) as failure:
+                task[0]()
+            task[2](str(failure.value))
+            assert DeviceTokenVault(tmp_path).load() is not None
+            assert window.sidebar_state.text() == "ОФЛАЙН"
+        else:
+            task[1](task[0]())
+            assert DeviceTokenVault(tmp_path).load() is None
+            assert window.sidebar_state.text() == "НУЖНО ПОДКЛЮЧЕНИЕ"
+        assert store.load().device_status == expected_status
+        if expected_status == "offline":
+            monkeypatch.setattr(FakeApi, "pairing_status", lambda self: {"status": "trusted"})
+            monkeypatch.setattr(FakeApi, "list_spaces", lambda self: [], raising=False)
+            window.refresh_connection()
+            check, success, _failure = tasks.pop()
+            success(check())
+            assert store.load().device_status == "trusted"
+            assert DeviceTokenVault(tmp_path).load() is not None
+            assert resumed == [True]
     finally:
         window.close()
         app.processEvents()

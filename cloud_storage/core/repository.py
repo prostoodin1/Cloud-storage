@@ -1392,6 +1392,20 @@ class CoreRepository:
                 """,
                 parameters,
             ).fetchall()
+            activity = connection.execute(
+                """
+                SELECT
+                    COALESCE(SUM(t.status = 'completed'), 0) AS completed,
+                    COALESCE(SUM(t.status = 'cancelled'), 0) AS cancelled,
+                    COALESCE(SUM(t.status = 'failed' AND u.id IS NULL), 0) AS failed,
+                    COALESCE(SUM(t.status IN ('receiving', 'moving', 'sending')), 0) AS active,
+                    COALESCE(SUM(t.status = 'failed' AND u.id IS NOT NULL), 0) AS resumable
+                FROM transfer_jobs AS t
+                LEFT JOIN upload_sessions AS u ON u.id = t.id AND u.status = 'active'
+                WHERE (? IS NULL OR t.updated_at >= ?)
+                """,
+                (utc_text(cutoff), utc_text(cutoff)) if cutoff is not None else (None, None),
+            ).fetchone()
         buckets = [dict(row) for row in rows]
         return {
             "period": period,
@@ -1400,6 +1414,7 @@ class CoreRepository:
             "all_time_uploaded_bytes": int(totals[0]),
             "all_time_downloaded_bytes": int(totals[1]),
             "buckets": buckets,
+            "activity": dict(activity),
         }
 
     def recent_audit(self, limit: int = 100) -> list[dict[str, Any]]:

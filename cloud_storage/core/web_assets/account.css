@@ -6,6 +6,27 @@ input {
   border: 1px solid var(--line);
   border-radius: 9px;
 }
+
+#transfer-panel {
+  margin-top: 20px;
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow-wrap: anywhere;
+}
+
+#transfer-progress {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  accent-color: #71b8ff;
+}
+
+#transfer-state {
+  margin-bottom: 0;
+  color: var(--muted);
+}
 .remember {
   display: flex;
   align-items: center;

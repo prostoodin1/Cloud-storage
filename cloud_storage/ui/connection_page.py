@@ -46,8 +46,8 @@ class ConnectionCodePanel(QFrame):
         title = QLabel("Код подключения клиента")
         title.setStyleSheet("font-size: 18px; font-weight: 700;")
         description = QLabel(
-            "Сервер автоматически меняет защищённый код каждые 5 минут. Введите его "
-            "в Desktop Client один раз — дальнейшие подключения выполняются автоматически."
+            "Сервер меняет код каждые 5 минут. Для первого входа откройте адрес ниже "
+            "в браузере или введите код в Desktop Client."
         )
         description.setWordWrap(True)
         description.setProperty("muted", True)
@@ -167,7 +167,7 @@ class ConnectionCodePanel(QFrame):
         self.dynamic_target.currentIndexChanged.connect(self._change_dynamic_target)
         self.dynamic_code = QLineEdit()
         self.dynamic_code.setReadOnly(True)
-        self.dynamic_code.setPlaceholderText("Запустите Core и включите локальный HTTPS")
+        self.dynamic_code.setPlaceholderText("Здесь появится пятиминутный код подключения")
         self.dynamic_code.setMinimumHeight(46)
         self.dynamic_code.setMaxLength(4096)
         dynamic_actions = QHBoxLayout()
@@ -510,6 +510,18 @@ class ConnectionCodePanel(QFrame):
             )
             self.dynamic_target.blockSignals(False)
         self.dynamic_code.setText(str(value.get("code") or ""))
+        web_url = str(value.get("server_url") or "")
+        if self.dynamic_code.text() and web_url.startswith("https://"):
+            self.web_address.setText(web_url)
+            self.web_open.setEnabled(True)
+            self.web_copy.setEnabled(True)
+            if value.get("universal_https"):
+                self.web_status.setText("Единый HTTPS-адрес для браузера и приложения.")
+        elif value.get("error"):
+            self.web_address.clear()
+            self.web_open.setEnabled(False)
+            self.web_copy.setEnabled(False)
+            self.web_status.setText(str(value["error"]))
         self._dynamic_error = str(value.get("error") or "")
         self._dynamic_expires_at = int(value.get("expires_at") or 0)
         self._dynamic_refresh_requested = False

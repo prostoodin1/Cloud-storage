@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
 from cloud_storage.container_manager.window import ContainerManagerWindow
 from cloud_storage.models import AppSettings, DiskConfiguration, DiskRole, DiskSnapshot
 from cloud_storage.pairing import build_connection_code
+from cloud_storage.services.core_client import CoreClient
 from cloud_storage.services.settings_store import SettingsStore
 from cloud_storage.ui.connection_page import ConnectionCodePanel
 from cloud_storage.ui.main_window import MainWindow
@@ -111,6 +112,30 @@ def test_main_window_smoke(tmp_path) -> None:
     window.close()
 
 
+def test_startup_opens_dashboard_even_when_server_does_not_answer(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(CoreClient, "try_health", lambda self, timeout=0.4: None)
+    window = MainWindow(store=SettingsStore(tmp_path), disk_service=FakeDiskService())
+    try:
+        assert window.screens.currentWidget() is window.launcher
+        app.processEvents()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        app.processEvents()
+        assert window.screens.currentWidget() is window.workspace
+        assert window.stack.currentWidget() is window.dashboard_page
+        assert "не отвечает" in window.statusBar().currentMessage()
+        assert window.disks[0].label == "Test disk"
+
+        disks = window.navigation_menu.actions()[2]
+        disks.trigger()
+        assert window.screens.currentWidget() is window.workspace
+        assert window.stack.currentWidget() is window.disks_page
+        assert "Диски" in window.quick_navigation.text()
+        app.processEvents()
+    finally:
+        window.close()
+
+
 def test_connection_panel_generates_without_manual_ip() -> None:
     app = QApplication.instance() or QApplication([])
     panel = ConnectionCodePanel()
@@ -168,6 +193,8 @@ def test_disk_role_survives_a_changed_windows_disk_id(tmp_path) -> None:
     store.save(settings)
 
     window = MainWindow(store=store, disk_service=FakeDiskService())
+    app.processEvents()
+    assert QThreadPool.globalInstance().waitForDone(5000)
     app.processEvents()
 
     restored = store.load()

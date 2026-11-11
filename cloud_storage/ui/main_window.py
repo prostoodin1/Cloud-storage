@@ -7,20 +7,28 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
-from PySide6.QtGui import QCloseEvent, QDesktopServices
+from PySide6.QtCore import (
+    QEasingCurve,
+    QObject,
+    QPropertyAnimation,
+    QRunnable,
+    Qt,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    Signal,
+)
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
-    QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMenu,
     QMessageBox,
-    QPushButton,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -59,6 +67,8 @@ from cloud_storage.ui.dialogs import (
     SpaceDialog,
     UserEditDialog,
 )
+from cloud_storage.ui.launcher import ManagerLauncher
+from cloud_storage.ui.navigation import NavigationCapsule
 from cloud_storage.ui.pages import DashboardPage, DisksPage, SettingsPage
 from cloud_storage.ui.transfer_page import TransfersPage
 from cloud_storage.ui.update_page import UpdatePage
@@ -83,6 +93,29 @@ class _CoreHealthTask(QRunnable):
             self.signals.completed.emit(None)
         finally:
             self.signals.finished.emit()
+
+
+class _StartupSignals(QObject):
+    stage = Signal(str)
+    completed = Signal(object, object, str)
+
+
+class _StartupTask(QRunnable):
+    def __init__(self, client: CoreClient, disks: DiskService) -> None:
+        super().__init__()
+        self.client = client
+        self.disks = disks
+        self.signals = _StartupSignals()
+
+    def run(self) -> None:
+        health = self.client.try_health()
+        self.signals.stage.emit("Проверяем накопители…")
+        try:
+            disks = self.disks.discover()
+        except Exception as exc:  # Keep the launcher available if discovery fails.
+            self.signals.completed.emit(health, None, str(exc))
+        else:
+            self.signals.completed.emit(health, disks, "")
 
 
 class _TunnelEnableSignals(QObject):
@@ -189,9 +222,11 @@ class MainWindow(QMainWindow):
         self.disks: list[DiskSnapshot] = []
         self._disk_reminder_hidden = False
         self._setup_banner_hidden = False
-        self._nav_buttons: list[QPushButton] = []
+        self._nav_actions: list[QAction] = []
         self._nav_pages: list[QWidget] = []
         self._health_task: _CoreHealthTask | None = None
+        self._startup_task: _StartupTask | None = None
+        self._startup_needs_refresh = False
         self._pairing_user_id = ""
 
         self.setWindowTitle(f"Cloud Storage Server Manager · {__version__}")
@@ -204,23 +239,53 @@ class MainWindow(QMainWindow):
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._poll_core_health)
         if not smoke_test:
-            self._reset_refresh_timer()
-            QTimer.singleShot(0, self.refresh_disks)
+            QTimer.singleShot(0, self._start_launcher)
+        else:
+            self._show_page(self.dashboard_page)
+
+    def _start_launcher(self) -> None:
+        task = _StartupTask(self.core_client, self.disk_service)
+        self._startup_task = task
+        task.signals.stage.connect(self.launcher.stage.setText)
+        task.signals.completed.connect(self._finish_launcher)
+        QThreadPool.globalInstance().start(task)
+
+    def _finish_launcher(self, health: object, disks: object, error: str) -> None:
+        self._startup_task = None
+        self.core_health = health if isinstance(health, dict) else None
+        if disks is not None:
+            self._apply_discovered_disks(disks)
+        if error:
+            self.audit.record("disk.scan.failed", f"Ошибка обнаружения дисков: {error}", "warning")
+        message = (
+            "Не удалось проверить накопители. Откройте «Диски» для повторной проверки."
+            if error else "Сервер пока не отвечает. Откройте «Главную», чтобы проверить состояние."
+            if self.core_health is None else ""
+        )
+        self._startup_needs_refresh = True
+        self._show_page(self.dashboard_page)
+        if message:
+            self.statusBar().showMessage(message, 10000)
+        self._reset_refresh_timer()
 
     def _build_ui(self) -> None:
         root = QWidget()
         root.setObjectName("AppRoot")
-        self.setCentralWidget(root)
-        layout = QHBoxLayout(root)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        sidebar = QFrame()
-        sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(244)
-        sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(18, 22, 18, 20)
-        sidebar_layout.setSpacing(8)
+        self.workspace = root
+        self.screens = QStackedWidget()
+        self.launcher = ManagerLauncher()
+        self.screens.addWidget(self.launcher)
+        self.screens.addWidget(root)
+        self.setCentralWidget(self.screens)
+        root.setStyleSheet("""
+            QWidget#AppRoot { background: #0b0e12; }
+            QFrame[card="true"] { background: #151a21; border: 1px solid #303943;
+                border-radius: 14px; }
+            QLabel#BrandMark { color: #2d2415; background: #f2cf8b; border-radius: 10px; }
+        """)
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(20, 14, 20, 12)
+        layout.setSpacing(12)
         brand = QHBoxLayout()
         mark = QLabel("CS")
         mark.setObjectName("BrandMark")
@@ -235,10 +300,18 @@ class MainWindow(QMainWindow):
         name_box.addWidget(beta)
         brand.addWidget(mark)
         brand.addLayout(name_box, 1)
-        sidebar_layout.addLayout(brand)
-        sidebar_layout.addSpacing(26)
+        layout.addLayout(brand)
 
         self.stack = QStackedWidget()
+        self.page_opacity = QGraphicsOpacityEffect(self.stack)
+        self.page_opacity.setEnabled(False)
+        self.stack.setGraphicsEffect(self.page_opacity)
+        self.page_transition = QPropertyAnimation(self.page_opacity, b"opacity", self)
+        self.page_transition.setDuration(155)
+        self.page_transition.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.page_transition.setStartValue(0.72)
+        self.page_transition.setEndValue(1.0)
+        self.page_transition.finished.connect(lambda: self.page_opacity.setEnabled(False))
         self.dashboard_page = DashboardPage()
         self.connection_page = ConnectionPage()
         self.disks_page = DisksPage()
@@ -255,85 +328,42 @@ class MainWindow(QMainWindow):
         self.update_page.status_changed.connect(self.statusBar().showMessage)
         self.help_page = HelpPage(self.knowledge, "server")
         self.help_page.open_logs_requested.connect(self.open_logs_directory)
+        self.quick_navigation = NavigationCapsule()
+        self.quick_navigation.set_current_section("Главная")
+        self.navigation_menu = self.quick_navigation.navigation_menu
         for label, page in (
-            ("⌂   Основная", self.dashboard_page),
-            ("⌁   Подключение", self.connection_page),
-            ("▣   Диски", self.disks_page),
-            ("⇅   Передачи", self.transfers_page),
-            ("⚙   Настройки", self.settings_page),
-            ("↻   Обновления", self.update_page),
-            ("?   Помощь", self.help_page),
+            ("Главная", self.dashboard_page),
+            ("Подключение", self.connection_page),
+            ("Диски", self.disks_page),
+            ("Передачи", self.transfers_page),
+            ("Настройки", self.settings_page),
+            ("Обновления", self.update_page),
+            ("Помощь", self.help_page),
+            ("Система", self.control_page),
         ):
-            button = QPushButton(label)
-            button.setProperty("nav", True)
-            button.setCheckable(True)
-            button.clicked.connect(lambda checked=False, p=page: self._show_page(p))
-            sidebar_layout.addWidget(button)
-            self._nav_buttons.append(button)
+            page.setProperty("navigationTitle", label)
+            action = self.navigation_menu.addAction(label)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked=False, target=page: self._show_page(target))
+            self._nav_actions.append(action)
             self._nav_pages.append(page)
             self.stack.addWidget(page)
-        system_button = QPushButton("◆   Система")
-        system_button.setProperty("nav", True)
-        system_button.setCheckable(True)
-        system_button.clicked.connect(lambda checked=False: self._show_page(self.control_page))
-        sidebar_layout.addWidget(system_button)
-        self._nav_buttons.append(system_button)
-        self._nav_pages.append(self.control_page)
-        self.stack.addWidget(self.control_page)
-        self._nav_buttons[0].setChecked(True)
-        sidebar_layout.addStretch()
-
-        safety = QFrame()
-        safety.setProperty("card", True)
-        safety_layout = QVBoxLayout(safety)
-        safety_layout.setContentsMargins(12, 10, 12, 10)
-        safety_title = QLabel("БЕЗОПАСНЫЙ РЕЖИМ")
-        safety_title.setStyleSheet("font-weight: 700; font-size: 11px; color: #43c778;")
-        safety_text = QLabel("Нет форматирования · перенос только с SHA-256")
-        safety_text.setWordWrap(True)
-        safety_text.setProperty("muted", True)
-        safety_layout.addWidget(safety_title)
-        safety_layout.addWidget(safety_text)
-        sidebar_layout.addWidget(safety)
-        layout.addWidget(sidebar)
-
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(22, 20, 12, 12)
-        quick_row = QHBoxLayout()
-        quick_row.addStretch()
-        self.quick_navigation = QPushButton("Разделы ▾")
-        self.quick_navigation.setProperty("primary", True)
-        self.quick_navigation.setMinimumWidth(220)
-        quick_menu = QMenu(self.quick_navigation)
-        for label, page in zip(
-            (
-                "Основная",
-                "Подключение",
-                "Диски",
-                "Передачи",
-                "Настройки",
-                "Обновления",
-                "Помощь",
-                "Система",
-            ),
-            self._nav_pages,
-            strict=True,
-        ):
-            action = quick_menu.addAction(label)
-            action.triggered.connect(lambda checked=False, target=page: self._show_page(target))
-        self.quick_navigation.setMenu(quick_menu)
-        self.quick_navigation.setVisible(False)
-        quick_row.addWidget(self.quick_navigation)
-        quick_row.addStretch()
-        content_layout.addLayout(quick_row)
-        content_layout.addWidget(self.stack)
-        layout.addWidget(content, 1)
+        self._nav_actions[0].setChecked(True)
+        layout.addWidget(self.stack, 1)
+        layout.addWidget(self.quick_navigation, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     def _connect_pages(self) -> None:
         self.dashboard_page.setup_requested.connect(self.open_setup)
         self.dashboard_page.remind_later_requested.connect(self.hide_setup_reminder)
         self.dashboard_page.traffic_period_changed.connect(self._set_traffic_period)
+        self.dashboard_page.connection_check_requested.connect(self._show_connection_check)
+        self.dashboard_page.transfers_requested.connect(lambda: self._show_page(self.transfers_page))
+        self.dashboard_page.web_open_requested.connect(
+            lambda: self.connection_page.panel.web_open.click()
+        )
+        self.dashboard_page.web_copy_requested.connect(
+            lambda: self.connection_page.panel.web_copy.click()
+        )
         self.connection_page.panel.generation_requested.connect(self.generate_connection_code)
         self.connection_page.panel.create_user_requested.connect(self.add_user)
         self.connection_page.panel.edit_user_requested.connect(self.edit_user)
@@ -433,6 +463,43 @@ class MainWindow(QMainWindow):
         self.settings_page.connection_generation_requested.connect(self.generate_connection_code)
         self.settings_page.open_logs_requested.connect(self.open_logs_directory)
 
+    def _show_connection_check(self) -> None:
+        try:
+            health = self.core_client.health()
+        except (CoreApiError, CoreUnavailable):
+            health = None
+        lines = [
+            "Локальный API: отвечает" if health is not None else "Локальный API: нет ответа"
+        ]
+        cloudflare = (health or {}).get("cloudflare") or {}
+        if health is None:
+            lines.append("Публичный HTTPS: не проверен")
+        elif not cloudflare.get("enabled"):
+            lines.append("Публичный HTTPS: Cloudflare Tunnel не настроен")
+        elif cloudflare.get("state") == "online" and cloudflare.get("public_url"):
+            lines.append("Публичный HTTPS: сервер подтвердил доступность")
+        else:
+            lines.append("Публичный HTTPS: сервер ещё не подтвердил доступность")
+        try:
+            storage = self.core_client.storage_readiness() if health is not None else {}
+        except (CoreApiError, CoreUnavailable):
+            storage = {}
+        if not storage:
+            lines.append("Хранилище: запись не проверена")
+        elif storage.get("ready"):
+            lines.append("Хранилище: готово к записи")
+        else:
+            lines.append("Хранилище: запись недоступна, проверьте раздел «Диски»")
+        report = "\n".join(lines)
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Проверка подключения")
+        dialog.setText(report)
+        copy_button = dialog.addButton("Копировать отчёт", QMessageBox.ButtonRole.ActionRole)
+        dialog.addButton(QMessageBox.StandardButton.Close)
+        dialog.exec()
+        if dialog.clickedButton() is copy_button:
+            QApplication.clipboard().setText(report)
+
     def _can_auto_update_server(self) -> bool:
         # Query current state rather than a possibly stale UI snapshot. The
         # elevated installer stops Core after UAC approval; cancelling UAC must
@@ -444,9 +511,23 @@ class MainWindow(QMainWindow):
             return False
 
     def _show_page(self, page: QWidget) -> None:
+        changed = (
+            self.screens.currentWidget() is not self.workspace
+            or self.stack.currentWidget() is not page
+        )
+        self.screens.setCurrentWidget(self.workspace)
         self.stack.setCurrentWidget(page)
-        for index, button in enumerate(self._nav_buttons):
-            button.setChecked(self.stack.widget(index) is page)
+        if changed and self.isVisible() and QApplication.isEffectEnabled(Qt.UIEffect.UI_FadeMenu):
+            self.page_transition.stop()
+            self.page_opacity.setOpacity(0.72)
+            self.page_opacity.setEnabled(True)
+            self.page_transition.start()
+        for action, target in zip(self._nav_actions, self._nav_pages, strict=True):
+            action.setChecked(target is page)
+        self.quick_navigation.set_current_section(page.property("navigationTitle"))
+        if self._startup_needs_refresh:
+            self._startup_needs_refresh = False
+            QTimer.singleShot(0, self.refresh_core)
 
     def _open_system_section(self, route: str) -> None:
         self.control_page.open_tab(route)
@@ -483,19 +564,6 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, "Не удалось открыть контейнеры", str(exc))
 
-    def _apply_interface_mode(self, mode: str) -> None:
-        simple = mode == "simple"
-        visible_in_simple = {
-            self.dashboard_page,
-            self.connection_page,
-            self.disks_page,
-            self.help_page,
-            self.control_page,
-        }
-        for button, page in zip(self._nav_buttons, self._nav_pages, strict=True):
-            button.setVisible(not simple or page in visible_in_simple)
-        self.quick_navigation.setVisible(simple)
-
     def navigate_to_route(self, route: str) -> None:
         routes = {
             "dashboard": self.dashboard_page,
@@ -503,6 +571,7 @@ class MainWindow(QMainWindow):
             "disks": self.disks_page,
             "receive": self.receive_page,
             "send": self.send_page,
+            "transfers": self.transfers_page,
             "system": self.control_page,
             "settings": self.settings_page,
             "updates": self.update_page,
@@ -513,11 +582,7 @@ class MainWindow(QMainWindow):
     def refresh_disks(self) -> None:
         self._refresh_core_state()
         try:
-            discovered = [
-                item
-                for item in self.disk_service.discover()
-                if item.id not in self.settings.removed_disk_ids
-            ]
+            discovered = self.disk_service.discover()
         except Exception as exc:  # UI boundary: discovery failures must not crash the manager
             self.audit.record("disk.scan.failed", f"Ошибка обнаружения дисков: {exc}", "warning")
             QMessageBox.warning(
@@ -527,6 +592,13 @@ class MainWindow(QMainWindow):
             )
             self._refresh_pages()
             return
+        self._apply_discovered_disks(discovered)
+        self._refresh_pages()
+
+    def _apply_discovered_disks(self, discovered: list[DiskSnapshot]) -> None:
+        discovered = [
+            disk for disk in discovered if disk.id not in self.settings.removed_disk_ids
+        ]
         self._reconcile_disk_identities(discovered)
         new_ids = [item.id for item in discovered if item.id not in self.settings.known_disk_ids]
         if new_ids:
@@ -540,7 +612,6 @@ class MainWindow(QMainWindow):
                     )
             self.store.save(self.settings)
         self.disks = mark_missing_disks(discovered, self.settings)
-        self._refresh_pages()
 
     def _reconcile_disk_identities(self, discovered: list[DiskSnapshot]) -> None:
         """Move saved roles when Windows reports the same volume under a new transient id."""
@@ -600,7 +671,9 @@ class MainWindow(QMainWindow):
                     dynamic_pairing = {
                         "error": "Для кода выбранного пользователя обновите ядро сервера."
                     }
-            except (CoreApiError, CoreUnavailable):
+            except CoreApiError as exc:
+                dynamic_pairing = {"error": exc.detail}
+            except CoreUnavailable:
                 dynamic_pairing = {}
         users_for_ui = [
             {
@@ -624,6 +697,9 @@ class MainWindow(QMainWindow):
         self.dashboard_page.set_storage_readiness(
             self.core_storage_readiness, online=self.core_health is not None,
         )
+        self.dashboard_page.set_active_transfers(
+            self.core_transfers, online=self.core_health is not None,
+        )
         self.disks_page.update_data(
             self.disks,
             self.settings,
@@ -637,6 +713,7 @@ class MainWindow(QMainWindow):
             self.core_tunnels,
         )
         self.connection_page.panel.set_dynamic_code(dynamic_pairing)
+        self.dashboard_page.set_web_address(self.connection_page.panel.web_address.text())
         self.settings_page.load_settings(self.settings, str(self.store.path))
         self.settings_page.update_core_data(
             self.core_health,
@@ -662,16 +739,13 @@ class MainWindow(QMainWindow):
             self.settings_page.connection_panel.set_dynamic_code(dynamic_pairing)
         self.transfers_page.update_data(self.core_transfers, online=self.core_health is not None)
         self.control_page.update_data(self.core_control, online=self.core_health is not None)
-        self._apply_interface_mode(
-            str(self.core_control.get("settings", {}).get("interface_mode", "detailed"))
-        )
         unconfigured = sum(
             item.available
             and self.settings.configuration_for(item.id).role == DiskRole.UNCONFIGURED
             for item in self.disks
         )
-        self._nav_buttons[2].setText(
-            f"▣   Диски   • {unconfigured}" if unconfigured else "▣   Диски"
+        self._nav_actions[2].setText(
+            f"Диски · {unconfigured}" if unconfigured else "Диски"
         )
         counts = self.core_transfers.get("counts", {})
         inbound_active = int(counts.get("inbound_active", 0))
@@ -682,10 +756,10 @@ class MainWindow(QMainWindow):
         )
         active_transfer_count = inbound_active + outbound_active
         if transfer_button_index >= 0:
-            self._nav_buttons[transfer_button_index].setText(
-                f"⇅   Передачи   • {active_transfer_count}"
+            self._nav_actions[transfer_button_index].setText(
+                f"Передачи · {active_transfer_count}"
                 if active_transfer_count
-                else "⇅   Передачи"
+                else "Передачи"
             )
 
     def _refresh_core_state(self) -> None:

@@ -1,6 +1,6 @@
 #define AppName "Cloud Storage Client"
-#define AppVersion "0.10.8b6"
-#define AppFileVersion "0.10.8.6"
+#define AppVersion "0.10.8b7"
+#define AppFileVersion "0.10.8.7"
 #define AppPublisher "Cloud Storage"
 #define AppExeName "CloudStorageClient.exe"
 #define WinFspMsi "winfsp-2.1.25156.msi"

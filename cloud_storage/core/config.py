@@ -35,7 +35,7 @@ class CoreConfig:
     cloudflare_executable: str = "cloudflared"
     cloudflare_public_url: str = ""
     server_name: str = "Домашнее облако"
-    max_upload_bytes: int = 20 * 1024**3
+    max_upload_bytes: int = 75_000_000_000
     pairing_ttl_seconds: int = 15 * 60
     persisted_extra: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
 
@@ -195,7 +195,7 @@ class CoreConfig:
         server_name = os.environ.get(
             "CLOUD_STORAGE_SERVER_NAME", str(persisted.get("server_name", "Домашнее облако"))
         ).strip()
-        max_upload_gib = int(os.environ.get("CLOUD_STORAGE_MAX_UPLOAD_GIB", "20"))
+        max_upload_gib = os.environ.get("CLOUD_STORAGE_MAX_UPLOAD_GIB")
         if not server_name:
             server_name = "Домашнее облако"
         known = {item.name for item in cls.__dataclass_fields__.values()} - {
@@ -231,7 +231,10 @@ class CoreConfig:
             cloudflare_executable=cloudflare_executable,
             cloudflare_public_url=cloudflare_public_url,
             server_name=server_name[:80],
-            max_upload_bytes=max(1, max_upload_gib) * 1024**3,
+            max_upload_bytes=(
+                max(1, int(max_upload_gib)) * 1024**3
+                if max_upload_gib is not None else 75_000_000_000
+            ),
             persisted_extra=persisted_extra,
         )
 

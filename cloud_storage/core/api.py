@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import secrets
 import sqlite3
@@ -494,15 +496,30 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     transfer_admission = TransferAdmission()
     upload_completion = UploadCompletion(runtime.storage, transfer_admission)
 
+    async def expire_uploads(stop: asyncio.Event) -> None:
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=3600)
+                return
+            except TimeoutError:
+                try:
+                    await asyncio.to_thread(runtime.storage.cleanup_expired_uploads)
+                except (OSError, sqlite3.Error):
+                    logging.getLogger(__name__).exception("Expired upload cleanup failed")
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         runtime.diagnostics.start_monitor()
         # Scheduled backups and user-defined automation are parked in the 0.10
         # stable line; recovery of interrupted jobs remains enabled at startup.
         runtime.control.start()
+        cleanup_stop = asyncio.Event()
+        cleanup_task = asyncio.create_task(expire_uploads(cleanup_stop))
         try:
             yield
         finally:
+            cleanup_stop.set()
+            await cleanup_task
             await upload_completion.close()
             runtime.control.stop()
             runtime.diagnostics.stop_monitor()
@@ -529,20 +546,9 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         nonce = runtime.repository.credentials.fingerprint(
             f"{dynamic_server_id}:{expires_at}", "dynamic-pairing-nonce"
         )[:24]
-        # A code copied to another computer must prefer a verified public
-        # endpoint. LAN addresses remain fallbacks for machines on the same
-        # network, but must not make an otherwise working internet code look
-        # local-only.
         addresses: list[str] = []
         cloudflare_status = runtime.tunnels.status("cloudflare")
         cloudflare_url = str(cloudflare_status.get("public_url") or "").rstrip("/")
-        if (
-            runtime.config.cloudflare_enabled
-            and runtime.config.remote_pairing_enabled
-            and cloudflare_status.get("state") == "online"
-            and cloudflare_url.startswith("https://")
-        ):
-            addresses.append(cloudflare_url)
         zrok_status = runtime.tunnels.status("zrok")
         zrok_url = str(zrok_status.get("public_url") or "").rstrip("/")
         if (
@@ -561,6 +567,16 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             addresses.append(remote_url)
         if runtime.config.lan_enabled:
             addresses.extend(lan_endpoints(runtime.config))
+        universal_https = (
+            runtime.config.cloudflare_enabled and runtime.config.remote_pairing_enabled
+        )
+        if universal_https:
+            if cloudflare_status.get("state") != "online" or not cloudflare_url.startswith("https://"):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Cloudflare Tunnel ещё не подтвердил адрес. Проверьте удалённый доступ.",
+                )
+            addresses = [cloudflare_url]
         addresses = list(dict.fromkeys(item for item in addresses if item))
         if not addresses:
             raise HTTPException(
@@ -588,6 +604,8 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "expires_at": expires_at,
             "seconds_remaining": max(0, expires_at - now),
             "user_id": user_id,
+            "server_url": addresses[0],
+            "universal_https": universal_https,
         }
 
     bearer = HTTPBearer(auto_error=False)
@@ -646,6 +664,9 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             "/web/assets/app.css",
             "/web/assets/account.css",
             "/web/assets/app.js",
+            "/web/assets/app.webmanifest",
+            "/web/assets/icon-192.png",
+            "/web/assets/icon-512.png",
             "/web/assets/share.js",
             "/web/assets/share.css",
             "/v1/auth/device-login",
@@ -675,7 +696,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             r"/v1/spaces/[^/]+/uploads",
             r"/v1/spaces/[^/]+/files/.+",
             r"/v1/uploads/[^/]+",
-            r"/v1/uploads/[^/]+/complete",
+            r"/v1/uploads/[^/]+/(complete|chunk-digest)",
             r"/v1/shares/[^/]+",
             r"/v1/public/shares/[^/]+",
             r"/v1/public/shares/[^/]+/download",
@@ -810,7 +831,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             response.headers["Content-Security-Policy"] = (
                 "default-src 'none'; script-src 'self'; style-src 'self'; "
                 "connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; "
-                "frame-src 'self'; base-uri 'none'; "
+                "frame-src 'self'; manifest-src 'self'; base-uri 'none'; "
                 "form-action 'self'; frame-ancestors 'none'"
             )
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -3014,6 +3035,17 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             content=payload,
             headers={"Upload-Offset": str(upload.received_bytes)},
         )
+
+    @app.get("/v1/uploads/{upload_id}/chunk-digest", tags=["files"])
+    def resumable_chunk_digest(
+        upload_id: str,
+        offset: Annotated[int, Query(ge=0)],
+        length: Annotated[int, Query(ge=1, le=MAX_UPLOAD_CHUNK_BYTES)],
+        device: DeviceRecord = Depends(require_device),  # noqa: B008
+    ):
+        return {"sha256": runtime.storage.resumable_chunk_digest(
+            upload_id, device.user_id, offset, length,
+        )}
 
     @app.patch("/v1/uploads/{upload_id}", tags=["files"])
     async def append_resumable_upload(

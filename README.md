@@ -1,13 +1,13 @@
 # Cloud Storage
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b6)
+[![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b7)
 
 Собственное облачное хранилище: сервер на вашем компьютере, клиент для файлов
 и передач, управление пользователями и подключение пространства как диска Windows.
 Данные передаются по HTTPS; сервер хранит файлы на выбранных вами накопителях.
 
-**Текущий опубликованный Windows-релиз: [0.10.8b6, beta](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b6).**
+**Текущий Windows-релиз: [0.10.8b7, beta](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b7).**
 Проект развивается; готовность исходников, собранного пакета и реального устройства
 проверяется отдельно. Стабильная скорость 60–200 МБ/с через интернет пока не подтверждена.
 
@@ -15,18 +15,16 @@
 
 | Windows x64 | Назначение | Загрузка |
 |---|---|---|
-| Клиент | Полный установщик; включает компонент WinFsp для виртуального диска | [Client Setup b6](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b6/CloudStorage-Client-Setup-0.10.8b6-windows-x64.exe) |
-| Сервер | Полный установщик менеджеров, ядра и службы | [Server Setup b6](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b6/CloudStorage-Server-Setup-0.10.8b6-windows-x64.exe) |
-| Переносной клиент | ZIP; для диска нужен установленный WinFsp | [Client ZIP b6](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b6/CloudStorage-Desktop-Client-0.10.8b6-windows-x64.zip) |
-| Серверные компоненты | ZIP для ручного размещения и тестирования | [Server ZIP b6](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b6/CloudStorage-Server-Manager-0.10.8b6-windows-x64.zip) |
-| CLI для ИИ | Дополнительный консольный инструмент; не заменяет графические приложения | [CloudStorageCLI.exe](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b6/CloudStorageCLI.exe) |
+| Клиент | Полный установщик с компонентом WinFsp для виртуального диска | [Client Setup b7](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b7/CloudStorage-Client-Setup-0.10.8b7-windows-x64.exe) |
+| Сервер | Полный установщик менеджеров, ядра и службы | [Server Setup b7](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b7/CloudStorage-Server-Setup-0.10.8b7-windows-x64.exe) |
+| Переносной клиент | ZIP. Для диска нужен установленный WinFsp | [Client ZIP b7](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b7/CloudStorage-Desktop-Client-0.10.8b7-windows-x64.zip) |
+| Серверные компоненты | ZIP для ручного размещения и тестирования | [Server ZIP b7](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b7/CloudStorage-Server-Manager-0.10.8b7-windows-x64.zip) |
+| CLI | Дополнительный консольный инструмент | [CloudStorageCLI.exe](https://github.com/prostoodin1/Cloud-storage/releases/download/v0.10.8b7/CloudStorageCLI.exe) |
 
-[Все файлы, исходники и SHA256SUMS](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b6) ·
-[Изменения b6](RELEASE_NOTES_0.10.8b6.md) · [Первое подключение](docs/getting-started.md)
+[Все файлы, исходники и SHA256SUMS](https://github.com/prostoodin1/Cloud-storage/releases/tag/v0.10.8b7) ·
+[Изменения b7](RELEASE_NOTES_0.10.8b7.md) · [Первое подключение](docs/getting-started.md)
 
-Для первого перехода на b6 используйте **versioned Setup** из таблицы: старые постоянные сетевые
-установщики получают отдельные каталоги версий и могут предлагать другую сборку.
-После перехода b5 проверяет подписанный канал v2 при запуске и устанавливает обновления автоматически, если не сохранён ручной режим.
+Для перехода на b7 используйте **Setup b7** из таблицы. Подписанный канал v2 пока предлагает предыдущую версию.
 Cloud Storage EXE не имеют Authenticode-подписи издателя; контрольные суммы приложены к релизу.
 
 ## Что входит в проект
@@ -35,7 +33,7 @@ Cloud Storage EXE не имеют Authenticode-подписи издателя; 
 - **Server Manager:** пользователи, приглашения, устройства, накопители и диагностика.
 - **Server Core:** защищённый API, файловые операции, SQLite и проверка целостности.
 - **Нативный Go-процесс:** Windows-служба, контроль compatibility engine и проксирование API.
-- **Mobile:** исходники Expo/React Native для Android/iOS; APK/IPA не входят в b6.
+- **Mobile:** исходники Expo/React Native для Android/iOS. APK/IPA не входят в b7.
 - **Container Manager:** отдельный административный компонент в серверном комплекте.
 
 Полная карта компонентов: [apps/README.md](apps/README.md).

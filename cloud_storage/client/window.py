@@ -71,6 +71,7 @@ from cloud_storage.help.page import HelpPage
 from cloud_storage.pairing import build_pairing_uri, parse_pairing_uri
 from cloud_storage.retry import retry_delay
 from cloud_storage.services.audit_log import AuditLog
+from cloud_storage.ui.navigation import NavigationCapsule
 from cloud_storage.ui.theme import create_app_icon
 from cloud_storage.ui.update_page import UpdatePage
 from cloud_storage.ui.widgets import (
@@ -196,15 +197,20 @@ class ClientWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("AppRoot")
         self.setCentralWidget(root)
-        outer = QHBoxLayout(root)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        sidebar = QFrame()
-        sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(244)
-        side = QVBoxLayout(sidebar)
-        side.setContentsMargins(18, 22, 18, 20)
+        root.setStyleSheet("""
+            QWidget#AppRoot { background: #0b0e12; }
+            QLabel#BrandMark { color: #2d2415; background: #f2cf8b; border-radius: 10px; }
+            QFrame[card="true"] { background: #151a21; border: 1px solid #303943;
+                border-radius: 14px; }
+            QPushButton[primary="true"]:enabled {
+                color: #2d2415; background: #f2cf8b; border-color: #f2cf8b; }
+            QPushButton[primary="true"]:enabled:hover { background: #ffe1a6; }
+            QTableWidget { alternate-background-color: #141a21;
+                selection-background-color: #344150; selection-color: #f4f5f7; }
+        """)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(20, 14, 20, 12)
+        outer.setSpacing(12)
         mark_row = QHBoxLayout()
         mark = QLabel("CS")
         mark.setObjectName("BrandMark")
@@ -219,8 +225,7 @@ class ClientWindow(QMainWindow):
         brand_box.addWidget(edition)
         mark_row.addWidget(mark)
         mark_row.addLayout(brand_box, 1)
-        side.addLayout(mark_row)
-        side.addSpacing(26)
+        outer.addLayout(mark_row)
 
         self.stack = QStackedWidget()
         self.connection_page = self._make_connection_page()
@@ -235,47 +240,40 @@ class ClientWindow(QMainWindow):
         self.update_page.status_changed.connect(self.statusBar().showMessage)
         self.help_page = HelpPage(self.knowledge, "client")
         self.help_page.open_logs_requested.connect(self.open_logs_directory)
-        self.nav_buttons: list[QPushButton] = []
+        self.navigation = NavigationCapsule()
+        self.nav_actions: list[QAction] = []
         for label, page in (
-            ("⌁   Подключиться", self.connection_page),
-            ("▣   Мои файлы", self.files_page),
-            ("⇅   Передачи", self.transfers_page),
-            ("◫   Офлайн", self.offline_page),
-            ("♙   Аккаунт", self.account_page),
-            ("↻   Обновления", self.update_page),
-            ("?   Помощь", self.help_page),
+            ("Подключиться", self.connection_page),
+            ("Мои файлы", self.files_page),
+            ("Передачи", self.transfers_page),
+            ("Офлайн", self.offline_page),
+            ("Аккаунт", self.account_page),
+            ("Обновления", self.update_page),
+            ("Помощь", self.help_page),
         ):
-            button = QPushButton(label)
-            button.setProperty("nav", True)
-            button.setCheckable(True)
-            button.clicked.connect(lambda checked=False, target=page: self._show_page(target))
-            side.addWidget(button)
-            self.nav_buttons.append(button)
+            action = self.navigation.navigation_menu.addAction(label)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked=False, target=page: self._show_page(target))
+            self.nav_actions.append(action)
             self.stack.addWidget(page)
-        self.nav_buttons[0].setChecked(True)
+        self.nav_actions[0].setChecked(True)
+        self.navigation.set_current_section(self.nav_actions[0].text())
         # Offline sync is intentionally parked in 0.10.0; keep the internal
         # page for migration compatibility without advertising a dead feature.
-        self.nav_buttons[3].setVisible(False)
-        side.addStretch()
-
-        state_card = QFrame()
-        state_card.setProperty("card", True)
-        state_layout = QVBoxLayout(state_card)
+        self.nav_actions[3].setVisible(False)
+        state_layout = QVBoxLayout()
+        state_layout.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.sidebar_state = QLabel("НЕ ПОДКЛЮЧЕНО")
         self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #949ca8;")
         self.sidebar_server = QLabel("Укажите сервер и войдите")
         self.sidebar_server.setWordWrap(True)
+        self.sidebar_server.setTextFormat(Qt.TextFormat.PlainText)
         self.sidebar_server.setProperty("muted", True)
         state_layout.addWidget(self.sidebar_state)
         state_layout.addWidget(self.sidebar_server)
-        side.addWidget(state_card)
-        outer.addWidget(sidebar)
-
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(22, 20, 16, 14)
-        content_layout.addWidget(self.stack)
-        outer.addWidget(content, 1)
+        mark_row.addLayout(state_layout)
+        outer.addWidget(self.stack, 1)
+        outer.addWidget(self.navigation, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     def _make_connection_page(self) -> QWidget:
         page = QWidget()
@@ -533,7 +531,7 @@ class ClientWindow(QMainWindow):
         layout.setContentsMargins(4, 4, 16, 24)
         layout.setSpacing(14)
         layout.addWidget(
-            make_header("Мои файлы", "Логические пространства сервера без физических дисков.")
+            make_header("Мои файлы", "Выберите пространство и откройте нужную папку.")
         )
         toolbar = QHBoxLayout()
         self.space_selector = QComboBox()
@@ -572,6 +570,7 @@ class ClientWindow(QMainWindow):
         layout.addLayout(cache_row)
 
         self.files_table = QTableWidget(0, 5)
+        self.files_table.setAlternatingRowColors(True)
         self.files_table.setHorizontalHeaderLabels(
             ["Имя", "Тип", "Размер", "Изменён", "Поделиться"]
         )
@@ -1013,7 +1012,6 @@ class ClientWindow(QMainWindow):
 
         def pair() -> dict[str, Any]:
             candidates = [server_url, *alternate_addresses]
-            errors: list[str] = []
             for candidate in dict.fromkeys(candidates):
                 candidate_fingerprint = (
                     invitation_fingerprint
@@ -1025,17 +1023,23 @@ class ClientWindow(QMainWindow):
                     certificate_fingerprint=candidate_fingerprint,
                 )
                 try:
-                    health = candidate_api.health()
-                except (ClientApiError, ClientConnectionError, ValueError) as exc:
-                    errors.append(str(exc))
-                    continue
-                try:
-                    result = candidate_api.redeem_invitation(
-                        code, None, device_name, platform.system()
-                    )
-                except (ClientApiError, ClientConnectionError, ValueError) as exc:
-                    errors.append(str(exc))
-                    continue
+                    try:
+                        health = candidate_api.health()
+                    except (ClientApiError, ClientConnectionError, ValueError):
+                        continue
+                    # The server can create a device before its response is lost.
+                    # Never replay this request on an alternate address automatically.
+                    try:
+                        result = candidate_api.redeem_invitation(
+                            code, None, device_name, platform.system()
+                        )
+                    except ClientConnectionError as exc:
+                        raise ClientConnectionError(
+                            "Связь оборвалась во время регистрации. Проверьте список устройств "
+                            "в Manager перед повторной попыткой."
+                        ) from exc
+                finally:
+                    candidate_api.close()
                 return {
                     "health": health,
                     "pairing": result,
@@ -1349,6 +1353,28 @@ class ClientWindow(QMainWindow):
         self._profile_checks_running.add(profile_id)
         if profile_id == self.profile.profile_id:
             self._connection_check_running = True
+            if force or self.profile.device_status == "offline":
+                self._set_connection_state("reconnecting")
+
+        def is_current_check() -> bool:
+            try:
+                saved_token = DeviceTokenVault(self.store.data_directory, profile_id).load()
+            except OSError:
+                saved_token = None
+            if saved_token == token:
+                return True
+            self._profile_checks_running.discard(profile_id)
+            if profile_id == self.profile.profile_id:
+                self._connection_check_running = False
+            return False
+
+        def on_success(result: object) -> None:
+            if is_current_check():
+                self._profile_connection_refreshed(result)
+
+        def on_failure(message: str) -> None:
+            if is_current_check():
+                self._profile_connection_failed(profile_id, message)
 
         def check() -> dict[str, Any]:
             candidates: list[tuple[str, str, bool]] = [
@@ -1362,6 +1388,7 @@ class ClientWindow(QMainWindow):
             discovery_attempted = False
             while candidates:
                 server_url, fingerprint, recovered_address = candidates.pop(0)
+                api = None
                 try:
                     if recovered_address:
                         # Only origins explicitly saved during pairing (or a
@@ -1381,7 +1408,10 @@ class ClientWindow(QMainWindow):
                     try:
                         status = api.pairing_status()
                     except ClientApiError as exc:
-                        if exc.status_code in {401, 403}:
+                        if (
+                            exc.status_code in {401, 403}
+                            and exc.detail in {"device token is invalid", "invalid device token"}
+                        ):
                             return {
                                 "status": {"status": "reconnect_required"},
                                 "spaces": [],
@@ -1404,18 +1434,21 @@ class ClientWindow(QMainWindow):
                     }
                 except (ClientApiError, ClientConnectionError, OSError, ValueError) as exc:
                     errors.append(str(exc))
+                finally:
+                    if api is not None:
+                        api.close()
                 if not discovery_attempted:
                     discovery_attempted = True
-                    try:
-                        discovered = discover_servers(timeout=2.0)
-                    except OSError as exc:
-                        errors.append(str(exc))
-                        discovered = []
                     identity_pin = profile.certificate_fingerprint or next((pin for pin in profile.trusted_endpoints.values() if pin), "")
                     expected_fingerprint = identity_pin.replace(
                         ":", ""
                     ).casefold()
                     if not expected_fingerprint:
+                        continue
+                    try:
+                        discovered = discover_servers(timeout=2.0)
+                    except OSError as exc:
+                        errors.append(str(exc))
                         discovered = []
                     for server in discovered:
                         if server.fingerprint != expected_fingerprint:
@@ -1431,8 +1464,8 @@ class ClientWindow(QMainWindow):
 
         self._start_task(
             check,
-            self._profile_connection_refreshed,
-            lambda message: self._profile_connection_failed(profile_id, message),
+            on_success,
+            on_failure,
         )
 
     def login_google_device(self) -> None:
@@ -1636,7 +1669,7 @@ class ClientWindow(QMainWindow):
         self._profile_checks_running.discard(profile_id)
         failures = self._profile_failures.get(profile_id, 0) + 1
         self._profile_failures[profile_id] = failures
-        delay = min(60, 2 ** min(failures, 5))
+        delay = min(60, 2 ** min(failures, 6))
         self._profile_retry_after[profile_id] = time.monotonic() + delay
         profile = next(
             (item for item in self.store.list_profiles() if item.profile_id == profile_id), None
@@ -1647,9 +1680,12 @@ class ClientWindow(QMainWindow):
         if profile_id == self.profile.profile_id:
             self.profile.device_status = "offline"
             self.api = None
-            self._set_spaces([], authoritative=False)
+            self._entries_generation += 1
+            self._entries_pending = None
+            self._update_space_actions()
             self._connection_refresh_failed(message)
-            self.audit.record("client.connection_failed", message, severity="warning")
+            if failures == 1:
+                self.audit.record("client.connection_failed", message, severity="warning")
         self._refresh_server_selector()
         self._reconcile_drives()
 
@@ -1673,7 +1709,7 @@ class ClientWindow(QMainWindow):
             self.sidebar_state.setText("ПОДКЛЮЧЕНО")
             self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #43c778;")
             self.sidebar_server.setText(self.profile.server_name)
-            self.nav_buttons[1].setEnabled(True)
+            self.nav_actions[1].setEnabled(True)
         elif state == "pending":
             self.connection_title.setText("Ожидается подтверждение администратора")
             self.connection_detail.setText(
@@ -1682,14 +1718,20 @@ class ClientWindow(QMainWindow):
             self.sidebar_state.setText("ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ")
             self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #f5bd4f;")
             self.sidebar_server.setText(self.profile.server_name or "Сохранённый сервер")
-            self.nav_buttons[1].setEnabled(False)
+            self.nav_actions[1].setEnabled(False)
+        elif state == "reconnecting":
+            self.connection_title.setText("Восстанавливаем соединение")
+            self.connection_detail.setText("Проверяем сохранённый адрес и доступ устройства.")
+            self.sidebar_state.setText("ПЕРЕПОДКЛЮЧЕНИЕ")
+            self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #f2cf8b;")
+            self.sidebar_server.setText(self.profile.server_name or "Сохранённый сервер")
         elif state == "offline":
             self.connection_title.setText("Сервер временно недоступен")
             self.connection_detail.setText(detail or "Клиент повторит подключение автоматически.")
             self.sidebar_state.setText("ОФЛАЙН")
             self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #f5bd4f;")
             self.sidebar_server.setText(self.profile.server_name or "Сохранённый сервер")
-            self.nav_buttons[1].setEnabled(False)
+            self.nav_actions[1].setEnabled(False)
         elif state == "reconnect_required":
             self.connection_title.setText("Нужно подключить устройство заново")
             self.connection_detail.setText(
@@ -1700,7 +1742,7 @@ class ClientWindow(QMainWindow):
             self.sidebar_state.setText("НУЖНО ПОДКЛЮЧЕНИЕ")
             self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #f05a62;")
             self.sidebar_server.setText(self.profile.server_name or "Сохранённый сервер")
-            self.nav_buttons[1].setEnabled(False)
+            self.nav_actions[1].setEnabled(False)
         else:
             self.connection_title.setText("Клиент не подключён")
             if detail:
@@ -1708,7 +1750,7 @@ class ClientWindow(QMainWindow):
             self.sidebar_state.setText("НЕ ПОДКЛЮЧЕНО")
             self.sidebar_state.setStyleSheet("font-weight: 700; font-size: 11px; color: #949ca8;")
             self.sidebar_server.setText("Укажите сервер и войдите")
-            self.nav_buttons[1].setEnabled(False)
+            self.nav_actions[1].setEnabled(False)
 
     def forget_connection(self) -> None:
         response = QMessageBox.question(
@@ -1799,9 +1841,9 @@ class ClientWindow(QMainWindow):
     def _update_space_actions(self) -> None:
         space_id = str(self.space_selector.currentData() or "")
         space = next((item for item in self.spaces if str(item.get("id")) == space_id), {})
-        self.upload_button.setEnabled(bool(space.get("can_upload", False)))
-        self.delete_file_button.setEnabled(bool(space.get("can_delete", False)))
-        self.share_file_button.setEnabled(bool(space.get("can_share", False)))
+        self.upload_button.setEnabled(self.api is not None and bool(space.get("can_upload", False)))
+        self.delete_file_button.setEnabled(self.api is not None and bool(space.get("can_delete", False)))
+        self.share_file_button.setEnabled(self.api is not None and bool(space.get("can_share", False)))
 
     def refresh_entries(self) -> None:
         if not self.api or not self.space_selector.currentData():
@@ -1850,6 +1892,9 @@ class ClientWindow(QMainWindow):
 
     def _render_entries(self, result: object) -> None:
         selected_name = (self.selected_entry() or {}).get("name")
+        vertical = self.files_table.verticalScrollBar()
+        horizontal = self.files_table.horizontalScrollBar()
+        scroll_position = (vertical.value(), horizontal.value())
         self.entries = result if isinstance(result, list) else []
         self.files_table.clearSelection()
         self.files_table.setCurrentCell(-1, -1)
@@ -1873,7 +1918,9 @@ class ClientWindow(QMainWindow):
             share.clicked.connect(lambda _checked=False, item=entry: self.share_selected(item))
             self.files_table.setCellWidget(row, 4, share)
             if entry.get("name") == selected_name:
-                self.files_table.selectRow(row)
+                self.files_table.setCurrentCell(row, 0)
+        vertical.setValue(scroll_position[0])
+        horizontal.setValue(scroll_position[1])
 
     def selected_entry(self) -> dict[str, Any] | None:
         row = self.files_table.currentRow()
@@ -2152,7 +2199,7 @@ class ClientWindow(QMainWindow):
             return
 
         offset = int(status.get("received_bytes", 0))
-        if offset > transfer.total_bytes:
+        if not 0 <= offset <= transfer.total_bytes:
             raise ValueError("Сервер сообщил неверное смещение загрузки")
         self.transfer_store.update_progress(transfer.id, offset, remote_session_id=upload_id)
         # Old servers keep the original 4 MiB behaviour. New servers advertise
@@ -2885,8 +2932,9 @@ class ClientWindow(QMainWindow):
 
     def _show_page(self, page: QWidget) -> None:
         self.stack.setCurrentWidget(page)
-        for index, button in enumerate(self.nav_buttons):
-            button.setChecked(self.stack.widget(index) is page)
+        for index, action in enumerate(self.nav_actions):
+            action.setChecked(self.stack.widget(index) is page)
+        self.navigation.set_current_section(self.nav_actions[self.stack.currentIndex()].text())
         if page is self.offline_page:
             self.refresh_offline_index()
         elif page is self.account_page:

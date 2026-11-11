@@ -633,7 +633,7 @@ class StorageService:
                         sanitize_content_type(content_type),
                         utc_text(now),
                         utc_text(now),
-                        utc_text(now + timedelta(hours=24)),
+                        utc_text(now + timedelta(days=7)),
                     ),
                 )
                 self._insert_transfer_tx(
@@ -677,8 +677,9 @@ class StorageService:
                 self._finish_upload_state(upload_id, committed.id)
                 return self.get_resumable_upload(upload_id, user_id)
         if record.status == "active" and record.expires_at < utc_text():
-            self.cancel_resumable_upload(upload_id, user_id)
-            raise NotFoundError("upload session expired")
+            if self.cancel_resumable_upload(upload_id, user_id, expired=True):
+                raise NotFoundError("upload session expired")
+            return self.get_resumable_upload(upload_id, user_id)
         if record.status == "active":
             try:
                 path = self._resumable_path(record)
@@ -704,6 +705,21 @@ class StorageService:
                 return self.get_resumable_upload(upload_id, user_id)
         return record
 
+    def resumable_chunk_digest(
+        self, upload_id: str, user_id: str, offset: int, length: int,
+    ) -> str:
+        with self._resumable_lock(upload_id):
+            record = self.get_resumable_upload(upload_id, user_id)
+            self.repository.require_space_permission(record.space_id, user_id, capability="upload")
+            if record.status != "active" or offset + length > record.received_bytes:
+                raise ConflictError("requested range is not available in the partial upload")
+            with self._resumable_path(record).open("rb") as handle:
+                handle.seek(offset)
+                payload = handle.read(length)
+            if len(payload) != length:
+                raise ConflictError("partial upload size changed unexpectedly")
+            return hashlib.sha256(payload).hexdigest()
+
     def append_resumable_upload(
         self,
         upload_id: str,
@@ -718,6 +734,7 @@ class StorageService:
             record = self.get_resumable_upload(upload_id, user_id)
             if record.status != "active":
                 raise ConflictError("upload session is already completed")
+            self.repository.require_space_permission(record.space_id, user_id, capability="upload")
             if offset != record.received_bytes:
                 raise ConflictError(f"upload offset mismatch; expected {record.received_bytes}")
             if offset + len(payload) > record.expected_size:
@@ -741,7 +758,7 @@ class StorageService:
                     (
                         offset + len(payload),
                         utc_text(now),
-                        utc_text(now + timedelta(hours=24)),
+                        utc_text(now + timedelta(days=7)),
                         upload_id,
                         user_id,
                         offset,
@@ -768,6 +785,12 @@ class StorageService:
                 if result is None or result.id != record.result_file_id:
                     raise ConflictError("completed upload metadata is unavailable")
                 return result
+            self.repository.require_space_permission(record.space_id, user_id, capability="upload")
+            existing = self.find_file(record.space_id, record.logical_path)
+            if existing:
+                self.repository.require_space_permission(
+                    record.space_id, user_id, capability="modify",
+                )
             if record.received_bytes != record.expected_size:
                 raise ConflictError(
                     f"upload is incomplete; expected {record.expected_size}, "
@@ -848,7 +871,9 @@ class StorageService:
             raise PermissionDeniedError("destination failed containment validation")
         return final
 
-    def cancel_resumable_upload(self, upload_id: str, user_id: str) -> bool:
+    def cancel_resumable_upload(
+        self, upload_id: str, user_id: str, *, expired: bool = False,
+    ) -> bool:
         with self._resumable_lock(upload_id):
             with self.database.connection() as connection:
                 row = connection.execute(
@@ -858,12 +883,17 @@ class StorageService:
             if row is None:
                 return False
             record = self._resumable_upload(row)
+            if expired and record.expires_at >= utc_text():
+                return False
             if record.status == "active":
                 try:
                     self._resumable_path(record).unlink(missing_ok=True)
                 except NotFoundError:
                     pass
-                self._cancel_transfer(upload_id, "Загрузка отменена клиентом")
+                if expired:
+                    self._fail_transfer(upload_id, "Срок возобновления загрузки истёк")
+                else:
+                    self._cancel_transfer(upload_id, "Загрузка отменена клиентом")
             with self.database.transaction() as connection:
                 connection.execute("DELETE FROM upload_sessions WHERE id = ?", (upload_id,))
         return True
@@ -877,7 +907,7 @@ class StorageService:
         cleaned = 0
         for row in rows:
             try:
-                if self.cancel_resumable_upload(row["id"], row["user_id"]):
+                if self.cancel_resumable_upload(row["id"], row["user_id"], expired=True):
                     cleaned += 1
             except OSError:
                 # A disconnected/locked disk must not prevent Core startup.

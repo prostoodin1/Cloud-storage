@@ -78,7 +78,7 @@ def test_cloudflare_token_is_stored_privately_and_never_returned(tmp_path) -> No
     assert status["login_required"] is False
 
 
-def test_dynamic_code_prefers_verified_cloudflare_url(tmp_path) -> None:
+def test_dynamic_code_uses_only_verified_cloudflare_url(tmp_path) -> None:
     app = create_app(
         CoreConfig(
             data_directory=tmp_path,
@@ -100,10 +100,32 @@ def test_dynamic_code_prefers_verified_cloudflare_url(tmp_path) -> None:
         response = client.get("/v1/admin/dynamic-pairing-code", headers=headers)
 
     assert response.status_code == 200
-    parsed = parse_dynamic_pairing_code(response.json()["code"])
+    payload = response.json()
+    assert payload["server_url"] == "https://storage.example.test"
+    assert payload["universal_https"] is True
+    parsed = parse_dynamic_pairing_code(payload["code"])
     assert parsed is not None
     assert parsed.server_url == "https://storage.example.test"
-    assert any(address.startswith("https://") for address in parsed.alternate_addresses)
+    assert parsed.alternate_addresses == ()
+    assert parsed.certificate_fingerprint == ""
+
+
+def test_universal_code_waits_for_cloudflare_even_when_lan_is_enabled(tmp_path) -> None:
+    app = create_app(
+        CoreConfig(
+            data_directory=tmp_path,
+            lan_enabled=True,
+            cloudflare_enabled=True,
+            cloudflare_executable="missing-cloudflared-test",
+            cloudflare_public_url="https://storage.example.test",
+            remote_pairing_enabled=True,
+        )
+    )
+    headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
+    with TestClient(app) as client:
+        response = client.get("/v1/admin/dynamic-pairing-code", headers=headers)
+    assert response.status_code == 503
+    assert "Cloudflare Tunnel" in response.json()["detail"]
 
 
 def test_cloudflare_listener_hides_manager_routes(tmp_path) -> None:

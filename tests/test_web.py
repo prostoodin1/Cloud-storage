@@ -1,3 +1,4 @@
+import hashlib
 import time
 from dataclasses import replace
 
@@ -39,7 +40,10 @@ def test_web_assets_and_anonymous_api(web):
     assert "Введите код подключения" in root.text
     assert "script-src 'self'" in root.headers["content-security-policy"]
     assert "Логин" in root.text and "Это доверенное устройство" in root.text
-    for file in ["app.js", "app.css", "account.css", "share.js", "share.css"]:
+    for file in [
+        "app.js", "app.css", "account.css", "share.js", "share.css",
+        "app.webmanifest", "icon-192.png", "icon-512.png",
+    ]:
         assert client.get("/web/assets/" + file).status_code == 200
     assert client.get("/web/assets/secret").status_code == 404
     assert client.get("/v1/spaces").status_code == 401
@@ -86,6 +90,53 @@ def test_browser_files_csrf_logout_and_manager_boundary(web):
     assert client.post("/v1/web/logout", headers=headers).status_code == 200
     client.cookies.set(COOKIE, token)
     assert client.get("/v1/spaces").status_code == 401
+
+
+def test_browser_resumes_upload_and_checks_received_chunk(web):
+    _, client, code = web
+    _, headers = pair(client, code)
+    space = client.get("/v1/spaces").json()[0]["id"]
+    base = f"/v1/spaces/{space}"
+    created = client.post(
+        base + "/uploads",
+        json={"logical_path": "resume.txt", "size_bytes": 10},
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    url = "/v1/uploads/" + created.json()["id"]
+    chunk_headers = {**headers, "Content-Type": "application/offset+octet-stream"}
+    first = client.patch(url, content=b"hello", headers={**chunk_headers, "Upload-Offset": "0"})
+    assert first.headers["Upload-Offset"] == "5"
+    assert client.get(url).json()["received_bytes"] == 5
+    assert client.get(url + "/chunk-digest?offset=0&length=5").json() == {
+        "sha256": hashlib.sha256(b"hello").hexdigest()
+    }
+    assert client.get(url + "/chunk-digest?offset=1&length=5").status_code == 409
+    second = client.patch(url, content=b"world", headers={**chunk_headers, "Upload-Offset": "5"})
+    assert second.headers["Upload-Offset"] == "10"
+    completed = client.post(url + "/complete", headers=headers)
+    assert completed.status_code == 200, completed.text
+    assert client.get(base + "/files/resume.txt").content == b"helloworld"
+
+
+def test_expired_browser_upload_counts_as_one_terminal_failure(web):
+    app, client, code = web
+    _, headers = pair(client, code)
+    space = client.get("/v1/spaces").json()[0]["id"]
+    base = f"/v1/spaces/{space}/uploads"
+    first = client.post(base, json={"logical_path": "expired.txt", "size_bytes": 1}, headers=headers)
+    second = client.post(base, json={"logical_path": "cancel.txt", "size_bytes": 1}, headers=headers)
+    assert first.status_code == second.status_code == 201
+    expired_id, cancelled_id = first.json()["id"], second.json()["id"]
+    runtime = app.state.runtime
+    with runtime.database.transaction() as db:
+        db.execute("UPDATE upload_sessions SET expires_at='2000-01-01' WHERE id=?", (expired_id,))
+    assert runtime.storage.cleanup_expired_uploads() == 1
+    assert runtime.storage.cleanup_expired_uploads() == 0
+    assert client.delete("/v1/uploads/" + cancelled_id, headers=headers).status_code == 200
+    assert runtime.repository.traffic_summary("24h")["activity"] == {
+        "completed": 0, "cancelled": 1, "failed": 1, "active": 0, "resumable": 0,
+    }
 
 
 def test_browser_creates_isolated_public_file_page(web):
@@ -363,6 +414,9 @@ def test_cloudflare_browser_accepts_only_configured_public_origin(tmp_path):
     )
     app = create_app(config)
     with TestClient(app, base_url="http://127.0.0.1:18769") as tunnel:
+        provider = app.state.runtime.tunnels.providers["cloudflare"]
+        provider._state = "online"
+        provider._public_url = config.cloudflare_public_url
         local = TestClient(app, base_url="http://127.0.0.1:8765")
         manager_headers = {"Authorization": f"Bearer {app.state.runtime.secrets.manager_token}"}
         code = local.get("/v1/admin/dynamic-pairing-code", headers=manager_headers).json()["code"]
@@ -380,6 +434,8 @@ def test_cloudflare_browser_accepts_only_configured_public_origin(tmp_path):
         )
         assert valid.status_code == 200, valid.text
         assert "Secure" in valid.headers["set-cookie"]
+        assert tunnel.get("/web/assets/app.webmanifest").status_code == 200
+        assert tunnel.get("/v1/uploads/test/chunk-digest?offset=0&length=1").status_code == 401
         rejected = tunnel.post(
             "/v1/web/login",
             headers={"Origin": "https://attacker.invalid"},

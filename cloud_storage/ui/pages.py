@@ -159,14 +159,14 @@ class TrafficChart(QWidget):
                 round(area.bottom() - upload_height),
                 round(bar_width),
                 round(upload_height),
-                QColor(COLORS["blue"]),
+                QColor("#f2cf8b"),
             )
             painter.fillRect(
                 round(x),
                 round(area.bottom() - upload_height - download_height),
                 round(bar_width),
                 round(download_height),
-                QColor(COLORS["green"]),
+                QColor("#9cbace"),
             )
 
 
@@ -174,6 +174,10 @@ class DashboardPage(QWidget):
     setup_requested = Signal()
     remind_later_requested = Signal()
     traffic_period_changed = Signal(str)
+    connection_check_requested = Signal()
+    transfers_requested = Signal()
+    web_open_requested = Signal()
+    web_copy_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -185,8 +189,8 @@ class DashboardPage(QWidget):
         self.layout.setSpacing(18)
         self.layout.addWidget(
             make_header(
-                "Основная",
-                "Состояние менеджера, накопителей и серверного ядра.",
+                "Главная",
+                "Состояние сервера, хранилища и передач.",
             )
         )
 
@@ -219,10 +223,23 @@ class DashboardPage(QWidget):
         self.storage_readiness_label.setTextFormat(Qt.TextFormat.PlainText)
         self.storage_readiness_label.setProperty("emptyState", True)
         self.layout.addWidget(self.storage_readiness_label)
+        check_connection = QPushButton("Проверить подключение")
+        check_connection.clicked.connect(self.connection_check_requested)
+        self.web_open_button = QPushButton("Открыть веб-клиент")
+        self.web_open_button.clicked.connect(self.web_open_requested)
+        self.web_copy_button = QPushButton("Скопировать адрес")
+        self.web_copy_button.clicked.connect(self.web_copy_requested)
+        quick_actions = QHBoxLayout()
+        quick_actions.addWidget(check_connection)
+        quick_actions.addWidget(self.web_open_button)
+        quick_actions.addWidget(self.web_copy_button)
+        quick_actions.addStretch()
+        self.layout.addLayout(quick_actions)
+        self.set_web_address("")
 
         metrics = QHBoxLayout()
         metrics.setSpacing(12)
-        self.server_card = StatCard("Сервер", "Ожидает настройки", "Ядро — следующий этап")
+        self.server_card = StatCard("Сервер", "Ожидает настройки", "")
         self.storage_card = StatCard("Хранилище", "—", "Диски не обнаружены")
         self.disk_card = StatCard("Накопители", "0", "Нет данных")
         self.connection_card = StatCard("Доступ", "Локально", "Удалённый доступ выключен")
@@ -252,7 +269,6 @@ class DashboardPage(QWidget):
         )
         note.setProperty("muted", True)
         storage_layout.addWidget(note)
-        self.layout.addWidget(storage)
 
         traffic = QFrame()
         traffic.setProperty("card", True)
@@ -285,17 +301,33 @@ class DashboardPage(QWidget):
         traffic_totals.addWidget(self.traffic_downloaded)
         traffic_totals.addStretch()
         traffic_totals.addWidget(self.traffic_all_time)
-        legend = QLabel("■ Загрузка на сервер     ■ Скачивание с сервера")
-        legend.setStyleSheet(f"color: {COLORS['muted']};")
+        legend = QLabel('<span style="color:#f2cf8b">■ Загрузка</span> &nbsp; '
+                        '<span style="color:#9cbace">■ Скачивание</span>')
         self.traffic_chart = TrafficChart()
+        self.transfer_activity = QLabel("Статистика передач недоступна")
+        self.transfer_activity.setWordWrap(True)
         traffic_layout.addLayout(traffic_header)
         traffic_layout.addLayout(traffic_totals)
         traffic_layout.addWidget(self.traffic_chart)
         traffic_layout.addWidget(legend)
-        self.layout.addWidget(traffic)
+        for value in (self.traffic_uploaded, self.traffic_downloaded):
+            value.setStyleSheet("color: #f2cf8b; font-weight: 600;")
 
-        lower = QHBoxLayout()
-        lower.setSpacing(12)
+        active = QFrame()
+        active.setProperty("card", True)
+        active_layout = QVBoxLayout(active)
+        active_layout.setContentsMargins(18, 16, 18, 16)
+        active_header = QHBoxLayout()
+        active_title = QLabel("Активные передачи")
+        active_title.setObjectName("SectionTitle")
+        active_header.addWidget(active_title, 1)
+        open_transfers = QPushButton("Все передачи")
+        open_transfers.clicked.connect(self.transfers_requested)
+        active_header.addWidget(open_transfers)
+        active_layout.addLayout(active_header)
+        self.active_transfers = QVBoxLayout()
+        active_layout.addLayout(self.active_transfers)
+
         health = QFrame()
         health.setProperty("card", True)
         health_layout = QVBoxLayout(health)
@@ -306,7 +338,6 @@ class DashboardPage(QWidget):
         health_layout.addWidget(health_title)
         health_layout.addLayout(self.health_rows)
         health_layout.addStretch()
-        lower.addWidget(health, 1)
 
         activity = QFrame()
         activity.setProperty("card", True)
@@ -315,20 +346,85 @@ class DashboardPage(QWidget):
         activity_title = QLabel("Последние действия")
         activity_title.setObjectName("SectionTitle")
         self.activity_rows = QVBoxLayout()
+        activity_layout.addWidget(self.transfer_activity)
         activity_layout.addWidget(activity_title)
         activity_layout.addLayout(self.activity_rows)
         activity_layout.addStretch()
-        lower.addWidget(activity, 1)
-        self.layout.addLayout(lower)
+        self.primary_column = QWidget()
+        primary = QVBoxLayout(self.primary_column)
+        primary.setContentsMargins(0, 0, 0, 0)
+        primary.addWidget(traffic)
+        primary.addWidget(active)
+        primary.addStretch()
+        self.secondary_column = QWidget()
+        secondary = QVBoxLayout(self.secondary_column)
+        secondary.setContentsMargins(0, 0, 0, 0)
+        secondary.addWidget(activity)
+        secondary.addWidget(health)
+        secondary.addWidget(storage)
+        secondary.addStretch()
+        self.columns = QGridLayout()
+        self.columns.setSpacing(12)
+        self.columns.addWidget(self.primary_column, 0, 0)
+        self.columns.addWidget(self.secondary_column, 0, 1)
+        self.columns.setColumnStretch(0, 3)
+        self.columns.setColumnStretch(1, 2)
+        self.layout.addLayout(self.columns)
         self.layout.addStretch()
         outer.addWidget(_scroll_page(content))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt callback
+        super().resizeEvent(event)
+        if not hasattr(self, "columns"):
+            return
+        row, column = (0, 1) if event.size().width() >= 1120 else (1, 0)
+        index = self.columns.indexOf(self.secondary_column)
+        if self.columns.getItemPosition(index)[:2] != (row, column):
+            self.columns.removeWidget(self.secondary_column)
+            self.columns.addWidget(self.secondary_column, row, column)
+            self.columns.setColumnStretch(1, 2 if column else 0)
+
+    def set_web_address(self, address: str) -> None:
+        available = address.startswith("https://")
+        self.web_open_button.setEnabled(available)
+        self.web_copy_button.setEnabled(available)
+
+    def set_active_transfers(self, transfers: dict, *, online: bool) -> None:
+        clear_layout(self.active_transfers)
+        active = [
+            job for direction in ("inbound", "outbound") for job in transfers.get(direction, ())
+            if job.get("status") in {"receiving", "moving", "sending"}
+        ]
+        if not active:
+            empty = QLabel("Нет активных передач" if online else "Сервер не ответил")
+            empty.setProperty("muted", True)
+            self.active_transfers.addWidget(empty)
+        for job in active[:4]:
+            name = QLabel(str(job.get("logical_path") or "Файл"))
+            name.setTextFormat(Qt.TextFormat.PlainText)
+            name.setWordWrap(True)
+            total = max(0, int(job.get("total_bytes") or 0))
+            done = max(0, int(job.get("network_bytes") or 0))
+            state = {"receiving": "Загрузка", "moving": "Сохранение на диск", "sending": "Скачивание"}
+            detail = QLabel(
+                f"{state[job['status']]} · {format_bytes(done)} / {format_bytes(total)}"
+            )
+            detail.setProperty("muted", True)
+            progress = QProgressBar()
+            progress.setRange(0, 100)
+            progress.setValue(min(100, round(100 * done / total)) if total else 0)
+            progress.setTextVisible(False)
+            progress.setStyleSheet("QProgressBar::chunk { background: #f2cf8b; }")
+            self.active_transfers.addWidget(name)
+            self.active_transfers.addWidget(progress)
+            self.active_transfers.addWidget(detail)
 
     def set_setup_banner_visible(self, visible: bool) -> None:
         self.setup_banner.setVisible(visible)
 
     def set_storage_readiness(self, readiness: dict, *, online: bool) -> None:
         if not online:
-            text = "Ядро не запущено: возможность загрузки не проверена."
+            text = "Нет ответа от сервера. Возможность загрузки не проверена."
         elif not readiness:
             text = "⚠ Проверка хранилища недоступна. Проверьте связь с ядром и версии программ."
         elif readiness.get("ready") is True:
@@ -371,14 +467,9 @@ class DashboardPage(QWidget):
         free = sum(item.free_bytes for item in configured if item.available)
 
         if core_health:
-            uptime = int(core_health.get("uptime_seconds", 0))
-            runtime = "Go Core" if core_health.get("runtime") == "go" else "Core"
-            self.server_card.set_value(
-                "Ядро работает",
-                f"{runtime} {core_health.get('version', '—')} · {uptime // 60} мин",
-            )
+            self.server_card.set_value("Сервер отвечает", "Локальный API доступен")
         elif settings.setup_complete:
-            self.server_card.set_value("Ядро выключено", "Запускается в настройках сервера")
+            self.server_card.set_value("Нет ответа от сервера", "Проверьте запуск в настройках")
         else:
             self.server_card.set_value("Ожидает настройки", "Безопасный режим")
         self.setup_banner.setVisible(not settings.setup_complete and self.setup_banner.isVisible())
@@ -402,12 +493,27 @@ class DashboardPage(QWidget):
         if core_health:
             users = (core_summary or {}).get("users", 0)
             devices = (core_summary or {}).get("trusted_devices", 0)
-            remote = core_health.get("remote")
-            lan = core_health.get("lan")
-            access = "Удалённо · HTTPS" if remote else "LAN · HTTPS" if lan else "Только локально"
+            cloudflare = core_health.get("cloudflare") or {}
+            remote = core_health.get("remote") or {}
+            zrok = core_health.get("zrok") or {}
+            lan = core_health.get("lan") or {}
+            if cloudflare.get("enabled"):
+                access = (
+                    "Публичный HTTPS доступен"
+                    if cloudflare.get("state") == "online" and cloudflare.get("public_url")
+                    else "Публичный HTTPS не подтверждён"
+                )
+            elif zrok.get("state") == "online" and zrok.get("public_url"):
+                access = "Публичный HTTPS доступен"
+            elif remote.get("enabled"):
+                access = "Настроен публичный HTTPS"
+            elif lan.get("enabled"):
+                access = "HTTPS в локальной сети"
+            else:
+                access = "Только локально"
             self.connection_card.set_value(access, f"Пользователи: {users} · Устройства: {devices}")
         else:
-            self.connection_card.set_value("Недоступно", "Серверное ядро выключено")
+            self.connection_card.set_value("Не проверено", "Нет ответа от сервера")
 
         percent = round(used / total * 100) if total else 0
         self.storage_progress.setValue(percent)
@@ -426,6 +532,13 @@ class DashboardPage(QWidget):
         )
         self.traffic_all_time.setText(f"За всё время: {format_bytes(all_time)}")
         self.traffic_chart.set_buckets(list(traffic.get("buckets", [])))
+        activity = traffic.get("activity")
+        self.transfer_activity.setText(
+            f"Передачи · Завершено: {activity['completed']} · В работе: {activity['active']} · "
+            f"Можно продолжить: {activity['resumable']} · Отменено: {activity['cancelled']} · "
+            f"Ошибки: {activity['failed']}"
+            if activity is not None else "Статистика передач недоступна"
+        )
 
         clear_layout(self.health_rows)
         if not disks:
@@ -510,7 +623,14 @@ class DisksPage(QWidget):
 
         view_controls = QHBoxLayout()
         self.physical_view_button = QPushButton("Физические диски")
-        self.roles_view_button = QPushButton("Логические пространства")
+        self.roles_view_button = QPushButton("Логические диски")
+        for button in (self.physical_view_button, self.roles_view_button):
+            button.setStyleSheet("""
+                QPushButton { border-radius: 16px; padding: 7px 14px; }
+                QPushButton:checked { background: #f2cf8b; color: #2d2415;
+                    border-color: #f2cf8b; }
+                QPushButton:focus { border-color: #f2cf8b; }
+            """)
         self.physical_view_button.setCheckable(True)
         self.roles_view_button.setCheckable(True)
         self.physical_view_button.clicked.connect(lambda: self._set_view("physical"))
@@ -816,8 +936,6 @@ class SettingsPage(QWidget):
         self.config_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.server_state_label: QLabel | None = None
         self.connection_panel: ConnectionCodePanel | None = None
-        self.core_status_label: QLabel | None = None
-        self.core_details_label: QLabel | None = None
         self.core_start_button: QPushButton | None = None
         self.core_stop_button: QPushButton | None = None
         self.server_mode_label: QLabel | None = None
@@ -955,25 +1073,6 @@ class SettingsPage(QWidget):
         online = health is not None
         if self.connection_panel is not None:
             self.connection_panel.set_data(health, users, tunnels)
-        if self.core_status_label is not None:
-            self.core_status_label.setText("Работает" if online else "Выключено")
-            self.core_status_label.setStyleSheet(
-                "color: #43c778; font-weight: 700;" if online else "color: #949ca8;"
-            )
-        if self.core_details_label is not None:
-            if health and health.get("runtime") == "go":
-                details = (
-                    f"API {health.get('bind')} · Go runtime {health.get('supervisor_version')} · "
-                    f"совместимый API {health.get('version')}"
-                )
-            elif health:
-                details = f"API {health.get('bind')} · версия {health.get('version')}"
-            else:
-                details = (
-                    "Go-ядро запускается отдельной службой и продолжает работу после "
-                    "закрытия менеджера."
-                )
-            self.core_details_label.setText(details)
         if self.core_start_button is not None:
             self.core_start_button.setEnabled(not online)
         if self.core_stop_button is not None:
@@ -2209,20 +2308,12 @@ class SettingsPage(QWidget):
                 else "Ожидает настройки"
             )
             form.addRow("Состояние", self.server_state_label)
-            self.core_status_label = QLabel("Выключено")
-            form.addRow("Серверное ядро", self.core_status_label)
             layout.addLayout(form)
-            self.core_details_label = QLabel(
-                "Ядро запускается отдельным процессом и продолжает работу после закрытия менеджера."
-            )
-            self.core_details_label.setProperty("muted", True)
-            self.core_details_label.setWordWrap(True)
-            layout.addWidget(self.core_details_label)
             controls = QHBoxLayout()
-            self.core_start_button = QPushButton("Запустить ядро")
+            self.core_start_button = QPushButton("Запустить сервер")
             self.core_start_button.setProperty("primary", True)
             self.core_start_button.clicked.connect(self.core_start_requested)
-            self.core_stop_button = QPushButton("Остановить ядро")
+            self.core_stop_button = QPushButton("Остановить сервер")
             self.core_stop_button.setEnabled(False)
             self.core_stop_button.clicked.connect(self.core_stop_requested)
             refresh_core = QPushButton("Обновить состояние")
